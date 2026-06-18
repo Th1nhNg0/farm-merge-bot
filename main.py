@@ -1,8 +1,7 @@
-import pyautogui
 import time
 import cv2
 import numpy as np
-import heapq
+import pyautogui
 
 from dataclasses import dataclass
 from collections import Counter
@@ -31,27 +30,42 @@ REGION = (510, 200, 850, 600)
 SCREEN_X0 = REGION[0]
 SCREEN_Y0 = REGION[1]
 
+# Detection settings
 THRESHOLD = 0.70
 NMS_IOU = 0.25
 
-# Spatial graph settings
-K_NEIGHBORS = 4
-ADJ_FACTOR = 2.0
+# Cluster settings
+# A cluster is exactly one label: same item + same level.
+# Example clusters: huongduong_1, huongduong_2, bo_3.
+#
+# "compact" is the default because it makes area-like groups instead of long
+# one-cell-wide lines. It allows any visually adjacent nearby slot, then scores
+# candidate clusters by compactness.
+CLUSTER_CONNECTIVITY = "compact"  # "compact", "orthogonal", or "distance"
+
+# Compact adjacency: connect nearby visual neighbors, then choose blob-shaped
+# exact-label clusters with a compactness objective.
+COMPACT_ADJ_FACTOR = 1.90
+COMPACT_MAX_NEIGHBORS = 8
+COMPACT_SEED_TRIALS = 12
+COMPACT_CONTACT_REWARD = 2.75
+
+# Orthogonal connectivity means left/right/up/down only.
+# It is stricter, but on an isometric board it can easily make vertical or
+# horizontal lines. Keep it only for comparison.
+ORTHOGONAL_AXIS_TOL_FACTOR = 0.45
+ORTHOGONAL_MAX_STEP_FACTOR = 1.60
+ORTHOGONAL_RELAXATION_STEPS = [1.0, 1.15, 1.30]
+
+# Distance fallback retained for debugging/comparison.
+DISTANCE_CLUSTER_FACTOR = 1.35
+DISTANCE_CLUSTER_NEIGHBORS = 4
 
 # Swap settings
 DRY_RUN = False
 MAX_SWAPS = 80
 DRAG_DURATION = 0.05
 AFTER_SWAP_DELAY = 0.05
-
-# Drawing settings
-SHOW_WINDOW = False
-DRAW_ARROWS = True
-MAX_DRAWN_ARROWS = 15
-
-# Level ordering inside each item group.
-# True usually produces shorter swaps.
-ORDER_LEVELS_BY_CURRENT_POSITION = True
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
@@ -86,7 +100,6 @@ class Detection:
 
 def detect_all_items(screenshot_img):
     screenshot_hsv = cv2.cvtColor(screenshot_img, cv2.COLOR_BGR2HSV)
-
     detections = []
 
     for item in items:
@@ -102,7 +115,9 @@ def detect_all_items(screenshot_img):
             th, tw = template_hsv.shape[:2]
 
             result = cv2.matchTemplate(
-                screenshot_hsv, template_hsv, cv2.TM_CCOEFF_NORMED
+                screenshot_hsv,
+                template_hsv,
+                cv2.TM_CCOEFF_NORMED,
             )
 
             local_max = result == cv2.dilate(result, np.ones((3, 3), np.uint8))
@@ -126,9 +141,7 @@ def detect_all_items(screenshot_img):
 
 
 def nms_detections(detections):
-    """
-    Removes duplicate overlapping detections globally.
-    """
+    """Removes duplicate overlapping detections globally."""
     if not detections:
         return []
 
@@ -136,7 +149,10 @@ def nms_detections(detections):
     scores = [d.score for d in detections]
 
     indices = cv2.dnn.NMSBoxes(
-        boxes, scores, score_threshold=0.0, nms_threshold=NMS_IOU
+        boxes,
+        scores,
+        score_threshold=0.0,
+        nms_threshold=NMS_IOU,
     )
 
     if len(indices) == 0:
@@ -146,13 +162,7 @@ def nms_detections(detections):
     return [detections[i] for i in indices]
 
 
-# ---------------- basic geometry ----------------
-
-
-def euclidean(a, b):
-    ax, ay = a
-    bx, by = b
-    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+# ---------------- geometry ----------------
 
 
 def pairwise_distance_matrix(slots):
@@ -164,62 +174,11 @@ def pairwise_distance_matrix(slots):
 def stable_sort_slots(detections):
     """
     Gives stable slot indices from top-to-bottom, left-to-right.
-    The cluster algorithm itself still uses true 2D distance.
+
+    The cluster algorithm still uses true 2D geometry; this ordering only makes
+    swap planning and console logs deterministic.
     """
     return sorted(detections, key=lambda d: (d.center[1], d.center[0]))
-
-
-# ---------------- spatial graph ----------------
-
-
-def build_spatial_graph(slots):
-    """
-    Builds a nearby-slot graph.
-
-    Each slot connects to several nearby slots. This gives us a notion of
-    local adjacency without requiring a perfect rectangular grid.
-    """
-    n = len(slots)
-    dist = pairwise_distance_matrix(slots)
-
-    if n <= 1:
-        return [set() for _ in range(n)], dist, 1.0
-
-    nearest_distances = []
-
-    for i in range(n):
-        vals = [dist[i, j] for j in range(n) if j != i]
-        nearest_distances.append(min(vals))
-
-    median_nn = float(np.median(nearest_distances))
-    max_edge = median_nn * ADJ_FACTOR
-
-    adj = [set() for _ in range(n)]
-
-    for i in range(n):
-        order = np.argsort(dist[i])
-        added = 0
-
-        for j in order:
-            j = int(j)
-
-            if i == j:
-                continue
-
-            # Always keep at least a couple of neighbors,
-            # but avoid connecting very distant objects too aggressively.
-            if dist[i, j] <= max_edge or added < 2:
-                adj[i].add(j)
-                adj[j].add(i)
-                added += 1
-
-            if added >= K_NEIGHBORS:
-                break
-
-    return adj, dist, median_nn
-
-
-# ---------------- cluster allocation ----------------
 
 
 def centroid_of_indices(slots, indices):
@@ -231,214 +190,514 @@ def centroid_of_indices(slots, indices):
     return np.median(pts, axis=0)
 
 
-def choose_seed(slots, available, current_item_indices, target_point, dist, median_nn):
-    """
-    Chooses a seed slot for an item-type cluster.
+def median_nearest_neighbor_distance(dist):
+    n = dist.shape[0]
 
-    It prefers:
-    1. slots near where that item type already exists;
-    2. slots surrounded by the same item type.
-    """
-    same_set = set(current_item_indices)
-    n = len(slots)
+    if n <= 1:
+        return 1.0
 
-    best_i = None
+    nearest = []
+
+    for i in range(n):
+        vals = [float(dist[i, j]) for j in range(n) if j != i]
+        nearest.append(min(vals))
+
+    return float(np.median(nearest))
+
+
+# ---------------- cluster graph ----------------
+
+
+def orthogonal_edge_type(slots, i, j, axis_tol, max_step):
+    xi, yi = slots[i].center
+    xj, yj = slots[j].center
+
+    dx = abs(xi - xj)
+    dy = abs(yi - yj)
+
+    if dx == 0 and dy == 0:
+        return None
+
+    # Same inferred row: left/right edge only.
+    if dy <= axis_tol and 0 < dx <= max_step:
+        return "horizontal"
+
+    # Same inferred column: up/down edge only.
+    if dx <= axis_tol and 0 < dy <= max_step:
+        return "vertical"
+
+    return None
+
+
+def build_orthogonal_adjacency(slots, indices, dist, median_nn, relaxation=1.0):
+    """
+    Builds a strict four-neighbor graph for cluster allocation.
+
+    A slot connects only to the nearest valid left, right, up, and down
+    neighbor. Diagonal-only proximity is not accepted.
+    """
+    idxs = list(indices)
+    adj = {i: set() for i in idxs}
+
+    if len(idxs) <= 1:
+        return adj
+
+    median_w = float(np.median([slots[i].w for i in idxs]))
+    median_h = float(np.median([slots[i].h for i in idxs]))
+
+    axis_tol = max(8.0, max(median_w, median_h) * ORTHOGONAL_AXIS_TOL_FACTOR)
+    axis_tol *= relaxation
+
+    max_step = max(median_nn * ORTHOGONAL_MAX_STEP_FACTOR, max(median_w, median_h))
+    max_step *= relaxation
+
+    for i in idxs:
+        xi, yi = slots[i].center
+
+        candidates_by_direction = {
+            "left": [],
+            "right": [],
+            "up": [],
+            "down": [],
+        }
+
+        for j in idxs:
+            if i == j:
+                continue
+
+            edge_type = orthogonal_edge_type(slots, i, j, axis_tol, max_step)
+
+            if edge_type is None:
+                continue
+
+            xj, yj = slots[j].center
+
+            if edge_type == "horizontal":
+                direction = "left" if xj < xi else "right"
+            else:
+                direction = "up" if yj < yi else "down"
+
+            candidates_by_direction[direction].append(j)
+
+        for candidates in candidates_by_direction.values():
+            if not candidates:
+                continue
+
+            nearest = min(candidates, key=lambda j: float(dist[i, j]))
+            adj[i].add(nearest)
+            adj[nearest].add(i)
+
+    return adj
+
+
+def build_distance_adjacency(indices, dist, median_nn, relaxation=1.0):
+    """
+    Optional non-orthogonal graph, retained for comparison.
+
+    The default code path does not use this unless CLUSTER_CONNECTIVITY is set
+    to "distance".
+    """
+    idxs = list(indices)
+    adj = {i: set() for i in idxs}
+
+    if len(idxs) <= 1:
+        return adj
+
+    max_edge = median_nn * DISTANCE_CLUSTER_FACTOR * relaxation
+
+    for i in idxs:
+        candidates = [j for j in idxs if j != i and dist[i, j] <= max_edge]
+        candidates.sort(key=lambda j: float(dist[i, j]))
+
+        if not candidates:
+            nearest = min((j for j in idxs if j != i), key=lambda j: float(dist[i, j]))
+            candidates = [nearest]
+
+        for j in candidates[:DISTANCE_CLUSTER_NEIGHBORS]:
+            adj[i].add(j)
+            adj[j].add(i)
+
+    return adj
+
+
+def build_compact_adjacency(indices, dist, median_nn, relaxation=1.0):
+    """
+    Builds a visual-neighbor graph for compact blob clustering.
+
+    This is less axis-restricted than orthogonal adjacency. It is usually a
+    better model for isometric boards because visually adjacent cells often do
+    not share exactly the same x or y coordinate.
+    """
+    idxs = list(indices)
+    adj = {i: set() for i in idxs}
+
+    if len(idxs) <= 1:
+        return adj
+
+    max_edge = median_nn * COMPACT_ADJ_FACTOR * relaxation
+
+    for i in idxs:
+        candidates = [j for j in idxs if j != i and dist[i, j] <= max_edge]
+        candidates.sort(key=lambda j: float(dist[i, j]))
+
+        if not candidates:
+            nearest = min((j for j in idxs if j != i), key=lambda j: float(dist[i, j]))
+            candidates = [nearest]
+
+        for j in candidates[:COMPACT_MAX_NEIGHBORS]:
+            adj[i].add(j)
+            adj[j].add(i)
+
+    return adj
+
+
+def build_cluster_adjacency(slots, indices, dist, median_nn, relaxation=1.0):
+    if CLUSTER_CONNECTIVITY == "compact":
+        return build_compact_adjacency(
+            indices=indices,
+            dist=dist,
+            median_nn=median_nn,
+            relaxation=relaxation,
+        )
+
+    if CLUSTER_CONNECTIVITY == "orthogonal":
+        return build_orthogonal_adjacency(
+            slots=slots,
+            indices=indices,
+            dist=dist,
+            median_nn=median_nn,
+            relaxation=relaxation,
+        )
+
+    if CLUSTER_CONNECTIVITY == "distance":
+        return build_distance_adjacency(
+            indices=indices,
+            dist=dist,
+            median_nn=median_nn,
+            relaxation=relaxation,
+        )
+
+    raise ValueError(
+        "CLUSTER_CONNECTIVITY must be 'compact', 'orthogonal', or 'distance'"
+    )
+
+
+def connected_components(indices, adj):
+    remaining = set(indices)
+    components = []
+
+    while remaining:
+        start = next(iter(remaining))
+        stack = [start]
+        component = set()
+
+        while stack:
+            i = stack.pop()
+
+            if i in component:
+                continue
+
+            component.add(i)
+            remaining.discard(i)
+
+            for nb in adj.get(i, set()):
+                if nb in remaining and nb not in component:
+                    stack.append(nb)
+
+        components.append(component)
+
+    return components
+
+
+# ---------------- label-cluster allocation ----------------
+
+
+def label_seed_score(
+    slots, i, current_label_indices, target_point, adj, dist, median_nn
+):
+    """
+    Scores a possible cluster seed.
+
+    A good seed is close to where the label already exists, has several nearby
+    free neighbors, and is already occupied by the same label when possible.
+    """
+    same_set = set(current_label_indices)
+    center = np.array(slots[i].center, dtype=np.float32)
+
+    score = float(np.linalg.norm(center - target_point))
+
+    if i in same_set:
+        score -= median_nn * 0.90
+
+    same_nearby = sum(1 for nb in adj.get(i, set()) if nb in same_set)
+    degree = len(adj.get(i, set()))
+
+    score -= median_nn * 0.50 * same_nearby
+    score -= median_nn * 0.25 * degree
+
+    return score
+
+
+def choose_seed(
+    slots, available, current_label_indices, target_point, adj, dist, median_nn
+):
+    available = list(available)
+
+    if not available:
+        return None
+
+    return min(
+        available,
+        key=lambda i: label_seed_score(
+            slots=slots,
+            i=i,
+            current_label_indices=current_label_indices,
+            target_point=target_point,
+            adj=adj,
+            dist=dist,
+            median_nn=median_nn,
+        ),
+    )
+
+
+def choose_seed_candidates(
+    slots,
+    available,
+    current_label_indices,
+    target_point,
+    adj,
+    dist,
+    median_nn,
+    limit=COMPACT_SEED_TRIALS,
+):
+    """
+    Returns several plausible seeds.
+
+    Trying multiple seeds matters because a single greedy seed can produce a
+    thin line even when a better blob-shaped cluster exists nearby.
+    """
+    ranked = sorted(
+        list(available),
+        key=lambda i: label_seed_score(
+            slots=slots,
+            i=i,
+            current_label_indices=current_label_indices,
+            target_point=target_point,
+            adj=adj,
+            dist=dist,
+            median_nn=median_nn,
+        ),
+    )
+
+    return ranked[: max(1, min(limit, len(ranked)))]
+
+
+def choose_best_component(
+    slots, components, current_label_indices, target_point, median_nn
+):
+    same_set = set(current_label_indices)
+
+    best_component = None
     best_score = float("inf")
 
-    for i in available:
-        center = np.array(slots[i].center, dtype=np.float32)
-        d_to_target = float(np.linalg.norm(center - target_point))
+    for component in components:
+        component = set(component)
+        component_center = centroid_of_indices(slots, list(component))
+        d_to_target = float(np.linalg.norm(component_center - target_point))
+        same_inside = sum(1 for i in component if i in same_set)
 
-        nearest = np.argsort(dist[i])[: min(10, n)]
-        same_nearby = sum(1 for j in nearest if int(j) in same_set)
-
-        score = d_to_target
-
-        # Reward positions already occupied by this type.
-        if i in same_set:
-            score -= median_nn * 0.80
-
-        # Reward neighborhoods that already contain this type.
-        score -= median_nn * 0.40 * same_nearby
+        score = d_to_target - median_nn * 0.80 * same_inside
 
         if score < best_score:
             best_score = score
-            best_i = i
+            best_component = component
 
-    return best_i
+    return best_component
 
 
-def grow_compact_cluster(seed, size, available, adj, dist):
+def compactness_score(
+    slots, cluster, adj, dist, target_point, current_label_indices, median_nn
+):
     """
-    Grows a compact connected cluster from a seed.
+    Lower is better.
 
-    The cluster is exact-size, so if an item type has 17 objects,
-    it receives exactly 17 target slots.
+    This penalizes long, line-like clusters by measuring radius and diameter.
+    It rewards internal contacts so a 2D blob beats a one-cell-wide chain.
     """
-    if size <= 0:
-        return []
+    if not cluster:
+        return float("inf")
 
-    if seed is None:
+    cluster = list(cluster)
+    cluster_set = set(cluster)
+    pts = np.array([slots[i].center for i in cluster], dtype=np.float32)
+
+    centroid = np.median(pts, axis=0)
+    target_distance = float(np.linalg.norm(centroid - target_point))
+
+    radius = float(np.mean(np.linalg.norm(pts - centroid, axis=1)))
+
+    if len(cluster) > 1:
+        sub = dist[np.ix_(cluster, cluster)]
+        diameter = float(np.max(sub))
+    else:
+        diameter = 0.0
+
+    internal_edges = 0
+    for i in cluster:
+        internal_edges += sum(1 for nb in adj.get(i, set()) if nb in cluster_set)
+    internal_edges //= 2
+
+    same_set = set(current_label_indices)
+    same_inside = sum(1 for i in cluster if i in same_set)
+
+    return (
+        0.40 * target_distance
+        + 0.35 * radius
+        + 0.25 * diameter
+        - COMPACT_CONTACT_REWARD * median_nn * internal_edges
+        - 0.65 * median_nn * same_inside
+    )
+
+
+def grow_compact_blob(seed, size, available, adj, dist, slots, target_point, median_nn):
+    """
+    Grows a connected, compact cluster.
+
+    The key difference from the older function is that frontier slots with more
+    contacts to the current cluster are preferred. That prevents the allocator
+    from making a long line when a blob-shaped expansion is available.
+    """
+    if size <= 0 or seed is None:
         return []
 
     available = set(available)
 
-    cluster = []
-    cluster_set = set()
+    if seed not in available:
+        return []
 
-    heap = []
-    heapq.heappush(heap, (0.0, seed))
+    cluster = [seed]
+    cluster_set = {seed}
 
-    while heap and len(cluster) < size:
-        _, i = heapq.heappop(heap)
-
-        if i not in available:
-            continue
-
-        if i in cluster_set:
-            continue
-
-        cluster.append(i)
-        cluster_set.add(i)
-
-        for nb in adj[i]:
-            if nb in available and nb not in cluster_set:
-                priority = float(dist[seed, nb])
-                heapq.heappush(heap, (priority, nb))
-
-    # Fallback: if graph growth could not fill the group,
-    # add nearest remaining available slots.
     while len(cluster) < size:
-        remaining = [i for i in available if i not in cluster_set]
+        frontier = set()
 
-        if not remaining:
+        for c in cluster:
+            for nb in adj.get(c, set()):
+                if nb in available and nb not in cluster_set:
+                    frontier.add(nb)
+
+        if not frontier:
             break
 
-        if cluster_set:
-            best = min(
-                remaining, key=lambda r: min(float(dist[r, c]) for c in cluster_set)
-            )
-        else:
-            best = min(remaining, key=lambda r: float(dist[seed, r]))
+        def candidate_cost(i):
+            proposed = cluster + [i]
+            proposed_set = set(proposed)
 
+            pts = np.array([slots[j].center for j in proposed], dtype=np.float32)
+            centroid = np.median(pts, axis=0)
+
+            target_distance = float(np.linalg.norm(centroid - target_point))
+            radius = float(np.mean(np.linalg.norm(pts - centroid, axis=1)))
+
+            if len(proposed) > 1:
+                sub = dist[np.ix_(proposed, proposed)]
+                diameter = float(np.max(sub))
+            else:
+                diameter = 0.0
+
+            contacts = sum(1 for nb in adj.get(i, set()) if nb in cluster_set)
+
+            # Negative contact term is deliberate: a candidate that touches
+            # several existing cluster slots makes a 2D patch, not a line.
+            return (
+                0.30 * target_distance
+                + 0.30 * radius
+                + 0.20 * diameter
+                + 0.20 * float(dist[seed, i])
+                - COMPACT_CONTACT_REWARD * median_nn * contacts
+            )
+
+        best = min(frontier, key=candidate_cost)
         cluster.append(best)
         cluster_set.add(best)
 
     return cluster
 
 
-def sort_indices_adjacent_path(slots, indices):
+def choose_compact_cluster(
+    slots,
+    size,
+    candidate_area,
+    current_label_indices,
+    target_point,
+    adj,
+    dist,
+    median_nn,
+):
     """
-    Orders a cluster internally using a local snake path.
-
-    This is used only inside one compact cluster, not across the whole board.
+    Chooses the best exact-size connected cluster among several seed trials.
     """
-    indices = list(indices)
+    if size <= 0:
+        return []
 
-    if len(indices) <= 1:
-        return indices
+    candidate_area = set(candidate_area)
 
-    median_h = np.median([slots[i].h for i in indices])
-    row_tol = max(12, median_h * 0.70)
+    if not candidate_area:
+        return []
 
-    rows = []
+    seeds = choose_seed_candidates(
+        slots=slots,
+        available=candidate_area,
+        current_label_indices=current_label_indices,
+        target_point=target_point,
+        adj=adj,
+        dist=dist,
+        median_nn=median_nn,
+    )
 
-    for idx in sorted(indices, key=lambda i: slots[i].center[1]):
-        _, cy = slots[idx].center
-        placed = False
+    best_cluster = []
+    best_score = float("inf")
 
-        for row in rows:
-            if abs(cy - row["y"]) <= row_tol:
-                row["items"].append(idx)
-                row["y"] = np.mean([slots[j].center[1] for j in row["items"]])
-                placed = True
-                break
+    for seed in seeds:
+        cluster = grow_compact_blob(
+            seed=seed,
+            size=min(size, len(candidate_area)),
+            available=candidate_area,
+            adj=adj,
+            dist=dist,
+            slots=slots,
+            target_point=target_point,
+            median_nn=median_nn,
+        )
 
-        if not placed:
-            rows.append({"y": cy, "items": [idx]})
+        score = compactness_score(
+            slots=slots,
+            cluster=cluster,
+            adj=adj,
+            dist=dist,
+            target_point=target_point,
+            current_label_indices=current_label_indices,
+            median_nn=median_nn,
+        )
 
-    rows.sort(key=lambda r: r["y"])
+        if len(cluster) == size and score < best_score:
+            best_score = score
+            best_cluster = cluster
 
-    ordered = []
-    previous_idx = None
+        # Keep the best partial cluster as a fallback.
+        if not best_cluster and score < best_score:
+            best_score = score
+            best_cluster = cluster
 
-    for row in rows:
-        left_to_right = sorted(row["items"], key=lambda i: slots[i].center[0])
-        right_to_left = list(reversed(left_to_right))
-
-        if previous_idx is None:
-            chosen = left_to_right
-        else:
-            prev_center = slots[previous_idx].center
-
-            dist_ltr = euclidean(prev_center, slots[left_to_right[0]].center)
-            dist_rtl = euclidean(prev_center, slots[right_to_left[0]].center)
-
-            chosen = left_to_right if dist_ltr <= dist_rtl else right_to_left
-
-        ordered.extend(chosen)
-        previous_idx = chosen[-1]
-
-    return ordered
+    return best_cluster
 
 
-def choose_level_order_for_item(item, block_path, slots, counts, dist):
+def make_label_clustered_target_labels(slots, dist, median_nn):
     """
-    Chooses the level order inside an item-type block.
+    Produces target labels aligned with slot indices.
 
-    Example:
-        bo_2 bo_2 bo_2 bo_1 bo_1 bo_3
-
-    is allowed if level 2 is already closer to the beginning of the block.
-    This generally reduces swap distance.
-
-    If you want strict 1, 2, 3 order, set:
-        ORDER_LEVELS_BY_CURRENT_POSITION = False
-    """
-    present_levels = [level for level in levels if counts[f"{item}_{level}"] > 0]
-
-    if not ORDER_LEVELS_BY_CURRENT_POSITION:
-        return present_levels
-
-    block_rank = {idx: rank for rank, idx in enumerate(block_path)}
-
-    scores = {}
-
-    for level in present_levels:
-        label = f"{item}_{level}"
-        current_indices = [i for i, d in enumerate(slots) if d.label == label]
-
-        projected_ranks = []
-
-        for ci in current_indices:
-            nearest_block_idx = min(block_path, key=lambda b: float(dist[ci, b]))
-            projected_ranks.append(block_rank[nearest_block_idx])
-
-        if projected_ranks:
-            scores[level] = float(np.median(projected_ranks))
-        else:
-            scores[level] = 999999.0
-
-    return sorted(present_levels, key=lambda level: scores[level])
-
-
-def make_clustered_target_labels(slots, adj, dist, median_nn):
-    """
-    Produces target_labels aligned with slot indices.
-
-    The final arrangement is spatially clustered:
-
-        [bo group]
-            [bo_1 subgroup]
-            [bo_2 subgroup]
-            [bo_3 subgroup]
-
-        [carot group]
-            [carot_1 subgroup]
-            [carot_2 subgroup]
-            [carot_3 subgroup]
-
-    This is better than a single global snake order.
+    There is no parent item cluster and no mini cluster. Each cluster is exactly
+    one label: same item and same level.
     """
     n = len(slots)
     current_labels = [d.label for d in slots]
@@ -447,81 +706,143 @@ def make_clustered_target_labels(slots, adj, dist, median_nn):
     target_labels = [None] * n
     available = set(range(n))
 
-    item_indices = {}
-    item_sizes = {}
+    label_indices = {
+        label: [i for i, d in enumerate(slots) if d.label == label]
+        for label in sorted(counts.keys())
+    }
 
-    for item in items:
-        idxs = [i for i, d in enumerate(slots) if d.item == item]
-        size = len(idxs)
-
-        if size > 0:
-            item_indices[item] = idxs
-            item_sizes[item] = size
-
-    present_items = list(item_indices.keys())
-
-    # Allocate larger groups first, because large compact groups are harder
-    # to fit after small groups fragment the board.
-    present_items.sort(
-        key=lambda item: (
-            -item_sizes[item],
-            centroid_of_indices(slots, item_indices[item])[1],
-            centroid_of_indices(slots, item_indices[item])[0],
-        )
+    # Large exact-label clusters are allocated first because they are harder to
+    # fit after small groups fragment the board.
+    present_labels = sorted(
+        label_indices.keys(),
+        key=lambda label: (
+            -len(label_indices[label]),
+            centroid_of_indices(slots, label_indices[label])[1],
+            centroid_of_indices(slots, label_indices[label])[0],
+            label,
+        ),
     )
 
-    blocks = {}
+    clusters = {}
 
-    for item in present_items:
-        size = item_sizes[item]
-        current_idxs = item_indices[item]
+    for label in present_labels:
+        amount = counts[label]
+        current_idxs = label_indices[label]
         target_point = centroid_of_indices(slots, current_idxs)
 
-        seed = choose_seed(
+        if amount >= len(available):
+            cluster = list(available)
+            clusters[label] = cluster
+
+            for slot_idx in cluster:
+                target_labels[slot_idx] = label
+
+            available.clear()
+            continue
+
+        chosen_adj = None
+        components = []
+        enough_components = []
+        used_relaxation = ORTHOGONAL_RELAXATION_STEPS[-1]
+
+        for relaxation in ORTHOGONAL_RELAXATION_STEPS:
+            chosen_adj = build_cluster_adjacency(
+                slots=slots,
+                indices=available,
+                dist=dist,
+                median_nn=median_nn,
+                relaxation=relaxation,
+            )
+
+            components = connected_components(available, chosen_adj)
+            enough_components = [comp for comp in components if len(comp) >= amount]
+            used_relaxation = relaxation
+
+            if enough_components:
+                break
+
+        if enough_components:
+            candidate_area = choose_best_component(
+                slots=slots,
+                components=enough_components,
+                current_label_indices=current_idxs,
+                target_point=target_point,
+                median_nn=median_nn,
+            )
+        else:
+            candidate_area = (
+                set(max(components, key=len)) if components else set(available)
+            )
+
+            print(
+                f"Warning: {label} needs {amount} slots, but the largest "
+                f"{CLUSTER_CONNECTIVITY} component has {len(candidate_area)} slots. "
+                f"Relaxation={used_relaxation}."
+            )
+
+        cluster = choose_compact_cluster(
             slots=slots,
-            available=available,
-            current_item_indices=current_idxs,
+            size=min(amount, len(candidate_area)),
+            candidate_area=candidate_area,
+            current_label_indices=current_idxs,
             target_point=target_point,
+            adj=chosen_adj,
             dist=dist,
             median_nn=median_nn,
         )
 
-        block = grow_compact_cluster(
-            seed=seed, size=size, available=available, adj=adj, dist=dist
-        )
+        # Last-resort defensive fill. If this happens, the available geometry
+        # could not produce an exact connected compact cluster for this label.
+        while len(cluster) < amount:
+            remaining = [i for i in available if i not in set(cluster)]
 
-        blocks[item] = block
-        available -= set(block)
+            if not remaining:
+                break
 
-    # Assign level subgroups inside each item-type block.
-    for item in present_items:
-        block = blocks[item]
-        block_path = sort_indices_adjacent_path(slots, block)
+            if cluster:
+                extra = min(
+                    remaining,
+                    key=lambda r: min(float(dist[r, c]) for c in cluster),
+                )
+            else:
+                extra = min(
+                    remaining,
+                    key=lambda r: float(
+                        np.linalg.norm(
+                            np.array(slots[r].center, dtype=np.float32) - target_point
+                        )
+                    ),
+                )
 
-        level_order = choose_level_order_for_item(
-            item=item, block_path=block_path, slots=slots, counts=counts, dist=dist
-        )
+            cluster.append(extra)
 
-        pos = 0
+        clusters[label] = cluster
 
-        for level in level_order:
-            label = f"{item}_{level}"
-            amount = counts[label]
+        for slot_idx in cluster:
+            target_labels[slot_idx] = label
 
-            for _ in range(amount):
-                if pos >= len(block_path):
-                    break
+        available -= set(cluster)
 
-                slot_idx = block_path[pos]
-                target_labels[slot_idx] = label
-                pos += 1
-
-    # Defensive fallback.
     for i in range(n):
         if target_labels[i] is None:
             target_labels[i] = current_labels[i]
 
-    return target_labels, blocks
+    return target_labels, clusters
+
+
+def cluster_is_connected(slots, indices, dist, median_nn):
+    if len(indices) <= 1:
+        return True
+
+    adj = build_cluster_adjacency(
+        slots=slots,
+        indices=indices,
+        dist=dist,
+        median_nn=median_nn,
+        relaxation=1.0,
+    )
+
+    return len(connected_components(indices, adj)) <= 1
 
 
 # ---------------- swap planning ----------------
@@ -529,11 +850,7 @@ def make_clustered_target_labels(slots, adj, dist, median_nn):
 
 def plan_swaps_nearest(slots, current_labels, target_labels, dist):
     """
-    Plans swaps.
-
-    Important difference from the earlier version:
-    when a target slot needs a label, this chooses the nearest later slot
-    containing that label, instead of the first slot in list order.
+    Plans swaps by filling target slots from nearest matching later slots.
     """
     current = current_labels[:]
     swaps = []
@@ -552,11 +869,9 @@ def plan_swaps_nearest(slots, current_labels, target_labels, dist):
         def candidate_cost(j):
             cost = float(dist[i, j])
 
-            # Avoid moving an already-correct item unless necessary.
             if current[j] == target_labels[j]:
                 cost += 10000.0
 
-            # Prefer direct two-way correction.
             if target_labels[j] == current[i]:
                 cost -= 500.0
 
@@ -576,82 +891,6 @@ def plan_swaps_nearest(slots, current_labels, target_labels, dist):
         current[i], current[j] = current[j], current[i]
 
     return swaps
-
-
-# ---------------- visualization ----------------
-
-
-def draw_plan(
-    img, slots, current_labels, target_labels, swaps, blocks, path="plan.png"
-):
-    debug = img.copy()
-
-    palette = [
-        (0, 255, 0),
-        (0, 165, 255),
-        (255, 0, 255),
-        (255, 255, 0),
-        (255, 0, 0),
-        (0, 255, 255),
-        (180, 120, 255),
-        (120, 255, 180),
-        (255, 180, 120),
-        (180, 255, 120),
-    ]
-
-    item_to_color = {}
-
-    for k, item in enumerate(blocks.keys()):
-        item_to_color[item] = palette[k % len(palette)]
-
-    # Draw cluster targets.
-    for item, indices in blocks.items():
-        color = item_to_color[item]
-
-        for idx in indices:
-            d = slots[idx]
-            x, y, w, h = d.x, d.y, d.w, d.h
-
-            correct = current_labels[idx] == target_labels[idx]
-
-            cv2.rectangle(debug, (x, y), (x + w, y + h), color, 2)
-
-            text = f"{idx}:{current_labels[idx]}->{target_labels[idx]}"
-            cv2.putText(
-                debug,
-                text,
-                (x, max(12, y - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                color if not correct else (0, 255, 0),
-                1,
-                cv2.LINE_AA,
-            )
-
-    # Draw only first N arrows; drawing every arrow becomes unreadable.
-    if DRAW_ARROWS:
-        for k, s in enumerate(swaps[:MAX_DRAWN_ARROWS], start=1):
-            src = slots[s["from_slot"]].center
-            dst = slots[s["to_slot"]].center
-
-            cv2.arrowedLine(debug, src, dst, (255, 0, 255), 2, tipLength=0.25)
-
-            mx = (src[0] + dst[0]) // 2
-            my = (src[1] + dst[1]) // 2
-
-            cv2.putText(
-                debug,
-                str(k),
-                (mx, my),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
-    cv2.imwrite(path, debug)
-    print(f"Saved plan image: {path}")
 
 
 # ---------------- mouse actions ----------------
@@ -675,17 +914,17 @@ def execute_swaps(slots, swaps):
     Assumption:
         Dragging item A onto item B swaps their positions.
     """
-    for k, s in enumerate(swaps[:MAX_SWAPS], start=1):
-        src_slot = s["from_slot"]
-        dst_slot = s["to_slot"]
+    for k, swap in enumerate(swaps[:MAX_SWAPS], start=1):
+        src_slot = swap["from_slot"]
+        dst_slot = swap["to_slot"]
 
         src_xy = slots[src_slot].screen_center
         dst_xy = slots[dst_slot].screen_center
 
         print(
             f"Swap {k}: "
-            f"{s['moving_label']} from slot {src_slot} "
-            f"to slot {dst_slot}, replacing {s['replaced_label']}"
+            f"{swap['moving_label']} from slot {src_slot} "
+            f"to slot {dst_slot}, replacing {swap['replaced_label']}"
         )
 
         drag_swap(src_xy, dst_xy)
@@ -698,11 +937,8 @@ def execute_swaps(slots, swaps):
 def main():
     time.sleep(1)
 
-    im = pyautogui.screenshot(region=REGION)
-    im.save("screenshot.png")
-
-    screenshot_img = cv2.imread("screenshot.png", cv2.IMREAD_COLOR)
-    assert screenshot_img is not None, "Failed to load screenshot.png"
+    screenshot = pyautogui.screenshot(region=REGION)
+    screenshot_img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
     detections = detect_all_items(screenshot_img)
 
@@ -713,13 +949,15 @@ def main():
         return
 
     slots = stable_sort_slots(detections)
-
     current_labels = [d.label for d in slots]
 
-    adj, dist, median_nn = build_spatial_graph(slots)
+    dist = pairwise_distance_matrix(slots)
+    median_nn = median_nearest_neighbor_distance(dist)
 
-    target_labels, blocks = make_clustered_target_labels(
-        slots=slots, adj=adj, dist=dist, median_nn=median_nn
+    target_labels, clusters = make_label_clustered_target_labels(
+        slots=slots,
+        dist=dist,
+        median_nn=median_nn,
     )
 
     swaps = plan_swaps_nearest(
@@ -731,36 +969,28 @@ def main():
 
     print(f"Planned {len(swaps)} swaps.")
 
-    print("\nItem clusters:")
-    for item, indices in blocks.items():
-        labels_inside = Counter(target_labels[i] for i in indices)
-        print(f"{item}: {len(indices)} slots -> {dict(labels_inside)}")
-
-    print("\nSwap plan:")
-    for i, s in enumerate(swaps[:MAX_SWAPS], start=1):
+    print("\nLabel clusters:")
+    for label, indices in clusters.items():
+        connected = cluster_is_connected(
+            slots=slots,
+            indices=indices,
+            dist=dist,
+            median_nn=median_nn,
+        )
         print(
-            f"{i}. slot {s['from_slot']} -> slot {s['to_slot']} | "
-            f"{s['moving_label']} swaps with {s['replaced_label']}"
+            f"{label}: {len(indices)} slots -> {indices} | "
+            f"{CLUSTER_CONNECTIVITY}_connected={connected}"
         )
 
-    draw_plan(
-        img=screenshot_img,
-        slots=slots,
-        current_labels=current_labels,
-        target_labels=target_labels,
-        swaps=swaps,
-        blocks=blocks,
-        path="plan.png",
-    )
-
-    if SHOW_WINDOW:
-        preview = cv2.imread("plan.png", cv2.IMREAD_COLOR)
-        cv2.imshow("Clustered Swap Plan", preview)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    print("\nSwap plan:")
+    for i, swap in enumerate(swaps[:MAX_SWAPS], start=1):
+        print(
+            f"{i}. slot {swap['from_slot']} -> slot {swap['to_slot']} | "
+            f"{swap['moving_label']} swaps with {swap['replaced_label']}"
+        )
 
     if DRY_RUN:
-        print("\nDRY_RUN is True. Inspect plan.png before enabling real dragging.")
+        print("\nDRY_RUN is True. No mouse actions were executed.")
         return
 
     execute_swaps(slots, swaps)
