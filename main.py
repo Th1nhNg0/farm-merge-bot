@@ -3,9 +3,7 @@ import time
 import cv2
 import numpy as np
 
-pyautogui.displayMousePosition()
 
-exit()
 items = [
     "bo",
     "carot",
@@ -19,8 +17,8 @@ items = [
     "bap",
 ]
 
-time.sleep(2)
-iml = pyautogui.screenshot(region=(384, 203, 1380, 775))
+time.sleep(1)
+iml = pyautogui.screenshot(region=(396, 206, 970, 570))
 iml.save("screenshot.png")
 
 screenshoot_img = cv2.imread("screenshot.png", cv2.IMREAD_GRAYSCALE)
