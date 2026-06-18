@@ -60,7 +60,8 @@ for item in items:
                 1,
                 cv2.LINE_AA,
             )
-
+# save img
+cv2.imwrite("after.png", screenshoot_img)
 cv2.imshow("Detected Items", screenshoot_img)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
