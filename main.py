@@ -3,16 +3,28 @@ import time
 import cv2
 import numpy as np
 
+pyautogui.displayMousePosition()
 
-items = ["bo", "carot", "daunanh", "ga", "heo", "huongduong", "luami", "mia"]
+exit()
+items = [
+    "bo",
+    "carot",
+    "daunanh",
+    "ga",
+    "heo",
+    "huongduong",
+    "luami",
+    "mia",
+    "de",
+    "bap",
+]
 
-# time.sleep(2)
-# iml = pyautogui.screenshot(region=(316, 158, 1602, 752))
-# iml.save("screenshot.png")
+time.sleep(2)
+iml = pyautogui.screenshot(region=(384, 203, 1380, 775))
+iml.save("screenshot.png")
 
 screenshoot_img = cv2.imread("screenshot.png", cv2.IMREAD_GRAYSCALE)
 assert screenshoot_img is not None, "Failed to load screenshot image."
-# screenshoot_img = cv2.cvtColor(np.array(iml), cv2.COLOR_RGB2GRAY)
 
 for item in items:
     for level in [1, 2, 3]:
