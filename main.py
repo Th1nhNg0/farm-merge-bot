@@ -35,19 +35,19 @@ THRESHOLD = 0.70
 NMS_IOU = 0.25
 
 # Spatial graph settings
-K_NEIGHBORS = 6
-ADJ_FACTOR = 2.6
+K_NEIGHBORS = 4
+ADJ_FACTOR = 2.0
 
 # Swap settings
 DRY_RUN = False
 MAX_SWAPS = 80
-DRAG_DURATION = 0.1
-AFTER_SWAP_DELAY = 0.1
+DRAG_DURATION = 0.05
+AFTER_SWAP_DELAY = 0.05
 
 # Drawing settings
 SHOW_WINDOW = False
 DRAW_ARROWS = True
-MAX_DRAWN_ARROWS = 30
+MAX_DRAWN_ARROWS = 15
 
 # Level ordering inside each item group.
 # True usually produces shorter swaps.
