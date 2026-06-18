@@ -20,6 +20,7 @@ items = [
     "mia",
     "de",
     "bap",
+    "go",
 ]
 
 levels = [1, 2, 3]
@@ -49,6 +50,11 @@ COMPACT_ADJ_FACTOR = 1.90
 COMPACT_MAX_NEIGHBORS = 8
 COMPACT_SEED_TRIALS = 12
 COMPACT_CONTACT_REWARD = 2.75
+
+# Maximum number of objects in one same-label cluster.
+# If one label appears more than this, it is split into several compact
+# clusters with the same target label.
+MAX_CLUSTER_SIZE = 5
 
 # Orthogonal connectivity means left/right/up/down only.
 # It is stricter, but on an isometric board it can easily make vertical or
@@ -696,8 +702,19 @@ def make_label_clustered_target_labels(slots, dist, median_nn):
     """
     Produces target labels aligned with slot indices.
 
-    There is no parent item cluster and no mini cluster. Each cluster is exactly
-    one label: same item and same level.
+    Each cluster is exactly one label: same item and same level. If a label has
+    more than MAX_CLUSTER_SIZE objects, it is split into multiple compact
+    clusters, each with at most MAX_CLUSTER_SIZE slots.
+
+    Example:
+        huongduong_1 count = 12
+
+    becomes:
+        huongduong_1#1 -> 5 slots
+        huongduong_1#2 -> 5 slots
+        huongduong_1#3 -> 2 slots
+
+    All three clusters still receive the target label "huongduong_1".
     """
     n = len(slots)
     current_labels = [d.label for d in slots]
@@ -711,28 +728,62 @@ def make_label_clustered_target_labels(slots, dist, median_nn):
         for label in sorted(counts.keys())
     }
 
-    # Large exact-label clusters are allocated first because they are harder to
-    # fit after small groups fragment the board.
-    present_labels = sorted(
-        label_indices.keys(),
-        key=lambda label: (
-            -len(label_indices[label]),
-            centroid_of_indices(slots, label_indices[label])[1],
-            centroid_of_indices(slots, label_indices[label])[0],
-            label,
-        ),
+    cluster_jobs = []
+
+    for label in sorted(label_indices.keys()):
+        total = counts[label]
+        current_idxs = label_indices[label]
+        target_point = centroid_of_indices(slots, current_idxs)
+
+        remaining = total
+        part = 1
+
+        while remaining > 0:
+            size = min(MAX_CLUSTER_SIZE, remaining)
+            cluster_name = label if total <= MAX_CLUSTER_SIZE else f"{label}#{part}"
+
+            cluster_jobs.append(
+                {
+                    "name": cluster_name,
+                    "label": label,
+                    "size": size,
+                    "total": total,
+                    "part": part,
+                    "current_indices": current_idxs,
+                    "target_point": target_point,
+                }
+            )
+
+            remaining -= size
+            part += 1
+
+    # Larger cluster chunks are allocated first because they are harder to fit
+    # after smaller chunks fragment the board.
+    cluster_jobs.sort(
+        key=lambda job: (
+            -job["size"],
+            job["target_point"][1],
+            job["target_point"][0],
+            job["label"],
+            job["part"],
+        )
     )
 
     clusters = {}
 
-    for label in present_labels:
-        amount = counts[label]
-        current_idxs = label_indices[label]
-        target_point = centroid_of_indices(slots, current_idxs)
+    for job in cluster_jobs:
+        cluster_name = job["name"]
+        label = job["label"]
+        amount = job["size"]
+        current_idxs = job["current_indices"]
+        target_point = job["target_point"]
+
+        if not available:
+            break
 
         if amount >= len(available):
             cluster = list(available)
-            clusters[label] = cluster
+            clusters[cluster_name] = cluster
 
             for slot_idx in cluster:
                 target_labels[slot_idx] = label
@@ -775,7 +826,7 @@ def make_label_clustered_target_labels(slots, dist, median_nn):
             )
 
             print(
-                f"Warning: {label} needs {amount} slots, but the largest "
+                f"Warning: {cluster_name} needs {amount} slots, but the largest "
                 f"{CLUSTER_CONNECTIVITY} component has {len(candidate_area)} slots. "
                 f"Relaxation={used_relaxation}."
             )
@@ -816,7 +867,7 @@ def make_label_clustered_target_labels(slots, dist, median_nn):
 
             cluster.append(extra)
 
-        clusters[label] = cluster
+        clusters[cluster_name] = cluster
 
         for slot_idx in cluster:
             target_labels[slot_idx] = label
