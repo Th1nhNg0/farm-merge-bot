@@ -3,7 +3,6 @@ import time
 import cv2
 import numpy as np
 
-
 items = [
     "bo",
     "carot",
@@ -18,17 +17,22 @@ items = [
 ]
 
 time.sleep(1)
-iml = pyautogui.screenshot(region=(396, 206, 970, 570))
+iml = pyautogui.screenshot(region=(510, 200, 850, 600))
 iml.save("screenshot.png")
 
-screenshoot_img = cv2.imread("screenshot.png", cv2.IMREAD_GRAYSCALE)
+screenshoot_img = cv2.imread("screenshot.png", cv2.IMREAD_COLOR)
 assert screenshoot_img is not None, "Failed to load screenshot image."
+
+screenshot_hsv = cv2.cvtColor(screenshoot_img, cv2.COLOR_BGR2HSV)
 
 for item in items:
     for level in [1, 2, 3]:
-        item_img = cv2.imread(f"images/{item}_{level}.png", cv2.IMREAD_GRAYSCALE)
-        assert item_img is not None, f"Failed to load image for {item} level {level}."
-        result = cv2.matchTemplate(screenshoot_img, item_img, cv2.TM_CCOEFF_NORMED)
+        template = cv2.imread(f"images/{item}{level}.png", cv2.IMREAD_COLOR)
+        assert template is not None, f"Failed to load images/{item}{level}.png"
+
+        template_hsv = cv2.cvtColor(template, cv2.COLOR_BGR2HSV)
+
+        result = cv2.matchTemplate(screenshot_hsv, template_hsv, cv2.TM_CCOEFF_NORMED)
         threshold = 0.7
         locations = np.where(result >= threshold)
 
@@ -37,8 +41,8 @@ for item in items:
             rect = [
                 int(loc[0]),
                 int(loc[1]),
-                int(item_img.shape[1]),
-                int(item_img.shape[0]),
+                int(template_hsv.shape[1]),
+                int(template_hsv.shape[0]),
             ]
             rectangles.append(rect)
             rectangles.append(rect)
