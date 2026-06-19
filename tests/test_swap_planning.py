@@ -1,3 +1,4 @@
+import itertools
 import random
 import sys
 import tempfile
@@ -251,6 +252,50 @@ class SwapPlanningTests(unittest.TestCase):
                 for swap in swaps
             },
         )
+
+    def test_optimizer_plans_only_bounded_shortlist(self):
+        labels = list("abcdef")
+        slots = self.make_isometric_slots(
+            labels,
+            [(0, 0), (40, 20), (80, 40), (120, 60), (160, 80), (200, 100)],
+        )
+        adjacency = {
+            index: set(range(len(slots))) - {index} for index in range(len(slots))
+        }
+        label_orders = list(itertools.islice(itertools.permutations(labels), 40))
+
+        with (
+            mock.patch.object(main, "build_isometric_adjacency", return_value=adjacency),
+            mock.patch.object(
+                main,
+                "orthogonal_scan_orders",
+                return_value=[tuple(range(len(slots)))],
+            ),
+            mock.patch.object(main, "candidate_label_orders", return_value=label_orders),
+            mock.patch.object(main, "candidate_targets_for_scan", return_value=[]),
+            mock.patch.object(main, "plan_swaps", wraps=main.plan_swaps) as planner,
+        ):
+            target, swaps, planned_adjacency = main.optimize_isometric_plan(slots)
+
+        self.assertEqual(main.PLAN_SHORTLIST_SIZE, planner.call_count)
+        self.assertEqual(target, apply_swaps(labels, swaps))
+        self.assertTrue(
+            main.labels_are_cardinally_connected(target, planned_adjacency)
+        )
+
+        with (
+            mock.patch.object(main, "build_isometric_adjacency", return_value=adjacency),
+            mock.patch.object(
+                main,
+                "orthogonal_scan_orders",
+                return_value=[tuple(range(len(slots)))],
+            ),
+            mock.patch.object(main, "candidate_label_orders", return_value=label_orders),
+            mock.patch.object(main, "candidate_targets_for_scan", return_value=[]),
+        ):
+            repeated = main.optimize_isometric_plan(slots)
+
+        self.assertEqual((target, swaps), repeated[:2])
 
     def test_random_duplicate_label_permutations_reach_target(self):
         rng = random.Random(20260619)

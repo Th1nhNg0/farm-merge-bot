@@ -67,8 +67,8 @@ ISOMETRIC_MAX_STEP_FACTOR = 1.70
 EXACT_LABEL_ORDER_LIMIT = 6
 LABEL_ORDER_TRIALS = 96
 LABEL_ORDER_SEED = 20260619
-CONNECTED_REGION_TRIALS = 96
-COMPACTNESS_FINALISTS = 4
+CONNECTED_REGION_TRIALS = 8
+PLAN_SHORTLIST_SIZE = 24
 
 # Swap settings
 DRAG_DURATION = 0.05
@@ -861,80 +861,6 @@ def grow_connected_target(current_labels, adjacency, rng):
     return target
 
 
-def _removal_keeps_connected(indices, removed_index, adjacency):
-    """Checks whether removing one slot leaves the remaining subgraph connected."""
-    remaining = indices - {removed_index}
-
-    if len(remaining) <= 1:
-        return True
-
-    pending = [next(iter(remaining))]
-    visited = set()
-
-    while pending:
-        index = pending.pop()
-
-        if index in visited:
-            continue
-
-        visited.add(index)
-        pending.extend((adjacency[index] & remaining) - visited)
-
-    return visited == remaining
-
-
-def peel_connected_target(current_labels, adjacency, rng):
-    """Peels connected label regions while keeping the remainder connected."""
-    counts = Counter(current_labels)
-    label_order = list(counts)
-    rng.shuffle(label_order)
-    target = [None] * len(current_labels)
-    available = set(range(len(current_labels)))
-
-    for label in label_order[:-1]:
-        region = set()
-
-        for _ in range(counts[label]):
-            if region:
-                candidates = set().union(
-                    *(adjacency[index] & available for index in region)
-                )
-            else:
-                candidates = set(available)
-
-            removable = [
-                index
-                for index in candidates
-                if _removal_keeps_connected(available, index, adjacency)
-            ]
-
-            if not removable:
-                return None
-
-            index = max(
-                removable,
-                key=lambda candidate: (
-                    current_labels[candidate] == label,
-                    len(adjacency[candidate] & region),
-                    -len(adjacency[candidate] & available),
-                    rng.random(),
-                ),
-            )
-            target[index] = label
-            region.add(index)
-            available.remove(index)
-
-    final_label = label_order[-1]
-
-    if len(available) != counts[final_label]:
-        return None
-
-    for index in available:
-        target[index] = final_label
-
-    return target
-
-
 # ---------------- swap planning ----------------
 
 
@@ -1128,147 +1054,32 @@ def layout_compactness_score(target_labels, adjacency):
     return (-internal_contacts,)
 
 
-def improve_target_compactness(target_labels, adjacency):
-    """Locally exchanges boundary cells to increase cardinal contacts."""
-    target = list(target_labels)
-    current_score = layout_compactness_score(target, adjacency)
-
-    for _ in range(len(target)):
-        best_move = None
-        best_score = current_score
-        groups = {
-            label: {index for index, value in enumerate(target) if value == label}
-            for label in sorted(set(target))
-        }
-
-        for label, group in groups.items():
-            frontier = set().union(*(adjacency[index] for index in group)) - group
-
-            for source in group:
-                for destination in frontier:
-                    other_label = target[destination]
-
-                    if other_label == label:
-                        continue
-
-                    target[source], target[destination] = (
-                        target[destination],
-                        target[source],
-                    )
-
-                    if labels_are_cardinally_connected(target, adjacency):
-                        score = layout_compactness_score(target, adjacency)
-
-                        if score < best_score:
-                            best_score = score
-                            best_move = ((source,), (destination,))
-
-                    target[source], target[destination] = (
-                        target[destination],
-                        target[source],
-                    )
-
-        checked_label_pairs = set()
-
-        for label, group in groups.items():
-            frontier_labels = {
-                target[index]
-                for source in group
-                for index in adjacency[source]
-                if target[index] != label
-            }
-
-            for other_label in sorted(frontier_labels):
-                pair_key = frozenset((label, other_label))
-
-                if pair_key in checked_label_pairs:
-                    continue
-
-                checked_label_pairs.add(pair_key)
-                other_group = groups[other_label]
-
-                for amount in range(2, min(3, len(group), len(other_group)) + 1):
-                    for sources in itertools.combinations(sorted(group), amount):
-                        for destinations in itertools.combinations(
-                            sorted(other_group),
-                            amount,
-                        ):
-                            for source, destination in zip(sources, destinations):
-                                target[source], target[destination] = (
-                                    target[destination],
-                                    target[source],
-                                )
-
-                            if labels_are_cardinally_connected(target, adjacency):
-                                score = layout_compactness_score(target, adjacency)
-
-                                if score < best_score:
-                                    best_score = score
-                                    best_move = (sources, destinations)
-
-                            for source, destination in zip(sources, destinations):
-                                target[source], target[destination] = (
-                                    target[destination],
-                                    target[source],
-                                )
-
-        if best_move is None:
-            break
-
-        sources, destinations = best_move
-
-        for source, destination in zip(sources, destinations):
-            target[source], target[destination] = (
-                target[destination],
-                target[source],
-            )
-
-        current_score = best_score
-
-    return target
-
-
 def optimize_isometric_plan(slots):
-    """Finds the fewest-swap target among valid cardinally connected layouts."""
+    """Ranks connected layouts cheaply, then plans swaps for a small shortlist."""
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots)
     scan_orders = orthogonal_scan_orders(slots)
-    best = None
-    finalists = []
-    seen_targets = set()
+    candidates = {}
 
-    def evaluate(target_labels):
-        nonlocal best
+    def add_candidate(target_labels):
         target_key = tuple(target_labels)
 
-        if target_key in seen_targets:
+        if target_key in candidates:
             return
         if not labels_are_cardinally_connected(target_labels, adjacency):
             return
 
-        seen_targets.add(target_key)
-        swaps = plan_swaps(current_labels, target_labels, dist)
-        drag_distance = sum(
-            float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
-        )
-        score = (
-            len(swaps),
-            drag_distance,
+        cheap_score = (
+            sum(current != target for current, target in zip(current_labels, target_labels)),
             *layout_compactness_score(target_labels, adjacency),
             target_key,
         )
-
-        if best is None or score < best[0]:
-            best = (score, target_labels, swaps)
-
-        finalists.append((score, target_labels, swaps))
-        finalists.sort(key=lambda candidate: candidate[0])
-        del finalists[COMPACTNESS_FINALISTS:]
+        candidates[target_key] = (cheap_score, list(target_labels))
 
     for scan_order in scan_orders:
         for label_order in candidate_label_orders(current_labels):
-            evaluate(
+            add_candidate(
                 target_labels_for_scan(
                     current_labels,
                     scan_order,
@@ -1285,55 +1096,39 @@ def optimize_isometric_plan(slots):
             adjacency,
             rng,
         ):
-            evaluate(target_labels)
+            add_candidate(target_labels)
 
-    if best is None:
+    if not candidates:
         for _ in range(CONNECTED_REGION_TRIALS):
             target_labels = grow_connected_target(current_labels, adjacency, rng)
 
             if target_labels is not None:
-                evaluate(target_labels)
+                add_candidate(target_labels)
 
-            target_labels = peel_connected_target(current_labels, adjacency, rng)
-
-            if target_labels is not None:
-                evaluate(target_labels)
-
-    if best is None:
+    if not candidates:
         raise RuntimeError(
             "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
-    improved_finalists = []
+    shortlist = sorted(candidates.values(), key=lambda candidate: candidate[0])[
+        :PLAN_SHORTLIST_SIZE
+    ]
+    planned = []
 
-    def add_finalist(candidate_target, candidate_swaps):
+    for _, target_labels in shortlist:
+        swaps = plan_swaps(current_labels, target_labels, dist)
         drag_distance = sum(
-            float(dist[swap["from_slot"], swap["to_slot"]]) for swap in candidate_swaps
+            float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
         )
         score = (
-            len(candidate_swaps),
+            len(swaps),
             drag_distance,
-            *layout_compactness_score(candidate_target, adjacency),
-            tuple(candidate_target),
+            *layout_compactness_score(target_labels, adjacency),
+            tuple(target_labels),
         )
-        improved_finalists.append((score, candidate_target, candidate_swaps))
+        planned.append((score, target_labels, swaps))
 
-    for _, candidate_target, candidate_swaps in finalists:
-        add_finalist(candidate_target, candidate_swaps)
-
-        improved_target = improve_target_compactness(candidate_target, adjacency)
-
-        if improved_target != candidate_target:
-            improved_swaps = plan_swaps(current_labels, improved_target, dist)
-            add_finalist(improved_target, improved_swaps)
-
-    _, target_labels, swaps = min(
-        improved_finalists,
-        key=lambda candidate: candidate[0],
-    )
-
-    if not labels_are_cardinally_connected(target_labels, adjacency):
-        raise RuntimeError("compactness optimization disconnected an item group")
+    _, target_labels, swaps = min(planned, key=lambda candidate: candidate[0])
 
     return target_labels, swaps, adjacency
 
@@ -1482,9 +1277,12 @@ def main():
             "isometric item grid."
         )
 
+    print("Planning swaps...")
+    started = time.perf_counter()
     target_labels, swaps, adjacency = optimize_isometric_plan(slots)
+    planning_seconds = time.perf_counter() - started
 
-    print(f"Planned {len(swaps)} swaps.")
+    print(f"Planned {len(swaps)} swaps in {planning_seconds:.2f}s.")
     print(f"Target label order: {target_labels}")
     print_adjacency_summary(adjacency, target_labels)
 
