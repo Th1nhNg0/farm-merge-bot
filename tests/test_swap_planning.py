@@ -1,4 +1,3 @@
-import itertools
 import random
 import sys
 import tempfile
@@ -31,99 +30,40 @@ def apply_swaps(labels, swaps):
 
 
 class SwapPlanningTests(unittest.TestCase):
-    def make_grid_slots(self, labels, columns):
+    def make_isometric_slots(self, labels, points):
         return [
             types.SimpleNamespace(
                 label=label,
-                center=((index % columns) * 40, (index // columns) * 40),
+                center=point,
+                screen_center=point,
+                grid_anchor=point,
                 w=20,
                 h=20,
             )
-            for index, label in enumerate(labels)
+            for label, point in zip(labels, points)
         ]
 
-    def test_orthogonal_adjacency_excludes_diagonals(self):
-        slots = self.make_grid_slots(["a", "b", "c", "d"], columns=2)
+    def test_isometric_adjacency_excludes_logical_diagonal(self):
+        slots = self.make_isometric_slots(
+            ["a", "b", "c", "d"],
+            [(0, 0), (40, 20), (-40, 20), (0, 40)],
+        )
 
-        adjacency = main.build_orthogonal_adjacency(slots)
+        adjacency = main.build_isometric_adjacency(slots)
 
         self.assertEqual({1, 2}, adjacency[0])
         self.assertNotIn(3, adjacency[0])
 
-    def test_orthogonal_adjacency_does_not_bridge_a_missing_cell(self):
-        centers = [(0, 0), (40, 0), (0, 40), (40, 40), (120, 0)]
-        slots = [
-            types.SimpleNamespace(label="a", center=center, w=20, h=20)
-            for center in centers
-        ]
-
-        adjacency = main.build_orthogonal_adjacency(slots)
-
-        self.assertNotIn(4, adjacency[1])
-        self.assertEqual(set(), adjacency[4])
-
-    def test_orthogonal_optimizer_uses_global_minimum_swaps_on_small_grid(self):
-        current = ["a", "b", "a", "c", "b", "c"]
-        slots = self.make_grid_slots(current, columns=3)
-        dist = main.pairwise_distance_matrix(slots)
-        adjacency = main.build_orthogonal_adjacency(slots)
-        possible_targets = {
-            target
-            for target in set(itertools.permutations(current))
-            if main.labels_are_orthogonally_connected(target, adjacency)
-        }
-        global_minimum = min(
-            len(main.plan_swaps(slots, current, list(target), dist))
-            for target in possible_targets
+    def test_largest_isometric_component_excludes_distant_match(self):
+        slots = self.make_isometric_slots(
+            ["a", "a", "b", "b"],
+            [(0, 0), (40, 20), (-40, 20), (0, 40)],
         )
-
-        target, swaps, planned_adjacency = main.optimize_orthogonal_plan(slots)
-
-        self.assertEqual(global_minimum, len(swaps))
-        self.assertTrue(
-            main.labels_are_orthogonally_connected(target, planned_adjacency)
-        )
-        self.assertEqual(target, apply_swaps(current, swaps))
-
-    def test_orthogonal_optimizer_handles_grid_without_full_scan_path(self):
-        centers = [(40, 0), (0, 40), (40, 40), (80, 40), (40, 80)]
-        labels = ["b", "a", "a", "a", "a"]
-        slots = [
-            types.SimpleNamespace(label=label, center=center, w=20, h=20)
-            for label, center in zip(labels, centers)
-        ]
-        adjacency = main.build_orthogonal_adjacency(slots)
-
-        self.assertFalse(
-            any(
-                all(right in adjacency[left] for left, right in zip(order, order[1:]))
-                for order in main.orthogonal_scan_orders(slots, adjacency)
-            )
-        )
-
-        target, swaps, planned_adjacency = main.optimize_orthogonal_plan(slots)
-
-        self.assertEqual([], swaps)
-        self.assertEqual(labels, target)
-        self.assertTrue(
-            main.labels_are_orthogonally_connected(target, planned_adjacency)
-        )
-
-    def test_orthogonal_optimizer_prefers_blocks_over_zero_swap_lines(self):
-        current = ["a", "a", "a", "a", "b", "b", "b", "b"]
-        slots = self.make_grid_slots(current, columns=4)
-
-        target, swaps, adjacency = main.optimize_orthogonal_plan(slots)
-
-        self.assertEqual(0, main.layout_compactness_score(slots, target, adjacency)[0])
-        self.assertGreater(len(swaps), 0)
-        self.assertTrue(main.labels_are_orthogonally_connected(target, adjacency))
-
-    def test_largest_orthogonal_component_excludes_distant_screen_match(self):
-        slots = self.make_grid_slots(["a", "a", "b", "b"], columns=2)
         noise = types.SimpleNamespace(
             label="a",
             center=(500, 500),
+            screen_center=(500, 500),
+            grid_anchor=(500, 500),
             w=20,
             h=20,
         )
@@ -210,6 +150,65 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertEqual((25, 40), detection.screen_center)
 
+    def test_find_game_region_ignores_surrounding_desktop_panels(self):
+        screenshot = np.zeros((500, 900, 3), dtype=np.uint8)
+        screenshot[70:430, 220:710] = (40, 180, 80)
+        screenshot[100:400, 20:160] = (50, 50, 50)
+
+        with mock.patch.object(main, "GAME_CROP_PADDING", 0):
+            region = main.find_game_region(screenshot)
+
+        self.assertEqual((220, 70, 490, 360), region)
+
+    def test_find_game_region_rejects_desktop_without_game(self):
+        screenshot = np.full((500, 900, 3), 25, dtype=np.uint8)
+
+        self.assertIsNone(main.find_game_region(screenshot))
+
+    def test_cropped_detection_keeps_absolute_screen_coordinates(self):
+        rng = np.random.default_rng(11)
+        template = rng.integers(0, 256, size=(18, 22, 3), dtype=np.uint8)
+        crop = np.zeros((80, 100, 3), dtype=np.uint8)
+        crop[30:48, 40:62] = template
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            cv2.imwrite(str(directory / "test1.png"), template)
+
+            with (
+                mock.patch.object(main, "TEMPLATE_DIR", directory),
+                mock.patch.object(main, "THRESHOLD", 0.70),
+                mock.patch.object(main, "items", ["test"]),
+                mock.patch.object(main, "levels", [1]),
+                mock.patch.object(main, "item_levels", {}),
+            ):
+                detections = main.detect_all_items(crop, offset=(200, 70))
+
+        best = max(detections, key=lambda detection: detection.score)
+        self.assertEqual((251, 109), best.screen_center)
+
+    def test_main_always_writes_debug_output(self):
+        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_dir = Path(temp_dir)
+
+            with (
+                mock.patch.object(
+                    main,
+                    "capture_game_bgr",
+                    return_value=(screenshot, (0, 0)),
+                ),
+                mock.patch.object(main, "detect_all_items", return_value=[]),
+                mock.patch.object(main, "DETECTION_DEBUG_DIR", debug_dir),
+                mock.patch("builtins.print"),
+            ):
+                main.main()
+
+            self.assertTrue((debug_dir / "board.png").is_file())
+            self.assertTrue((debug_dir / "detections.png").is_file())
+            self.assertTrue((debug_dir / "scores.csv").is_file())
+
     def test_three_cycle_uses_two_swaps(self):
         current = ["a", "b", "c"]
         target = ["b", "c", "a"]
@@ -221,7 +220,7 @@ class SwapPlanningTests(unittest.TestCase):
             ]
         )
 
-        swaps = main.plan_swaps([], current, target, dist)
+        swaps = main.plan_swaps(current, target, dist)
 
         self.assertEqual(2, len(swaps))
         self.assertEqual(target, apply_swaps(current, swaps))
@@ -242,7 +241,7 @@ class SwapPlanningTests(unittest.TestCase):
             ]
         )
 
-        swaps = main.plan_swaps([], current, target, dist)
+        swaps = main.plan_swaps(current, target, dist)
 
         self.assertEqual(target, apply_swaps(current, swaps))
         self.assertEqual(
@@ -266,7 +265,7 @@ class SwapPlanningTests(unittest.TestCase):
             )
             dist = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
 
-            swaps = main.plan_swaps([], current, target, dist)
+            swaps = main.plan_swaps(current, target, dist)
 
             self.assertEqual(target, apply_swaps(current, swaps))
             initially_correct = {
@@ -283,7 +282,7 @@ class SwapPlanningTests(unittest.TestCase):
 
     def test_rejects_different_label_counts(self):
         with self.assertRaisesRegex(ValueError, "same items"):
-            main.plan_swaps([], ["a", "b"], ["a", "a"], np.zeros((2, 2)))
+            main.plan_swaps(["a", "b"], ["a", "a"], np.zeros((2, 2)))
 
     def test_execute_swaps_has_no_limit(self):
         slots = [types.SimpleNamespace(screen_center=(i, i)) for i in range(102)]

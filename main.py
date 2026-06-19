@@ -1,9 +1,7 @@
-import argparse
 import csv
 import itertools
 import random
 import time
-from itertools import zip_longest
 import cv2
 import numpy as np
 import pyautogui
@@ -37,11 +35,7 @@ item_levels = {"go": [1, 2, 3, 4, 5], "da": [1, 2, 3, 4, 5], "congcu": [1, 2, 3,
 # Detection settings
 THRESHOLD = 0.70
 TEMPLATE_DIR = Path("images")
-FAST_TEMPLATE_SCALES = (1.00,)
-ACCURATE_TEMPLATE_SCALES = (0.90, 0.95, 1.00, 1.05, 1.10)
-TEMPLATE_SCALES = FAST_TEMPLATE_SCALES
-STARTUP_DELAY = 0.0
-DEBUG_BY_DEFAULT = False
+TEMPLATE_SCALES = (1.00,)
 TEMPLATE_THRESHOLDS = {
     # The single-log sprite has less structure than larger objects. All three
     # visible board instances score between 0.62 and 0.65 on the real frame.
@@ -54,6 +48,14 @@ DUPLICATE_CENTER_FACTOR = 0.35
 MIN_DUPLICATE_CENTER_DISTANCE = 6.0
 DETECTION_DEBUG_DIR = Path("debug")
 
+# The game is a large, densely saturated rectangle. Discord panels and
+# terminals are smaller or much less dense.
+GAME_MIN_SATURATION = 30
+GAME_MIN_BRIGHTNESS = 30
+GAME_MIN_SCREEN_AREA = 0.10
+GAME_MIN_FILL_RATIO = 0.50
+GAME_CROP_PADDING = 2
+
 # Isometric layout settings
 # Logical top/right/bottom/left neighbors in an isometric board appear as
 # diagonal screen neighbors. Screen-horizontal and screen-vertical neighbors
@@ -62,22 +64,13 @@ GRID_ANCHOR_Y_FACTOR = 0.72
 ISOMETRIC_AXIS_TOLERANCE = 0.65
 ISOMETRIC_MIN_STEP_FACTOR = 0.45
 ISOMETRIC_MAX_STEP_FACTOR = 1.70
-FAST_EXACT_LABEL_ORDER_LIMIT = 6
-FAST_LABEL_ORDER_TRIALS = 96
-FAST_CONNECTED_REGION_TRIALS = 96
-FAST_COMPACTNESS_FINALISTS = 4
-ACCURATE_EXACT_LABEL_ORDER_LIMIT = 8
-ACCURATE_LABEL_ORDER_TRIALS = 512
-ACCURATE_CONNECTED_REGION_TRIALS = 384
-ACCURATE_COMPACTNESS_FINALISTS = 8
-EXACT_LABEL_ORDER_LIMIT = FAST_EXACT_LABEL_ORDER_LIMIT
-LABEL_ORDER_TRIALS = FAST_LABEL_ORDER_TRIALS
+EXACT_LABEL_ORDER_LIMIT = 6
+LABEL_ORDER_TRIALS = 96
 LABEL_ORDER_SEED = 20260619
-CONNECTED_REGION_TRIALS = FAST_CONNECTED_REGION_TRIALS
-COMPACTNESS_FINALISTS = FAST_COMPACTNESS_FINALISTS
+CONNECTED_REGION_TRIALS = 96
+COMPACTNESS_FINALISTS = 4
 
 # Swap settings
-DRY_RUN = False
 DRAG_DURATION = 0.05
 AFTER_SWAP_DELAY = 0.005
 
@@ -150,7 +143,7 @@ def matching_features(image):
     return gray, edges
 
 
-def combined_match_score(screenshot_features, template_features, use_edges=True):
+def combined_match_score(screenshot_features, template_features):
     """Scores a cached template against a screenshot feature pair."""
     template_gray, template_edges = template_features
     screenshot_gray, screenshot_edges = screenshot_features
@@ -160,9 +153,6 @@ def combined_match_score(screenshot_features, template_features, use_edges=True)
         template_gray,
         cv2.TM_CCOEFF_NORMED,
     )
-
-    if not use_edges or EDGE_SCORE_WEIGHT <= 0:
-        return gray_score
 
     edge_score = cv2.matchTemplate(
         screenshot_edges,
@@ -238,7 +228,14 @@ def load_prepared_templates(template_scales=None):
         template_scales = TEMPLATE_SCALES
 
     template_scales = tuple(template_scales)
-    cached = _PREPARED_TEMPLATE_CACHE.get(template_scales)
+    labels = tuple(configured_labels())
+    template_state = tuple(
+        (str(path.resolve()), path.stat().st_mtime_ns, path.stat().st_size)
+        for item, level, _ in labels
+        for path in template_paths(item, level)
+    )
+    cache_key = (template_scales, labels, template_state)
+    cached = _PREPARED_TEMPLATE_CACHE.get(cache_key)
 
     if cached is not None:
         return cached
@@ -246,7 +243,7 @@ def load_prepared_templates(template_scales=None):
     prepared = []
     missing = []
 
-    for item, level, label in configured_labels():
+    for item, level, label in labels:
         paths = template_paths(item, level)
 
         if not paths:
@@ -274,11 +271,11 @@ def load_prepared_templates(template_scales=None):
                     )
                 )
 
-    _PREPARED_TEMPLATE_CACHE[template_scales] = (prepared, missing)
+    _PREPARED_TEMPLATE_CACHE[cache_key] = (prepared, missing)
     return prepared, missing
 
 
-def _init_diagnostics(label, threshold):
+def _init_diagnostics(threshold):
     return {
         "best_score": float("-inf"),
         "best_template": "",
@@ -296,8 +293,6 @@ def detect_all_items(
     diagnostics=None,
     template_scales=None,
     offset=(0, 0),
-    use_edges=True,
-    quiet_missing=False,
 ):
     screenshot_features = matching_features(screenshot_img)
     screenshot_h, screenshot_w = screenshot_img.shape[:2]
@@ -305,19 +300,17 @@ def detect_all_items(
     offset_x, offset_y = offset
     prepared_templates, missing_templates = load_prepared_templates(template_scales)
 
-    if not quiet_missing:
-        for item, level, _ in missing_templates:
-            print(
-                "Skipping missing templates: "
-                f"{TEMPLATE_DIR / f'{item}{level}.png'} or "
-                f"{TEMPLATE_DIR / f'{item}{level}_<variant>.png'}"
-            )
+    for item, level, _ in missing_templates:
+        print(
+            "Skipping missing templates: "
+            f"{TEMPLATE_DIR / f'{item}{level}.png'} or "
+            f"{TEMPLATE_DIR / f'{item}{level}_<variant>.png'}"
+        )
 
     if diagnostics is not None:
         for _, _, label in configured_labels():
             diagnostics[label] = _init_diagnostics(
-                label,
-                TEMPLATE_THRESHOLDS.get(label, THRESHOLD),
+                TEMPLATE_THRESHOLDS.get(label, THRESHOLD)
             )
 
     for template in prepared_templates:
@@ -326,11 +319,7 @@ def detect_all_items(
 
         label = template.label
         threshold = TEMPLATE_THRESHOLDS.get(label, THRESHOLD)
-        result = combined_match_score(
-            screenshot_features,
-            template.features,
-            use_edges=use_edges,
-        )
+        result = combined_match_score(screenshot_features, template.features)
 
         if diagnostics is not None:
             best_score = float(np.max(result))
@@ -586,11 +575,6 @@ def build_isometric_adjacency(slots):
     return adjacency
 
 
-# Backwards-compatible name used by the rest of the planner.
-def build_orthogonal_adjacency(slots):
-    return build_isometric_adjacency(slots)
-
-
 def connected_components(adjacency):
     """Returns connected slot-index sets, largest first."""
     remaining = set(adjacency)
@@ -657,7 +641,7 @@ def _screen_snake_orders(slots):
     return orders + [tuple(reversed(order)) for order in orders]
 
 
-def orthogonal_scan_orders(slots, adjacency):
+def orthogonal_scan_orders(slots):
     """Returns isometric row/column snake orders for target generation."""
     if not slots:
         return [()]
@@ -1049,7 +1033,7 @@ def _lowest_cost_cycle_slots(cycle_edges, edge_slots, dist):
     return best_cost, best_path
 
 
-def plan_swaps(slots, current_labels, target_labels, dist):
+def plan_swaps(current_labels, target_labels, dist):
     """
     Plans all swaps as short mismatch cycles, then minimizes drag distance.
 
@@ -1129,7 +1113,7 @@ def labels_are_cardinally_connected(target_labels, adjacency):
     return True
 
 
-def layout_compactness_score(slots, target_labels, adjacency):
+def layout_compactness_score(target_labels, adjacency):
     """Rewards extra cardinal contacts inside each same-label group."""
     internal_contacts = 0
 
@@ -1144,10 +1128,10 @@ def layout_compactness_score(slots, target_labels, adjacency):
     return (-internal_contacts,)
 
 
-def improve_target_compactness(slots, target_labels, adjacency):
+def improve_target_compactness(target_labels, adjacency):
     """Locally exchanges boundary cells to increase cardinal contacts."""
     target = list(target_labels)
-    current_score = layout_compactness_score(slots, target, adjacency)
+    current_score = layout_compactness_score(target, adjacency)
 
     for _ in range(len(target)):
         best_move = None
@@ -1173,7 +1157,7 @@ def improve_target_compactness(slots, target_labels, adjacency):
                     )
 
                     if labels_are_cardinally_connected(target, adjacency):
-                        score = layout_compactness_score(slots, target, adjacency)
+                        score = layout_compactness_score(target, adjacency)
 
                         if score < best_score:
                             best_score = score
@@ -1216,11 +1200,7 @@ def improve_target_compactness(slots, target_labels, adjacency):
                                 )
 
                             if labels_are_cardinally_connected(target, adjacency):
-                                score = layout_compactness_score(
-                                    slots,
-                                    target,
-                                    adjacency,
-                                )
+                                score = layout_compactness_score(target, adjacency)
 
                                 if score < best_score:
                                     best_score = score
@@ -1252,8 +1232,8 @@ def optimize_isometric_plan(slots):
     """Finds the fewest-swap target among valid cardinally connected layouts."""
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
-    adjacency = build_orthogonal_adjacency(slots)
-    scan_orders = orthogonal_scan_orders(slots, adjacency)
+    adjacency = build_isometric_adjacency(slots)
+    scan_orders = orthogonal_scan_orders(slots)
     best = None
     finalists = []
     seen_targets = set()
@@ -1268,19 +1248,14 @@ def optimize_isometric_plan(slots):
             return
 
         seen_targets.add(target_key)
-        swaps = plan_swaps(
-            slots=slots,
-            current_labels=current_labels,
-            target_labels=target_labels,
-            dist=dist,
-        )
+        swaps = plan_swaps(current_labels, target_labels, dist)
         drag_distance = sum(
             float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
         )
         score = (
             len(swaps),
             drag_distance,
-            *layout_compactness_score(slots, target_labels, adjacency),
+            *layout_compactness_score(target_labels, adjacency),
             target_key,
         )
 
@@ -1338,7 +1313,7 @@ def optimize_isometric_plan(slots):
         score = (
             len(candidate_swaps),
             drag_distance,
-            *layout_compactness_score(slots, candidate_target, adjacency),
+            *layout_compactness_score(candidate_target, adjacency),
             tuple(candidate_target),
         )
         improved_finalists.append((score, candidate_target, candidate_swaps))
@@ -1346,19 +1321,10 @@ def optimize_isometric_plan(slots):
     for _, candidate_target, candidate_swaps in finalists:
         add_finalist(candidate_target, candidate_swaps)
 
-        improved_target = improve_target_compactness(
-            slots,
-            candidate_target,
-            adjacency,
-        )
+        improved_target = improve_target_compactness(candidate_target, adjacency)
 
         if improved_target != candidate_target:
-            improved_swaps = plan_swaps(
-                slots=slots,
-                current_labels=current_labels,
-                target_labels=improved_target,
-                dist=dist,
-            )
+            improved_swaps = plan_swaps(current_labels, improved_target, dist)
             add_finalist(improved_target, improved_swaps)
 
     _, target_labels, swaps = min(
@@ -1372,7 +1338,7 @@ def optimize_isometric_plan(slots):
     return target_labels, swaps, adjacency
 
 
-def print_adjacency_summary(slots, adjacency, target_labels):
+def print_adjacency_summary(adjacency, target_labels):
     """Prints a concise verification that no diagonal-only groups remain."""
     edge_count = sum(len(neighbors) for neighbors in adjacency.values()) // 2
     print(f"Isometric cardinal adjacency edges: {edge_count}")
@@ -1432,104 +1398,80 @@ def execute_swaps(slots, swaps):
 # ---------------- runtime helpers ----------------
 
 
-def configure_runtime(accurate=False):
-    """Switches between fast defaults and the previous exhaustive search mode."""
-    global TEMPLATE_SCALES
-    global EXACT_LABEL_ORDER_LIMIT
-    global LABEL_ORDER_TRIALS
-    global CONNECTED_REGION_TRIALS
-    global COMPACTNESS_FINALISTS
+def find_game_region(screenshot_img):
+    """Returns the largest dense, colorful viewport as an (x, y, w, h) box."""
+    screen_h, screen_w = screenshot_img.shape[:2]
+    hsv = cv2.cvtColor(screenshot_img, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(
+        hsv,
+        (0, GAME_MIN_SATURATION, GAME_MIN_BRIGHTNESS),
+        (179, 255, 255),
+    )
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    min_area = screen_h * screen_w * GAME_MIN_SCREEN_AREA
+    candidates = []
 
-    if accurate:
-        TEMPLATE_SCALES = ACCURATE_TEMPLATE_SCALES
-        EXACT_LABEL_ORDER_LIMIT = ACCURATE_EXACT_LABEL_ORDER_LIMIT
-        LABEL_ORDER_TRIALS = ACCURATE_LABEL_ORDER_TRIALS
-        CONNECTED_REGION_TRIALS = ACCURATE_CONNECTED_REGION_TRIALS
-        COMPACTNESS_FINALISTS = ACCURATE_COMPACTNESS_FINALISTS
-    else:
-        TEMPLATE_SCALES = FAST_TEMPLATE_SCALES
-        EXACT_LABEL_ORDER_LIMIT = FAST_EXACT_LABEL_ORDER_LIMIT
-        LABEL_ORDER_TRIALS = FAST_LABEL_ORDER_TRIALS
-        CONNECTED_REGION_TRIALS = FAST_CONNECTED_REGION_TRIALS
-        COMPACTNESS_FINALISTS = FAST_COMPACTNESS_FINALISTS
+    for x, y, w, h, area in stats[1:]:
+        if area >= min_area and area / (w * h) >= GAME_MIN_FILL_RATIO:
+            candidates.append((int(area), int(x), int(y), int(w), int(h)))
+
+    if not candidates:
+        return None
+
+    _, x, y, w, h = max(candidates)
+    left = max(0, x - GAME_CROP_PADDING)
+    top = max(0, y - GAME_CROP_PADDING)
+    right = min(screen_w, x + w + GAME_CROP_PADDING)
+    bottom = min(screen_h, y + h + GAME_CROP_PADDING)
+    return left, top, right - left, bottom - top
 
 
-def capture_screenshot_bgr(region=None):
-    """Captures either the full screen or a smaller board rectangle."""
+def capture_game_bgr():
+    """Captures the desktop once, then keeps only the detected game viewport."""
+    screenshot = pyautogui.screenshot()
+    full_image = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+    region = find_game_region(full_image)
+
     if region is None:
-        screenshot = pyautogui.screenshot()
-        offset = (0, 0)
-    else:
-        x, y, w, h = region
-        screenshot = pyautogui.screenshot(region=(x, y, w, h))
-        offset = (x, y)
+        raise RuntimeError("Game viewport not found. Keep the game visible and retry.")
 
-    return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR), offset
+    x, y, w, h = region
+    return full_image[y : y + h, x : x + w], (x, y)
 
 
 # ---------------- main ----------------
 
 
-def main(
-    detect_only=False,
-    dry_run=False,
-    debug=DEBUG_BY_DEFAULT,
-    accurate=False,
-    region=None,
-    startup_delay=STARTUP_DELAY,
-    gray_only=False,
-    profile=False,
-):
-    configure_runtime(accurate=accurate)
+def main():
+    screenshot_img, offset = capture_game_bgr()
+    print(
+        f"Game region: x={offset[0]}, y={offset[1]}, "
+        f"w={screenshot_img.shape[1]}, h={screenshot_img.shape[0]}"
+    )
 
-    if startup_delay > 0:
-        time.sleep(startup_delay)
-
-    timings = {}
-    started = time.perf_counter()
-    screenshot_img, offset = capture_screenshot_bgr(region=region)
-    timings["capture"] = time.perf_counter() - started
-
-    diagnostics = {} if (debug or detect_only) else None
-    started = time.perf_counter()
+    diagnostics = {}
     detections = detect_all_items(
         screenshot_img,
         diagnostics=diagnostics,
-        template_scales=TEMPLATE_SCALES,
         offset=offset,
-        use_edges=not gray_only,
     )
-    timings["detect"] = time.perf_counter() - started
-
-    if debug or detect_only:
-        raw_debug_path, annotated_debug_path, scores_debug_path = (
-            save_detection_debug_images(
-                screenshot_img,
-                detections,
-                diagnostics=diagnostics,
-                image_offset=offset,
-            )
-        )
-        print(
-            "Detection debug files: "
-            f"{raw_debug_path}, {annotated_debug_path}, {scores_debug_path}"
-        )
+    raw_path, annotated_path, scores_path = save_detection_debug_images(
+        screenshot_img,
+        detections,
+        diagnostics=diagnostics,
+        image_offset=offset,
+    )
+    print(
+        "Detection debug files: "
+        f"{raw_path}, {annotated_path}, {scores_path}"
+    )
 
     print(f"Detected {len(detections)} items.")
 
-    if detect_only:
-        print("Detection-only mode. No mouse actions were executed.")
-        if profile:
-            print(
-                f"Timing: capture={timings['capture']:.3f}s, detect={timings['detect']:.3f}s"
-            )
-        return
-
     if not detections:
-        print("No items detected. Try --accurate or lower THRESHOLD.")
+        print("No items detected. Check the game window or lower THRESHOLD.")
         return
 
-    started = time.perf_counter()
     all_slots = stable_sort_slots(detections)
     slots = largest_orthogonal_component(all_slots)
     excluded_count = len(all_slots) - len(slots)
@@ -1541,11 +1483,10 @@ def main(
         )
 
     target_labels, swaps, adjacency = optimize_isometric_plan(slots)
-    timings["plan"] = time.perf_counter() - started
 
     print(f"Planned {len(swaps)} swaps.")
     print(f"Target label order: {target_labels}")
-    print_adjacency_summary(slots, adjacency, target_labels)
+    print_adjacency_summary(adjacency, target_labels)
 
     print("\nSwap plan:")
     for i, swap in enumerate(swaps, start=1):
@@ -1554,74 +1495,8 @@ def main(
             f"{swap['moving_label']} swaps with {swap['replaced_label']}"
         )
 
-    if profile:
-        print(
-            "Timing: "
-            f"capture={timings['capture']:.3f}s, "
-            f"detect={timings['detect']:.3f}s, "
-            f"plan={timings['plan']:.3f}s"
-        )
-
-    if DRY_RUN or dry_run:
-        print("\nDry-run mode. No mouse actions were executed.")
-        return
-
     execute_swaps(slots, swaps)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--detect-only",
-        action="store_true",
-        help="capture and annotate detections without planning or executing swaps",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="capture, detect, and print the swap plan without moving the mouse",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="save board.png, detections.png, and scores.csv; slower but useful for calibration",
-    )
-    parser.add_argument(
-        "--accurate",
-        action="store_true",
-        help="use the previous exhaustive planner and all template scales; slower but more robust",
-    )
-    parser.add_argument(
-        "--gray-only",
-        action="store_true",
-        help="skip edge template matching for faster but slightly less robust detection",
-    )
-    parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="print capture/detect/plan timing at the end",
-    )
-    parser.add_argument(
-        "--startup-delay",
-        type=float,
-        default=STARTUP_DELAY,
-        help="seconds to wait before capture; default is 0",
-    )
-    parser.add_argument(
-        "--region",
-        type=int,
-        nargs=4,
-        metavar=("X", "Y", "W", "H"),
-        help="capture only a fixed board rectangle to reduce screenshot and matching time",
-    )
-    args = parser.parse_args()
-    main(
-        detect_only=args.detect_only,
-        dry_run=args.dry_run,
-        debug=args.debug,
-        accurate=args.accurate,
-        region=tuple(args.region) if args.region else None,
-        startup_delay=args.startup_delay,
-        gray_only=args.gray_only,
-        profile=args.profile,
-    )
+    main()
