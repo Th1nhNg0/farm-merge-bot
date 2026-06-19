@@ -50,14 +50,19 @@ DUPLICATE_CENTER_FACTOR = 0.35
 MIN_DUPLICATE_CENTER_DISTANCE = 6.0
 DETECTION_DEBUG_DIR = Path("debug")
 
-# Orthogonal layout settings
-ORTHOGONAL_AXIS_TOL_FACTOR = 0.60
+# Isometric layout settings
+# Logical top/right/bottom/left neighbors in an isometric board appear as
+# diagonal screen neighbors. Screen-horizontal and screen-vertical neighbors
+# are logical diagonals and are deliberately excluded from adjacency.
+GRID_ANCHOR_Y_FACTOR = 0.72
+ISOMETRIC_AXIS_TOLERANCE = 0.65
+ISOMETRIC_MIN_STEP_FACTOR = 0.45
+ISOMETRIC_MAX_STEP_FACTOR = 1.70
 EXACT_LABEL_ORDER_LIMIT = 8
 LABEL_ORDER_TRIALS = 512
 LABEL_ORDER_SEED = 20260619
-ORTHOGONAL_MAX_STEP_FACTOR = 1.45
-CONNECTED_REGION_TRIALS = 256
-COMPACTNESS_FINALISTS = 6
+CONNECTED_REGION_TRIALS = 384
+COMPACTNESS_FINALISTS = 8
 
 # Swap settings
 DRY_RUN = False
@@ -89,6 +94,11 @@ class Detection:
     @property
     def screen_center(self):
         return self.center
+
+    @property
+    def grid_anchor(self):
+        """Approximate tile anchor used only for isometric geometry."""
+        return self.x + self.w // 2, self.y + int(round(self.h * GRID_ANCHOR_Y_FACTOR))
 
 
 # ---------------- detection ----------------
@@ -344,71 +354,143 @@ def save_detection_debug_images(screenshot_img, detections, diagnostics=None):
 
 
 def pairwise_distance_matrix(slots):
-    centers = np.array([d.center for d in slots], dtype=np.float32)
+    centers = np.array([d.screen_center for d in slots], dtype=np.float32)
     diff = centers[:, None, :] - centers[None, :, :]
     return np.sqrt(np.sum(diff * diff, axis=2))
 
 
+def layout_points(slots):
+    """Returns the points used to infer board geometry, not drag positions."""
+    return np.array([slot.grid_anchor for slot in slots], dtype=np.float32)
+
+
 def stable_sort_slots(detections):
+    """Gives stable slot indices from top-to-bottom, left-to-right."""
+    return sorted(detections, key=lambda d: (d.grid_anchor[1], d.grid_anchor[0]))
+
+
+def estimate_isometric_step(slots):
+    """Infers the cardinal isometric step from detected slot anchors."""
+    if len(slots) <= 1:
+        return 1.0, 1.0, 1.0
+
+    points = layout_points(slots)
+    diff = points[:, None, :] - points[None, :, :]
+    dx = diff[:, :, 0]
+    dy = diff[:, :, 1]
+    distances = np.sqrt(dx * dx + dy * dy)
+    np.fill_diagonal(distances, np.inf)
+
+    nearest = np.min(distances, axis=1)
+    finite_nearest = nearest[np.isfinite(nearest)]
+    median_nearest = float(np.median(finite_nearest)) if len(finite_nearest) else 1.0
+
+    median_width = float(np.median([slot.w for slot in slots]))
+    median_height = float(np.median([slot.h for slot in slots]))
+    min_dx = max(3.0, median_width * 0.12)
+    min_dy = max(3.0, median_height * 0.08)
+
+    candidate_mask = (
+        (distances <= median_nearest * 1.80)
+        & (np.abs(dx) >= min_dx)
+        & (np.abs(dy) >= min_dy)
+    )
+
+    candidate_dx = np.abs(dx[candidate_mask])
+    candidate_dy = np.abs(dy[candidate_mask])
+
+    if len(candidate_dx) and len(candidate_dy):
+        step_x = float(np.median(candidate_dx))
+        step_y = float(np.median(candidate_dy))
+    else:
+        # Conservative fallback for a common 2:1 isometric projection.
+        step_x = max(1.0, median_width * 0.50)
+        step_y = max(1.0, median_height * 0.35)
+
+    step_distance = float(np.hypot(step_x, step_y))
+    return step_x, step_y, max(step_distance, 1.0)
+
+
+def build_isometric_adjacency(slots):
     """
-    Gives stable slot indices from top-to-bottom, left-to-right.
+    Connects logical top/right/bottom/left neighbors on an isometric board.
 
-    Consecutive target labels in this order are treated as adjacent items.
+    In screen coordinates, valid cardinal neighbors are the four diagonal
+    directions: up-right, down-right, down-left, and up-left. This function
+    therefore does not connect screen-horizontal or screen-vertical neighbors,
+    because those are diagonal neighbors in the underlying isometric grid.
     """
-    return sorted(detections, key=lambda d: (d.center[1], d.center[0]))
-
-
-def build_orthogonal_adjacency(slots):
-    """Connects each slot to its nearest top, right, bottom, and left slot."""
     adjacency = {index: set() for index in range(len(slots))}
 
     if len(slots) <= 1:
         return adjacency
 
-    median_width = float(np.median([slot.w for slot in slots]))
-    median_height = float(np.median([slot.h for slot in slots]))
-    x_tolerance = max(4.0, median_width * ORTHOGONAL_AXIS_TOL_FACTOR)
-    y_tolerance = max(4.0, median_height * ORTHOGONAL_AXIS_TOL_FACTOR)
-    centers = np.array([slot.center for slot in slots], dtype=np.float32)
-    distances = np.linalg.norm(centers[:, None, :] - centers[None, :, :], axis=2)
-    np.fill_diagonal(distances, np.inf)
-    median_nearest = float(np.median(np.min(distances, axis=1)))
-    max_step = max(
-        median_width * 1.75,
-        median_height * 1.75,
-        median_nearest * ORTHOGONAL_MAX_STEP_FACTOR,
-    )
+    step_x, step_y, step_distance = estimate_isometric_step(slots)
+    points = layout_points(slots)
 
-    for index, slot in enumerate(slots):
-        x, y = slot.center
-        directions = {"top": [], "right": [], "bottom": [], "left": []}
+    for index, point in enumerate(points):
+        directions = {
+            "up_right": [],
+            "down_right": [],
+            "down_left": [],
+            "up_left": [],
+        }
 
-        for other_index, other in enumerate(slots):
+        for other_index, other_point in enumerate(points):
             if index == other_index:
                 continue
 
-            other_x, other_y = other.center
-            dx = other_x - x
-            dy = other_y - y
+            dx = float(other_point[0] - point[0])
+            dy = float(other_point[1] - point[1])
 
-            if abs(dx) <= x_tolerance and -max_step <= dy < 0:
-                directions["top"].append((abs(dy), other_index))
-            if abs(dy) <= y_tolerance and 0 < dx <= max_step:
-                directions["right"].append((abs(dx), other_index))
-            if abs(dx) <= x_tolerance and 0 < dy <= max_step:
-                directions["bottom"].append((abs(dy), other_index))
-            if abs(dy) <= y_tolerance and -max_step <= dx < 0:
-                directions["left"].append((abs(dx), other_index))
+            # Screen-horizontal / screen-vertical relations are logical
+            # diagonals on an isometric grid, so they are intentionally ignored.
+            if abs(dx) < step_x * ISOMETRIC_MIN_STEP_FACTOR:
+                continue
+            if abs(dy) < step_y * ISOMETRIC_MIN_STEP_FACTOR:
+                continue
+
+            norm_dx = abs(dx) / step_x
+            norm_dy = abs(dy) / step_y
+            normalized_step = max(norm_dx, norm_dy)
+            axis_error = abs(norm_dx - norm_dy)
+
+            if normalized_step > ISOMETRIC_MAX_STEP_FACTOR:
+                continue
+            if axis_error > ISOMETRIC_AXIS_TOLERANCE:
+                continue
+
+            distance = float(np.hypot(dx, dy))
+            if distance > step_distance * ISOMETRIC_MAX_STEP_FACTOR:
+                continue
+
+            if dx > 0 and dy < 0:
+                direction = "up_right"
+            elif dx > 0 and dy > 0:
+                direction = "down_right"
+            elif dx < 0 and dy > 0:
+                direction = "down_left"
+            else:
+                direction = "up_left"
+
+            # Prefer vectors closest to one inferred isometric step.
+            cost = axis_error + abs(norm_dx - 1.0) + abs(norm_dy - 1.0)
+            directions[direction].append((cost, distance, other_index))
 
         for candidates in directions.values():
             if not candidates:
                 continue
 
-            _, neighbor = min(candidates)
+            _, _, neighbor = min(candidates)
             adjacency[index].add(neighbor)
             adjacency[neighbor].add(index)
 
     return adjacency
+
+
+# Backwards-compatible name used by the rest of the planner.
+def build_orthogonal_adjacency(slots):
+    return build_isometric_adjacency(slots)
 
 
 def connected_components(adjacency):
@@ -436,32 +518,27 @@ def connected_components(adjacency):
 
 
 def largest_orthogonal_component(slots):
-    """Removes isolated full-screen matches outside the main item grid."""
+    """Removes isolated full-screen matches outside the main isometric item grid."""
     if not slots:
         return []
 
-    adjacency = build_orthogonal_adjacency(slots)
+    adjacency = build_isometric_adjacency(slots)
     component = connected_components(adjacency)[0]
     return [slot for index, slot in enumerate(slots) if index in component]
 
 
-def _axis_groups(slots, primary_axis, tolerance):
-    """Groups slots into visually aligned rows or columns."""
+def _numeric_axis_groups(values, tolerance):
+    """Groups numeric coordinates into bands."""
     groups = []
 
-    for index in sorted(
-        range(len(slots)),
-        key=lambda i: (slots[i].center[primary_axis], slots[i].center[1 - primary_axis]),
-    ):
-        coordinate = slots[index].center[primary_axis]
+    for index in sorted(range(len(values)), key=lambda i: values[i]):
+        coordinate = values[index]
 
         if not groups:
             groups.append([index])
             continue
 
-        group_coordinate = float(
-            np.median([slots[i].center[primary_axis] for i in groups[-1]])
-        )
+        group_coordinate = float(np.median([values[i] for i in groups[-1]]))
 
         if abs(coordinate - group_coordinate) <= tolerance:
             groups[-1].append(index)
@@ -471,26 +548,36 @@ def _axis_groups(slots, primary_axis, tolerance):
     return groups
 
 
+def _screen_snake_orders(slots):
+    points = layout_points(slots)
+    orders = [
+        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 1], points[i, 0]))),
+        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 1], -points[i, 0]))),
+        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 0], points[i, 1]))),
+        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 0], -points[i, 1]))),
+    ]
+    return orders + [tuple(reversed(order)) for order in orders]
+
+
 def orthogonal_scan_orders(slots, adjacency):
-    """Returns row and column snake orders for connected-segment allocation."""
+    """Returns isometric row/column snake orders for target generation."""
     if not slots:
         return [()]
 
-    median_width = float(np.median([slot.w for slot in slots]))
-    median_height = float(np.median([slot.h for slot in slots]))
-    row_groups = _axis_groups(
-        slots,
-        primary_axis=1,
-        tolerance=max(4.0, median_height * ORTHOGONAL_AXIS_TOL_FACTOR),
-    )
-    column_groups = _axis_groups(
-        slots,
-        primary_axis=0,
-        tolerance=max(4.0, median_width * ORTHOGONAL_AXIS_TOL_FACTOR),
-    )
+    step_x, step_y, _ = estimate_isometric_step(slots)
+    points = layout_points(slots)
+    xs = points[:, 0]
+    ys = points[:, 1]
+
+    # Convert screen coordinates to approximate isometric grid axes. Neighbors
+    # along a cardinal isometric direction change exactly one of these axes.
+    iso_u = 0.5 * ((ys / step_y) + (xs / step_x))
+    iso_v = 0.5 * ((ys / step_y) - (xs / step_x))
     candidates = []
 
-    for groups, secondary_axis in ((row_groups, 0), (column_groups, 1)):
+    for primary_values, secondary_values in ((iso_u, iso_v), (iso_v, iso_u)):
+        groups = _numeric_axis_groups(primary_values, tolerance=0.55)
+
         for reverse_groups in (False, True):
             ordered_groups = list(reversed(groups)) if reverse_groups else groups
 
@@ -501,32 +588,14 @@ def orthogonal_scan_orders(slots, adjacency):
                     reverse = reverse_first_group != (group_index % 2 == 1)
                     ordered = sorted(
                         group,
-                        key=lambda i: slots[i].center[secondary_axis],
+                        key=lambda i: secondary_values[i],
                         reverse=reverse,
                     )
                     order.extend(ordered)
 
                 candidates.append(tuple(order))
 
-        for band_size in (2, 3, 4):
-            order = []
-
-            for band_start in range(0, len(groups), band_size):
-                band = [
-                    sorted(group, key=lambda i: slots[i].center[secondary_axis])
-                    for group in groups[band_start : band_start + band_size]
-                ]
-
-                for position, column in enumerate(zip_longest(*band)):
-                    entries = [index for index in column if index is not None]
-
-                    if position % 2:
-                        entries.reverse()
-
-                    order.extend(entries)
-
-            candidates.extend((tuple(order), tuple(reversed(order))))
-
+    candidates.extend(_screen_snake_orders(slots))
     return list(dict.fromkeys(candidates))
 
 
@@ -556,7 +625,7 @@ def candidate_label_orders(current_labels):
 
 
 def target_labels_for_scan(current_labels, scan_order, label_order):
-    """Places each label in one connected segment of an orthogonal scan path."""
+    """Places each label in one connected segment of a scan path."""
     counts = Counter(current_labels)
     target = [None] * len(current_labels)
     offset = 0
@@ -593,8 +662,7 @@ def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
             segment = scan_order[offset : offset + size]
 
             if not all(
-                right in adjacency[left]
-                for left, right in zip(segment, segment[1:])
+                right in adjacency[left] for left, right in zip(segment, segment[1:])
             ):
                 continue
 
@@ -828,9 +896,7 @@ def _shortest_label_cycles(edge_slots):
             (cycle_labels[i], cycle_labels[(i + 1) % len(cycle_labels)])
             for i in range(len(cycle_labels))
         )
-        rotations = [
-            cycle_edges[i:] + cycle_edges[:i] for i in range(len(cycle_edges))
-        ]
+        rotations = [cycle_edges[i:] + cycle_edges[:i] for i in range(len(cycle_edges))]
         canonical = min(rotations)
         length = len(canonical)
 
@@ -943,7 +1009,7 @@ def plan_swaps(slots, current_labels, target_labels, dist):
     return swaps
 
 
-def labels_are_orthogonally_connected(target_labels, adjacency):
+def labels_are_cardinally_connected(target_labels, adjacency):
     """Checks that every repeated label is connected through four directions."""
     for label in sorted(set(target_labels)):
         indices = {i for i, value in enumerate(target_labels) if value == label}
@@ -966,60 +1032,32 @@ def labels_are_orthogonally_connected(target_labels, adjacency):
 
 
 def layout_compactness_score(slots, target_labels, adjacency):
-    """Penalizes straight lines, then rewards orthogonal internal contacts."""
-    line_groups = 0
+    """Rewards extra cardinal contacts inside each same-label group."""
     internal_contacts = 0
-    median_width = float(np.median([slot.w for slot in slots]))
-    median_height = float(np.median([slot.h for slot in slots]))
-    x_tolerance = max(4.0, median_width * ORTHOGONAL_AXIS_TOL_FACTOR)
-    y_tolerance = max(4.0, median_height * ORTHOGONAL_AXIS_TOL_FACTOR)
 
     for label in set(target_labels):
         indices = [i for i, value in enumerate(target_labels) if value == label]
         index_set = set(indices)
+        internal_contacts += (
+            sum(len(adjacency[index] & index_set) for index in indices) // 2
+        )
 
-        if len(indices) >= 3:
-            xs = [slots[index].center[0] for index in indices]
-            ys = [slots[index].center[1] for index in indices]
-
-            if max(xs) - min(xs) <= x_tolerance or max(ys) - min(ys) <= y_tolerance:
-                line_groups += 1
-
-        internal_contacts += sum(
-            len(adjacency[index] & index_set) for index in indices
-        ) // 2
-
-    return line_groups, -internal_contacts
+    # Lower scores are better, so negate the contact count.
+    return (-internal_contacts,)
 
 
 def improve_target_compactness(slots, target_labels, adjacency):
-    """Locally exchanges boundary cells to remove lines without disconnecting groups."""
+    """Locally exchanges boundary cells to increase cardinal contacts."""
     target = list(target_labels)
     current_score = layout_compactness_score(slots, target, adjacency)
-    median_width = float(np.median([slot.w for slot in slots]))
-    median_height = float(np.median([slot.h for slot in slots]))
-    x_tolerance = max(4.0, median_width * ORTHOGONAL_AXIS_TOL_FACTOR)
-    y_tolerance = max(4.0, median_height * ORTHOGONAL_AXIS_TOL_FACTOR)
 
     for _ in range(len(target)):
         best_move = None
-        best_cycle = None
         best_score = current_score
         groups = {
             label: {index for index, value in enumerate(target) if value == label}
             for label in sorted(set(target))
         }
-        line_labels = set()
-
-        for label, group in groups.items():
-            if len(group) < 3:
-                continue
-
-            xs = [slots[index].center[0] for index in group]
-            ys = [slots[index].center[1] for index in group]
-
-            if max(xs) - min(xs) <= x_tolerance or max(ys) - min(ys) <= y_tolerance:
-                line_labels.add(label)
 
         for label, group in groups.items():
             frontier = set().union(*(adjacency[index] for index in group)) - group
@@ -1036,7 +1074,7 @@ def improve_target_compactness(slots, target_labels, adjacency):
                         target[source],
                     )
 
-                    if labels_are_orthogonally_connected(target, adjacency):
+                    if labels_are_cardinally_connected(target, adjacency):
                         score = layout_compactness_score(slots, target, adjacency)
 
                         if score < best_score:
@@ -1050,8 +1088,7 @@ def improve_target_compactness(slots, target_labels, adjacency):
 
         checked_label_pairs = set()
 
-        for label in sorted(line_labels):
-            group = groups[label]
+        for label, group in groups.items():
             frontier_labels = {
                 target[index]
                 for source in group
@@ -1080,7 +1117,7 @@ def improve_target_compactness(slots, target_labels, adjacency):
                                     target[source],
                                 )
 
-                            if labels_are_orthogonally_connected(target, adjacency):
+                            if labels_are_cardinally_connected(target, adjacency):
                                 score = layout_compactness_score(
                                     slots,
                                     target,
@@ -1097,77 +1134,23 @@ def improve_target_compactness(slots, target_labels, adjacency):
                                     target[source],
                                 )
 
-        if best_move is None and line_labels:
-            for label in sorted(line_labels):
-                group = groups[label]
-                frontier = set().union(
-                    *(adjacency[index] for index in group)
-                ) - group
-
-                for source in sorted(group):
-                    for destination in sorted(frontier):
-                        for third in range(len(target)):
-                            labels = (
-                                target[source],
-                                target[destination],
-                                target[third],
-                            )
-
-                            if len(set(labels)) < 3:
-                                continue
-
-                            for rotated in (
-                                (labels[2], labels[0], labels[1]),
-                                (labels[1], labels[2], labels[0]),
-                            ):
-                                target[source], target[destination], target[third] = (
-                                    rotated
-                                )
-
-                                if labels_are_orthogonally_connected(
-                                    target,
-                                    adjacency,
-                                ):
-                                    score = layout_compactness_score(
-                                        slots,
-                                        target,
-                                        adjacency,
-                                    )
-
-                                    if score < best_score:
-                                        best_score = score
-                                        best_cycle = (
-                                            (source, destination, third),
-                                            rotated,
-                                        )
-
-                                target[source], target[destination], target[third] = (
-                                    labels
-                                )
-
-        if best_move is None and best_cycle is None:
+        if best_move is None:
             break
 
-        if best_move is not None:
-            sources, destinations = best_move
+        sources, destinations = best_move
 
-            for source, destination in zip(sources, destinations):
-                target[source], target[destination] = (
-                    target[destination],
-                    target[source],
-                )
-        else:
-            indices, values = best_cycle
-
-            for index, value in zip(indices, values):
-                target[index] = value
+        for source, destination in zip(sources, destinations):
+            target[source], target[destination] = (
+                target[destination],
+                target[source],
+            )
 
         current_score = best_score
 
     return target
 
 
-def optimize_orthogonal_plan(slots):
+def optimize_isometric_plan(slots):
     """Finds the fewest-swap target among valid cardinally connected layouts."""
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
@@ -1183,7 +1166,7 @@ def optimize_orthogonal_plan(slots):
 
         if target_key in seen_targets:
             return
-        if not labels_are_orthogonally_connected(target_labels, adjacency):
+        if not labels_are_cardinally_connected(target_labels, adjacency):
             return
 
         seen_targets.add(target_key)
@@ -1197,9 +1180,9 @@ def optimize_orthogonal_plan(slots):
             float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
         )
         score = (
-            *layout_compactness_score(slots, target_labels, adjacency),
             len(swaps),
             drag_distance,
+            *layout_compactness_score(slots, target_labels, adjacency),
             target_key,
         )
 
@@ -1245,12 +1228,26 @@ def optimize_orthogonal_plan(slots):
 
     if best is None:
         raise RuntimeError(
-            "could not allocate connected top/right/bottom/left item regions"
+            "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
     improved_finalists = []
 
+    def add_finalist(candidate_target, candidate_swaps):
+        drag_distance = sum(
+            float(dist[swap["from_slot"], swap["to_slot"]]) for swap in candidate_swaps
+        )
+        score = (
+            len(candidate_swaps),
+            drag_distance,
+            *layout_compactness_score(slots, candidate_target, adjacency),
+            tuple(candidate_target),
+        )
+        improved_finalists.append((score, candidate_target, candidate_swaps))
+
     for _, candidate_target, candidate_swaps in finalists:
+        add_finalist(candidate_target, candidate_swaps)
+
         improved_target = improve_target_compactness(
             slots,
             candidate_target,
@@ -1258,34 +1255,42 @@ def optimize_orthogonal_plan(slots):
         )
 
         if improved_target != candidate_target:
-            candidate_swaps = plan_swaps(
+            improved_swaps = plan_swaps(
                 slots=slots,
                 current_labels=current_labels,
                 target_labels=improved_target,
                 dist=dist,
             )
-
-        drag_distance = sum(
-            float(dist[swap["from_slot"], swap["to_slot"]])
-            for swap in candidate_swaps
-        )
-        score = (
-            *layout_compactness_score(slots, improved_target, adjacency),
-            len(candidate_swaps),
-            drag_distance,
-            tuple(improved_target),
-        )
-        improved_finalists.append((score, improved_target, candidate_swaps))
+            add_finalist(improved_target, improved_swaps)
 
     _, target_labels, swaps = min(
         improved_finalists,
         key=lambda candidate: candidate[0],
     )
 
-    if not labels_are_orthogonally_connected(target_labels, adjacency):
+    if not labels_are_cardinally_connected(target_labels, adjacency):
         raise RuntimeError("compactness optimization disconnected an item group")
 
     return target_labels, swaps, adjacency
+
+
+def print_adjacency_summary(slots, adjacency, target_labels):
+    """Prints a concise verification that no diagonal-only groups remain."""
+    edge_count = sum(len(neighbors) for neighbors in adjacency.values()) // 2
+    print(f"Isometric cardinal adjacency edges: {edge_count}")
+
+    for label in sorted(set(target_labels)):
+        indices = [i for i, value in enumerate(target_labels) if value == label]
+        if len(indices) <= 1:
+            continue
+
+        internal_contacts = (
+            sum(len(adjacency[index] & set(indices)) for index in indices) // 2
+        )
+        print(
+            f"Group {label}: {len(indices)} slots, "
+            f"{internal_contacts} cardinal contacts"
+        )
 
 
 # ---------------- mouse actions ----------------
@@ -1366,13 +1371,14 @@ def main(detect_only=False, dry_run=False):
     if excluded_count:
         print(
             f"Excluded {excluded_count} detections outside the main "
-            "orthogonal item grid."
+            "isometric item grid."
         )
 
-    target_labels, swaps, _ = optimize_orthogonal_plan(slots)
+    target_labels, swaps, adjacency = optimize_isometric_plan(slots)
 
     print(f"Planned {len(swaps)} swaps.")
     print(f"Target label order: {target_labels}")
+    print_adjacency_summary(slots, adjacency, target_labels)
 
     print("\nSwap plan:")
     for i, swap in enumerate(swaps, start=1):
