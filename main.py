@@ -1,3 +1,5 @@
+import argparse
+import csv
 import time
 import cv2
 import numpy as np
@@ -5,6 +7,7 @@ import pyautogui
 
 from dataclasses import dataclass
 from collections import Counter
+from pathlib import Path
 
 
 # ---------------- config ----------------
@@ -36,7 +39,30 @@ SCREEN_Y0 = REGION[1]
 
 # Detection settings
 THRESHOLD = 0.70
-NMS_IOU = 0.25
+TEMPLATE_DIR = Path("images")
+TEMPLATE_SCALES = (0.90, 0.95, 1.00, 1.05, 1.10)
+TEMPLATE_THRESHOLDS = {
+    # The single-log sprite has less structure than larger objects. All three
+    # visible board instances score between 0.62 and 0.65 on the real frame.
+    "go_1": 0.62,
+}
+GRAYSCALE_SCORE_WEIGHT = 0.70
+EDGE_SCORE_WEIGHT = 0.30
+LOCAL_MAX_KERNEL = 5
+DUPLICATE_CENTER_FACTOR = 0.35
+MIN_DUPLICATE_CENTER_DISTANCE = 6.0
+DETECTION_DEBUG_DIR = Path("debug")
+
+# Merge field inside REGION, measured from debug/board.png. Matching outside
+# this polygon finds identical decorative crops, bricks, and tools that cannot
+# be swapped.
+BOARD_POLYGON = (
+    (0, 350),
+    (850, 42),
+    (850, 600),
+    (580, 600),
+    (0, 425),
+)
 
 # Cluster settings
 # A cluster is exactly one label: same item + same level.
@@ -58,6 +84,14 @@ COMPACT_CONTACT_REWARD = 2.75
 # If one label appears more than this, it is split into several compact
 # clusters with the same target label.
 MAX_CLUSTER_SIZE = 4
+CLUSTER_ALLOCATION_ORDERS = (
+    "top_left",
+    "top_right",
+    "bottom_left",
+    "bottom_right",
+    "label_forward",
+    "label_reverse",
+)
 
 # Orthogonal connectivity means left/right/up/down only.
 # It is stricter, but on an isometric board it can easily make vertical or
@@ -72,8 +106,8 @@ DISTANCE_CLUSTER_NEIGHBORS = 4
 
 # Swap settings
 DRY_RUN = False
-DRAG_DURATION = 0.1
-AFTER_SWAP_DELAY = 0.05
+DRAG_DURATION = 0.05
+AFTER_SWAP_DELAY = 0.005
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
@@ -99,74 +133,326 @@ class Detection:
 
     @property
     def screen_center(self):
-        return SCREEN_X0 + self.x + self.w // 2, SCREEN_Y0 + self.y + self.h
+        return (
+            SCREEN_X0 + self.x + self.w // 2,
+            SCREEN_Y0 + self.y + self.h // 2,
+        )
 
 
 # ---------------- detection ----------------
 
 
-def detect_all_items(screenshot_img):
-    screenshot_hsv = cv2.cvtColor(screenshot_img, cv2.COLOR_BGR2HSV)
+def template_paths(item, level):
+    """Returns the base template and optional variants such as bo1_2.png."""
+    base_name = f"{item}{level}"
+    return sorted(
+        path
+        for path in TEMPLATE_DIR.glob(f"{base_name}*.png")
+        if path.stem == base_name or path.stem.startswith(f"{base_name}_")
+    )
+
+
+def matching_features(image):
+    """Builds illumination-tolerant intensity and shape features."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray, 45, 135)
+    return gray, edges
+
+
+def make_board_mask(image_shape):
+    mask = np.zeros(image_shape[:2], dtype=np.uint8)
+    polygon = np.array(BOARD_POLYGON, dtype=np.int32)
+    cv2.fillPoly(mask, [polygon], 255)
+    return mask
+
+
+def combined_match_score(screenshot_features, template_img):
+    template_gray, template_edges = matching_features(template_img)
+    screenshot_gray, screenshot_edges = screenshot_features
+
+    gray_score = cv2.matchTemplate(
+        screenshot_gray,
+        template_gray,
+        cv2.TM_CCOEFF_NORMED,
+    )
+    edge_score = cv2.matchTemplate(
+        screenshot_edges,
+        template_edges,
+        cv2.TM_CCOEFF_NORMED,
+    )
+    edge_score = np.nan_to_num(edge_score, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return GRAYSCALE_SCORE_WEIGHT * gray_score + EDGE_SCORE_WEIGHT * edge_score
+
+
+def scaled_templates(template):
+    """Yields unique configured template sizes, including the original size."""
+    original_h, original_w = template.shape[:2]
+    seen_sizes = set()
+
+    for scale in TEMPLATE_SCALES:
+        width = max(3, int(round(original_w * scale)))
+        height = max(3, int(round(original_h * scale)))
+
+        if (width, height) in seen_sizes:
+            continue
+
+        seen_sizes.add((width, height))
+        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        yield cv2.resize(template, (width, height), interpolation=interpolation)
+
+
+def deduplicate_detections(detections):
+    """Keeps the best label near each center without removing nearby slots."""
+    kept = []
+
+    for candidate in sorted(detections, key=lambda d: d.score, reverse=True):
+        duplicate = False
+
+        for accepted in kept:
+            dx = candidate.center[0] - accepted.center[0]
+            dy = candidate.center[1] - accepted.center[1]
+            center_distance = float(np.hypot(dx, dy))
+            reference_size = min(
+                candidate.w,
+                candidate.h,
+                accepted.w,
+                accepted.h,
+            )
+            duplicate_distance = max(
+                MIN_DUPLICATE_CENTER_DISTANCE,
+                reference_size * DUPLICATE_CENTER_FACTOR,
+            )
+
+            if center_distance <= duplicate_distance:
+                duplicate = True
+                break
+
+        if not duplicate:
+            kept.append(candidate)
+
+    return kept
+
+
+def detect_all_items(screenshot_img, diagnostics=None):
+    screenshot_features = matching_features(screenshot_img)
+    screenshot_h, screenshot_w = screenshot_img.shape[:2]
+    board_mask = make_board_mask(screenshot_img.shape)
     detections = []
 
     for item in items:
         for level in item_levels.get(item, levels):
-            template_path = f"images/{item}{level}.png"
-            template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+            paths = template_paths(item, level)
 
-            if template is None:
-                print(f"Skipping missing template: {template_path}")
+            if not paths:
+                print(
+                    f"Skipping missing template: {TEMPLATE_DIR / f'{item}{level}.png'}"
+                )
                 continue
 
-            template_hsv = cv2.cvtColor(template, cv2.COLOR_BGR2HSV)
-            th, tw = template_hsv.shape[:2]
+            label = f"{item}_{level}"
+            threshold = TEMPLATE_THRESHOLDS.get(label, THRESHOLD)
 
-            result = cv2.matchTemplate(
-                screenshot_hsv,
-                template_hsv,
-                cv2.TM_CCOEFF_NORMED,
-            )
+            if diagnostics is not None:
+                diagnostics[label] = {
+                    "best_score": float("-inf"),
+                    "best_template": "",
+                    "best_width": 0,
+                    "best_height": 0,
+                    "best_x": 0,
+                    "best_y": 0,
+                    "threshold": threshold,
+                    "detected_count": 0,
+                }
 
-            local_max = result == cv2.dilate(result, np.ones((3, 3), np.uint8))
-            ys, xs = np.where((result >= THRESHOLD) & local_max)
+            for template_path in paths:
+                template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
 
-            for x, y in zip(xs, ys):
-                detections.append(
-                    Detection(
-                        label=f"{item}_{level}",
-                        item=item,
-                        level=level,
-                        x=int(x),
-                        y=int(y),
-                        w=int(tw),
-                        h=int(th),
-                        score=float(result[y, x]),
+                if template is None:
+                    print(f"Skipping unreadable template: {template_path}")
+                    continue
+
+                for scaled_template in scaled_templates(template):
+                    th, tw = scaled_template.shape[:2]
+
+                    if th > screenshot_h or tw > screenshot_w:
+                        continue
+
+                    result = combined_match_score(
+                        screenshot_features,
+                        scaled_template,
                     )
-                )
+                    valid_centers = board_mask[
+                        th // 2 : th // 2 + result.shape[0],
+                        tw // 2 : tw // 2 + result.shape[1],
+                    ]
+                    result = np.where(valid_centers > 0, result, -1.0)
 
-    return nms_detections(detections)
+                    if diagnostics is not None:
+                        best_score = float(np.max(result))
+
+                        if best_score > diagnostics[label]["best_score"]:
+                            best_y, best_x = np.unravel_index(
+                                int(np.argmax(result)),
+                                result.shape,
+                            )
+                            diagnostics[label].update(
+                                {
+                                    "best_score": best_score,
+                                    "best_template": template_path.name,
+                                    "best_width": tw,
+                                    "best_height": th,
+                                    "best_x": int(best_x),
+                                    "best_y": int(best_y),
+                                }
+                            )
+
+                    local_max = result == cv2.dilate(
+                        result,
+                        np.ones((LOCAL_MAX_KERNEL, LOCAL_MAX_KERNEL), np.uint8),
+                    )
+                    ys, xs = np.where((result >= threshold) & local_max)
+
+                    for x, y in zip(xs, ys):
+                        detections.append(
+                            Detection(
+                                label=label,
+                                item=item,
+                                level=level,
+                                x=int(x),
+                                y=int(y),
+                                w=int(tw),
+                                h=int(th),
+                                score=float(result[y, x]),
+                            )
+                        )
+
+    detections = deduplicate_detections(detections)
+
+    if diagnostics is not None:
+        detected_counts = Counter(detection.label for detection in detections)
+
+        for label, values in diagnostics.items():
+            values["detected_count"] = detected_counts[label]
+
+    return detections
 
 
-def nms_detections(detections):
-    """Removes duplicate overlapping detections globally."""
-    if not detections:
-        return []
-
-    boxes = [[d.x, d.y, d.w, d.h] for d in detections]
-    scores = [d.score for d in detections]
-
-    indices = cv2.dnn.NMSBoxes(
-        boxes,
-        scores,
-        score_threshold=0.0,
-        nms_threshold=NMS_IOU,
+def save_detection_debug_images(screenshot_img, detections, diagnostics=None):
+    """Saves the captured board and an annotated copy for calibration."""
+    DETECTION_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    raw_path = DETECTION_DEBUG_DIR / "board.png"
+    annotated_path = DETECTION_DEBUG_DIR / "detections.png"
+    scores_path = DETECTION_DEBUG_DIR / "scores.csv"
+    annotated = screenshot_img.copy()
+    cv2.polylines(
+        annotated,
+        [np.array(BOARD_POLYGON, dtype=np.int32)],
+        isClosed=True,
+        color=(255, 128, 0),
+        thickness=2,
     )
 
-    if len(indices) == 0:
-        return []
+    for detection in detections:
+        top_left = (detection.x, detection.y)
+        bottom_right = (detection.x + detection.w, detection.y + detection.h)
+        cv2.rectangle(annotated, top_left, bottom_right, (0, 255, 0), 1)
+        cv2.putText(
+            annotated,
+            f"{detection.label} {detection.score:.2f}",
+            (detection.x, max(10, detection.y - 3)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
 
-    indices = np.array(indices).flatten()
-    return [detections[i] for i in indices]
+    cv2.imwrite(str(raw_path), screenshot_img)
+    cv2.imwrite(str(annotated_path), annotated)
+
+    if diagnostics is not None:
+        fieldnames = [
+            "label",
+            "best_score",
+            "threshold",
+            "detected_count",
+            "best_template",
+            "best_width",
+            "best_height",
+            "best_x",
+            "best_y",
+        ]
+
+        with scores_path.open("w", newline="", encoding="utf-8") as output:
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for label in sorted(diagnostics):
+                values = diagnostics[label]
+                writer.writerow(
+                    {
+                        "label": label,
+                        "best_score": f"{values['best_score']:.4f}",
+                        "threshold": f"{values['threshold']:.4f}",
+                        "detected_count": values["detected_count"],
+                        "best_template": values["best_template"],
+                        "best_width": values["best_width"],
+                        "best_height": values["best_height"],
+                        "best_x": values["best_x"],
+                        "best_y": values["best_y"],
+                    }
+                )
+
+    return raw_path, annotated_path, scores_path
+
+
+def save_swap_plan_debug_image(screenshot_img, slots, swaps):
+    """Draws numbered drag arrows over the captured board."""
+    DETECTION_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = DETECTION_DEBUG_DIR / "swap_plan.png"
+    annotated = screenshot_img.copy()
+
+    for number, swap in enumerate(swaps, start=1):
+        source = tuple(int(value) for value in slots[swap["from_slot"]].center)
+        destination = tuple(int(value) for value in slots[swap["to_slot"]].center)
+        midpoint = (
+            (source[0] + destination[0]) // 2,
+            (source[1] + destination[1]) // 2,
+        )
+        cv2.arrowedLine(
+            annotated,
+            source,
+            destination,
+            (255, 0, 255),
+            1,
+            cv2.LINE_AA,
+            tipLength=0.18,
+        )
+        cv2.putText(
+            annotated,
+            str(number),
+            midpoint,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            annotated,
+            str(number),
+            midpoint,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(output_path), annotated)
+    return output_path
 
 
 # ---------------- geometry ----------------
@@ -505,7 +791,7 @@ def choose_best_component(
     same_set = set(current_label_indices)
 
     best_component = None
-    best_score = float("inf")
+    best_key = None
 
     for component in components:
         component = set(component)
@@ -513,10 +799,12 @@ def choose_best_component(
         d_to_target = float(np.linalg.norm(component_center - target_point))
         same_inside = sum(1 for i in component if i in same_set)
 
-        score = d_to_target - median_nn * 0.80 * same_inside
+        # First retain as many already-correct items as possible. Geometry is
+        # only the tie-breaker, so visual compactness cannot add extra swaps.
+        key = (-same_inside, d_to_target)
 
-        if score < best_score:
-            best_score = score
+        if best_key is None or key < best_key:
+            best_key = key
             best_component = component
 
     return best_component
@@ -598,7 +886,6 @@ def grow_compact_blob(seed, size, available, adj, dist, slots, target_point, med
 
         def candidate_cost(i):
             proposed = cluster + [i]
-            proposed_set = set(proposed)
 
             pts = np.array([slots[j].center for j in proposed], dtype=np.float32)
             centroid = np.median(pts, axis=0)
@@ -663,7 +950,8 @@ def choose_compact_cluster(
     )
 
     best_cluster = []
-    best_score = float("inf")
+    best_key = None
+    same_set = set(current_label_indices)
 
     for seed in seeds:
         cluster = grow_compact_blob(
@@ -677,7 +965,7 @@ def choose_compact_cluster(
             median_nn=median_nn,
         )
 
-        score = compactness_score(
+        compactness = compactness_score(
             slots=slots,
             cluster=cluster,
             adj=adj,
@@ -686,20 +974,48 @@ def choose_compact_cluster(
             current_label_indices=current_label_indices,
             median_nn=median_nn,
         )
+        same_inside = sum(i in same_set for i in cluster)
+        key = (
+            len(cluster) != size,
+            -same_inside,
+            compactness,
+            tuple(sorted(cluster)),
+        )
 
-        if len(cluster) == size and score < best_score:
-            best_score = score
-            best_cluster = cluster
-
-        # Keep the best partial cluster as a fallback.
-        if not best_cluster and score < best_score:
-            best_score = score
+        if best_key is None or key < best_key:
+            best_key = key
             best_cluster = cluster
 
     return best_cluster
 
 
-def make_label_clustered_target_labels(slots, dist, median_nn):
+def cluster_job_sort_key(job, allocation_order):
+    common = (-job["size"],)
+
+    if allocation_order == "top_left":
+        position = (job["target_point"][1], job["target_point"][0])
+    elif allocation_order == "top_right":
+        position = (job["target_point"][1], -job["target_point"][0])
+    elif allocation_order == "bottom_left":
+        position = (-job["target_point"][1], job["target_point"][0])
+    elif allocation_order == "bottom_right":
+        position = (-job["target_point"][1], -job["target_point"][0])
+    elif allocation_order == "label_forward":
+        position = (job["label"], job["part"])
+    elif allocation_order == "label_reverse":
+        position = tuple(-ord(char) for char in job["label"]) + (job["part"],)
+    else:
+        raise ValueError(f"unknown cluster allocation order: {allocation_order}")
+
+    return common + position + (job["label"], job["part"])
+
+
+def make_label_clustered_target_labels(
+    slots,
+    dist,
+    median_nn,
+    allocation_order="top_left",
+):
     """
     Produces target labels aligned with slot indices.
 
@@ -761,13 +1077,7 @@ def make_label_clustered_target_labels(slots, dist, median_nn):
     # Larger cluster chunks are allocated first because they are harder to fit
     # after smaller chunks fragment the board.
     cluster_jobs.sort(
-        key=lambda job: (
-            -job["size"],
-            job["target_point"][1],
-            job["target_point"][0],
-            job["label"],
-            job["part"],
-        )
+        key=lambda job: cluster_job_sort_key(job, allocation_order),
     )
 
     clusters = {}
@@ -1050,6 +1360,51 @@ def plan_swaps(slots, current_labels, target_labels, dist):
     return swaps
 
 
+def optimize_clustered_plan(slots, dist, median_nn):
+    """Chooses a connected layout with minimal swaps, then drag distance."""
+    current_labels = [slot.label for slot in slots]
+    best = None
+
+    for allocation_order in CLUSTER_ALLOCATION_ORDERS:
+        target_labels, clusters = make_label_clustered_target_labels(
+            slots=slots,
+            dist=dist,
+            median_nn=median_nn,
+            allocation_order=allocation_order,
+        )
+        swaps = plan_swaps(
+            slots=slots,
+            current_labels=current_labels,
+            target_labels=target_labels,
+            dist=dist,
+        )
+        disconnected_count = sum(
+            not cluster_is_connected(slots, indices, dist, median_nn)
+            for indices in clusters.values()
+        )
+        drag_distance = sum(
+            float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
+        )
+        score = (
+            disconnected_count,
+            len(swaps),
+            drag_distance,
+            allocation_order,
+        )
+
+        if best is None or score < best[0]:
+            best = (
+                score,
+                target_labels,
+                clusters,
+                swaps,
+                allocation_order,
+            )
+
+    _, target_labels, clusters, swaps, allocation_order = best
+    return target_labels, clusters, swaps, allocation_order
+
+
 # ---------------- mouse actions ----------------
 
 
@@ -1091,40 +1446,55 @@ def execute_swaps(slots, swaps):
 # ---------------- main ----------------
 
 
-def main():
+def main(detect_only=False, dry_run=False):
     time.sleep(1)
 
     screenshot = pyautogui.screenshot(region=REGION)
     screenshot_img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
-    detections = detect_all_items(screenshot_img)
+    diagnostics = {}
+    detections = detect_all_items(screenshot_img, diagnostics=diagnostics)
+    raw_debug_path, annotated_debug_path, scores_debug_path = (
+        save_detection_debug_images(
+            screenshot_img,
+            detections,
+            diagnostics=diagnostics,
+        )
+    )
 
     print(f"Detected {len(detections)} items.")
+    print(
+        "Detection debug files: "
+        f"{raw_debug_path}, {annotated_debug_path}, {scores_debug_path}"
+    )
+
+    if detect_only:
+        print("Detection-only mode. No mouse actions were executed.")
+        return
 
     if not detections:
         print("No items detected. Try lowering THRESHOLD.")
         return
 
     slots = stable_sort_slots(detections)
-    current_labels = [d.label for d in slots]
 
     dist = pairwise_distance_matrix(slots)
     median_nn = median_nearest_neighbor_distance(dist)
 
-    target_labels, clusters = make_label_clustered_target_labels(
+    _, clusters, swaps, allocation_order = optimize_clustered_plan(
         slots=slots,
         dist=dist,
         median_nn=median_nn,
     )
-
-    swaps = plan_swaps(
-        slots=slots,
-        current_labels=current_labels,
-        target_labels=target_labels,
-        dist=dist,
+    swap_plan_debug_path = save_swap_plan_debug_image(
+        screenshot_img,
+        slots,
+        swaps,
     )
 
     print(f"Planned {len(swaps)} swaps.")
+    print(f"Cluster allocation order: {allocation_order}")
+    print(f"Swap plan image: {swap_plan_debug_path}")
 
     print("\nLabel clusters:")
     for label, indices in clusters.items():
@@ -1146,12 +1516,24 @@ def main():
             f"{swap['moving_label']} swaps with {swap['replaced_label']}"
         )
 
-    if DRY_RUN:
-        print("\nDRY_RUN is True. No mouse actions were executed.")
+    if DRY_RUN or dry_run:
+        print("\nDry-run mode. No mouse actions were executed.")
         return
 
     execute_swaps(slots, swaps)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--detect-only",
+        action="store_true",
+        help="capture and annotate detections without planning or executing swaps",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="capture, detect, and print the swap plan without moving the mouse",
+    )
+    args = parser.parse_args()
+    main(detect_only=args.detect_only, dry_run=args.dry_run)
