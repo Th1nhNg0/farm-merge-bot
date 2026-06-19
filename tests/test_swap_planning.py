@@ -1,9 +1,9 @@
+import itertools
 import random
 import sys
 import tempfile
 import types
 import unittest
-from collections import Counter
 from pathlib import Path
 from unittest import mock
 
@@ -31,47 +31,106 @@ def apply_swaps(labels, swaps):
 
 
 class SwapPlanningTests(unittest.TestCase):
-    def test_cluster_optimizer_is_no_worse_than_default_layout(self):
-        labels = ["a", "b", "c", "a", "b", "c", "a", "b", "c", "a", "b", "c"]
-        slots = [
+    def make_grid_slots(self, labels, columns):
+        return [
             types.SimpleNamespace(
                 label=label,
-                center=((index % 4) * 40.0, (index // 4) * 40.0),
-                w=24,
-                h=24,
+                center=((index % columns) * 40, (index // columns) * 40),
+                w=20,
+                h=20,
             )
             for index, label in enumerate(labels)
         ]
+
+    def test_orthogonal_adjacency_excludes_diagonals(self):
+        slots = self.make_grid_slots(["a", "b", "c", "d"], columns=2)
+
+        adjacency = main.build_orthogonal_adjacency(slots)
+
+        self.assertEqual({1, 2}, adjacency[0])
+        self.assertNotIn(3, adjacency[0])
+
+    def test_orthogonal_adjacency_does_not_bridge_a_missing_cell(self):
+        centers = [(0, 0), (40, 0), (0, 40), (40, 40), (120, 0)]
+        slots = [
+            types.SimpleNamespace(label="a", center=center, w=20, h=20)
+            for center in centers
+        ]
+
+        adjacency = main.build_orthogonal_adjacency(slots)
+
+        self.assertNotIn(4, adjacency[1])
+        self.assertEqual(set(), adjacency[4])
+
+    def test_orthogonal_optimizer_uses_global_minimum_swaps_on_small_grid(self):
+        current = ["a", "b", "a", "c", "b", "c"]
+        slots = self.make_grid_slots(current, columns=3)
         dist = main.pairwise_distance_matrix(slots)
-        median_nn = main.median_nearest_neighbor_distance(dist)
-        default_target, _ = main.make_label_clustered_target_labels(
-            slots,
-            dist,
-            median_nn,
-        )
-        default_swaps = main.plan_swaps(slots, labels, default_target, dist)
-
-        target, clusters, swaps, _ = main.optimize_clustered_plan(
-            slots,
-            dist,
-            median_nn,
+        adjacency = main.build_orthogonal_adjacency(slots)
+        possible_targets = {
+            target
+            for target in set(itertools.permutations(current))
+            if main.labels_are_orthogonally_connected(target, adjacency)
+        }
+        global_minimum = min(
+            len(main.plan_swaps(slots, current, list(target), dist))
+            for target in possible_targets
         )
 
-        self.assertLessEqual(len(swaps), len(default_swaps))
-        self.assertEqual(Counter(labels), Counter(target))
+        target, swaps, planned_adjacency = main.optimize_orthogonal_plan(slots)
+
+        self.assertEqual(global_minimum, len(swaps))
         self.assertTrue(
-            all(
-                main.cluster_is_connected(slots, indices, dist, median_nn)
-                for indices in clusters.values()
+            main.labels_are_orthogonally_connected(target, planned_adjacency)
+        )
+        self.assertEqual(target, apply_swaps(current, swaps))
+
+    def test_orthogonal_optimizer_handles_grid_without_full_scan_path(self):
+        centers = [(40, 0), (0, 40), (40, 40), (80, 40), (40, 80)]
+        labels = ["b", "a", "a", "a", "a"]
+        slots = [
+            types.SimpleNamespace(label=label, center=center, w=20, h=20)
+            for label, center in zip(labels, centers)
+        ]
+        adjacency = main.build_orthogonal_adjacency(slots)
+
+        self.assertFalse(
+            any(
+                all(right in adjacency[left] for left, right in zip(order, order[1:]))
+                for order in main.orthogonal_scan_orders(slots, adjacency)
             )
         )
 
-    def test_board_mask_excludes_decorations_outside_merge_field(self):
-        mask = main.make_board_mask((600, 850, 3))
+        target, swaps, planned_adjacency = main.optimize_orthogonal_plan(slots)
 
-        self.assertEqual(0, mask[50, 300])
-        self.assertEqual(255, mask[250, 500])
-        self.assertEqual(0, mask[500, 100])
+        self.assertEqual([], swaps)
+        self.assertEqual(labels, target)
+        self.assertTrue(
+            main.labels_are_orthogonally_connected(target, planned_adjacency)
+        )
+
+    def test_orthogonal_optimizer_prefers_blocks_over_zero_swap_lines(self):
+        current = ["a", "a", "a", "a", "b", "b", "b", "b"]
+        slots = self.make_grid_slots(current, columns=4)
+
+        target, swaps, adjacency = main.optimize_orthogonal_plan(slots)
+
+        self.assertEqual(0, main.layout_compactness_score(slots, target, adjacency)[0])
+        self.assertGreater(len(swaps), 0)
+        self.assertTrue(main.labels_are_orthogonally_connected(target, adjacency))
+
+    def test_largest_orthogonal_component_excludes_distant_screen_match(self):
+        slots = self.make_grid_slots(["a", "a", "b", "b"], columns=2)
+        noise = types.SimpleNamespace(
+            label="a",
+            center=(500, 500),
+            w=20,
+            h=20,
+        )
+
+        kept = main.largest_orthogonal_component(slots + [noise])
+
+        self.assertEqual(slots, kept)
 
     def test_template_paths_include_only_base_and_underscore_variants(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -84,6 +143,18 @@ class SwapPlanningTests(unittest.TestCase):
                 paths = main.template_paths("bo", 1)
 
         self.assertEqual(["bo1.png", "bo1_2.png"], [path.name for path in paths])
+
+    def test_template_paths_allow_variant_only_template_sets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+
+            for name in ("bo1_1.png", "bo1_2.png", "bo2_1.png"):
+                (directory / name).touch()
+
+            with mock.patch.object(main, "TEMPLATE_DIR", directory):
+                paths = main.template_paths("bo", 1)
+
+        self.assertEqual(["bo1_1.png", "bo1_2.png"], [path.name for path in paths])
 
     def test_center_deduplication_keeps_adjacent_overlapping_items(self):
         detections = [
@@ -111,11 +182,6 @@ class SwapPlanningTests(unittest.TestCase):
                 mock.patch.object(main, "TEMPLATE_DIR", directory),
                 mock.patch.object(main, "TEMPLATE_SCALES", (1.0, 1.1)),
                 mock.patch.object(main, "THRESHOLD", 0.75),
-                mock.patch.object(
-                    main,
-                    "BOARD_POLYGON",
-                    ((0, 0), (99, 0), (99, 79), (0, 79)),
-                ),
                 mock.patch.object(main, "items", ["test"]),
                 mock.patch.object(main, "levels", [1]),
                 mock.patch.object(main, "item_levels", {}),
@@ -142,37 +208,7 @@ class SwapPlanningTests(unittest.TestCase):
     def test_detection_screen_click_position_is_rectangle_center(self):
         detection = main.Detection("bo_1", "bo", 1, 10, 20, 30, 40, 0.9)
 
-        self.assertEqual(
-            (main.SCREEN_X0 + 25, main.SCREEN_Y0 + 40),
-            detection.screen_center,
-        )
-
-    def test_cluster_selection_minimizes_displaced_items_first(self):
-        slots = [
-            types.SimpleNamespace(center=(float(x), 0.0), w=1, h=1)
-            for x in range(4)
-        ]
-        points = np.array([slot.center for slot in slots])
-        dist = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
-        adj = {
-            0: {1},
-            1: {0, 2},
-            2: {1, 3},
-            3: {2},
-        }
-
-        cluster = main.choose_compact_cluster(
-            slots=slots,
-            size=2,
-            candidate_area=set(range(4)),
-            current_label_indices=[0, 3],
-            target_point=np.array([1.5, 0.0]),
-            adj=adj,
-            dist=dist,
-            median_nn=0.01,
-        )
-
-        self.assertTrue(set(cluster) & {0, 3})
+        self.assertEqual((25, 40), detection.screen_center)
 
     def test_three_cycle_uses_two_swaps(self):
         current = ["a", "b", "c"]
