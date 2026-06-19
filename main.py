@@ -37,7 +37,11 @@ item_levels = {"go": [1, 2, 3, 4, 5], "da": [1, 2, 3, 4, 5], "congcu": [1, 2, 3,
 # Detection settings
 THRESHOLD = 0.70
 TEMPLATE_DIR = Path("images")
-TEMPLATE_SCALES = (0.90, 0.95, 1.00, 1.05, 1.10)
+FAST_TEMPLATE_SCALES = (1.00,)
+ACCURATE_TEMPLATE_SCALES = (0.90, 0.95, 1.00, 1.05, 1.10)
+TEMPLATE_SCALES = FAST_TEMPLATE_SCALES
+STARTUP_DELAY = 0.0
+DEBUG_BY_DEFAULT = False
 TEMPLATE_THRESHOLDS = {
     # The single-log sprite has less structure than larger objects. All three
     # visible board instances score between 0.62 and 0.65 on the real frame.
@@ -58,11 +62,19 @@ GRID_ANCHOR_Y_FACTOR = 0.72
 ISOMETRIC_AXIS_TOLERANCE = 0.65
 ISOMETRIC_MIN_STEP_FACTOR = 0.45
 ISOMETRIC_MAX_STEP_FACTOR = 1.70
-EXACT_LABEL_ORDER_LIMIT = 8
-LABEL_ORDER_TRIALS = 512
+FAST_EXACT_LABEL_ORDER_LIMIT = 6
+FAST_LABEL_ORDER_TRIALS = 96
+FAST_CONNECTED_REGION_TRIALS = 96
+FAST_COMPACTNESS_FINALISTS = 4
+ACCURATE_EXACT_LABEL_ORDER_LIMIT = 8
+ACCURATE_LABEL_ORDER_TRIALS = 512
+ACCURATE_CONNECTED_REGION_TRIALS = 384
+ACCURATE_COMPACTNESS_FINALISTS = 8
+EXACT_LABEL_ORDER_LIMIT = FAST_EXACT_LABEL_ORDER_LIMIT
+LABEL_ORDER_TRIALS = FAST_LABEL_ORDER_TRIALS
 LABEL_ORDER_SEED = 20260619
-CONNECTED_REGION_TRIALS = 384
-COMPACTNESS_FINALISTS = 8
+CONNECTED_REGION_TRIALS = FAST_CONNECTED_REGION_TRIALS
+COMPACTNESS_FINALISTS = FAST_COMPACTNESS_FINALISTS
 
 # Swap settings
 DRY_RUN = False
@@ -101,6 +113,22 @@ class Detection:
         return self.x + self.w // 2, self.y + int(round(self.h * GRID_ANCHOR_Y_FACTOR))
 
 
+@dataclass(frozen=True)
+class PreparedTemplate:
+    """Template variant cached in all expensive preprocessing forms."""
+
+    label: str
+    item: str
+    level: int
+    template_name: str
+    w: int
+    h: int
+    features: tuple
+
+
+_PREPARED_TEMPLATE_CACHE = {}
+
+
 # ---------------- detection ----------------
 
 
@@ -122,8 +150,9 @@ def matching_features(image):
     return gray, edges
 
 
-def combined_match_score(screenshot_features, template_img):
-    template_gray, template_edges = matching_features(template_img)
+def combined_match_score(screenshot_features, template_features, use_edges=True):
+    """Scores a cached template against a screenshot feature pair."""
+    template_gray, template_edges = template_features
     screenshot_gray, screenshot_edges = screenshot_features
 
     gray_score = cv2.matchTemplate(
@@ -131,6 +160,10 @@ def combined_match_score(screenshot_features, template_img):
         template_gray,
         cv2.TM_CCOEFF_NORMED,
     )
+
+    if not use_edges or EDGE_SCORE_WEIGHT <= 0:
+        return gray_score
+
     edge_score = cv2.matchTemplate(
         screenshot_edges,
         template_edges,
@@ -141,12 +174,14 @@ def combined_match_score(screenshot_features, template_img):
     return GRAYSCALE_SCORE_WEIGHT * gray_score + EDGE_SCORE_WEIGHT * edge_score
 
 
-def scaled_templates(template):
+def scaled_templates(template, template_scales=None):
     """Yields unique configured template sizes, including the original size."""
+    if template_scales is None:
+        template_scales = TEMPLATE_SCALES
     original_h, original_w = template.shape[:2]
     seen_sizes = set()
 
-    for scale in TEMPLATE_SCALES:
+    for scale in template_scales:
         width = max(3, int(round(original_w * scale)))
         height = max(3, int(round(original_h * scale)))
 
@@ -190,93 +225,151 @@ def deduplicate_detections(detections):
     return kept
 
 
-def detect_all_items(screenshot_img, diagnostics=None):
+def configured_labels():
+    """Yields every configured item-level label in detection order."""
+    for item in items:
+        for level in item_levels.get(item, levels):
+            yield item, level, f"{item}_{level}"
+
+
+def load_prepared_templates(template_scales=None):
+    """Reads and preprocesses templates once per process and scale tuple."""
+    if template_scales is None:
+        template_scales = TEMPLATE_SCALES
+
+    template_scales = tuple(template_scales)
+    cached = _PREPARED_TEMPLATE_CACHE.get(template_scales)
+
+    if cached is not None:
+        return cached
+
+    prepared = []
+    missing = []
+
+    for item, level, label in configured_labels():
+        paths = template_paths(item, level)
+
+        if not paths:
+            missing.append((item, level, label))
+            continue
+
+        for template_path in paths:
+            template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+
+            if template is None:
+                print(f"Skipping unreadable template: {template_path}")
+                continue
+
+            for scaled_template in scaled_templates(template, template_scales):
+                th, tw = scaled_template.shape[:2]
+                prepared.append(
+                    PreparedTemplate(
+                        label=label,
+                        item=item,
+                        level=level,
+                        template_name=template_path.name,
+                        w=int(tw),
+                        h=int(th),
+                        features=matching_features(scaled_template),
+                    )
+                )
+
+    _PREPARED_TEMPLATE_CACHE[template_scales] = (prepared, missing)
+    return prepared, missing
+
+
+def _init_diagnostics(label, threshold):
+    return {
+        "best_score": float("-inf"),
+        "best_template": "",
+        "best_width": 0,
+        "best_height": 0,
+        "best_x": 0,
+        "best_y": 0,
+        "threshold": threshold,
+        "detected_count": 0,
+    }
+
+
+def detect_all_items(
+    screenshot_img,
+    diagnostics=None,
+    template_scales=None,
+    offset=(0, 0),
+    use_edges=True,
+    quiet_missing=False,
+):
     screenshot_features = matching_features(screenshot_img)
     screenshot_h, screenshot_w = screenshot_img.shape[:2]
     detections = []
+    offset_x, offset_y = offset
+    prepared_templates, missing_templates = load_prepared_templates(template_scales)
 
-    for item in items:
-        for level in item_levels.get(item, levels):
-            paths = template_paths(item, level)
+    if not quiet_missing:
+        for item, level, _ in missing_templates:
+            print(
+                "Skipping missing templates: "
+                f"{TEMPLATE_DIR / f'{item}{level}.png'} or "
+                f"{TEMPLATE_DIR / f'{item}{level}_<variant>.png'}"
+            )
 
-            if not paths:
-                print(
-                    "Skipping missing templates: "
-                    f"{TEMPLATE_DIR / f'{item}{level}.png'} or "
-                    f"{TEMPLATE_DIR / f'{item}{level}_<variant>.png'}"
+    if diagnostics is not None:
+        for _, _, label in configured_labels():
+            diagnostics[label] = _init_diagnostics(
+                label,
+                TEMPLATE_THRESHOLDS.get(label, THRESHOLD),
+            )
+
+    for template in prepared_templates:
+        if template.h > screenshot_h or template.w > screenshot_w:
+            continue
+
+        label = template.label
+        threshold = TEMPLATE_THRESHOLDS.get(label, THRESHOLD)
+        result = combined_match_score(
+            screenshot_features,
+            template.features,
+            use_edges=use_edges,
+        )
+
+        if diagnostics is not None:
+            best_score = float(np.max(result))
+
+            if best_score > diagnostics[label]["best_score"]:
+                best_y, best_x = np.unravel_index(
+                    int(np.argmax(result)),
+                    result.shape,
                 )
-                continue
+                diagnostics[label].update(
+                    {
+                        "best_score": best_score,
+                        "best_template": template.template_name,
+                        "best_width": template.w,
+                        "best_height": template.h,
+                        "best_x": int(best_x + offset_x),
+                        "best_y": int(best_y + offset_y),
+                    }
+                )
 
-            label = f"{item}_{level}"
-            threshold = TEMPLATE_THRESHOLDS.get(label, THRESHOLD)
+        local_max = result == cv2.dilate(
+            result,
+            np.ones((LOCAL_MAX_KERNEL, LOCAL_MAX_KERNEL), np.uint8),
+        )
+        ys, xs = np.where((result >= threshold) & local_max)
 
-            if diagnostics is not None:
-                diagnostics[label] = {
-                    "best_score": float("-inf"),
-                    "best_template": "",
-                    "best_width": 0,
-                    "best_height": 0,
-                    "best_x": 0,
-                    "best_y": 0,
-                    "threshold": threshold,
-                    "detected_count": 0,
-                }
-
-            for template_path in paths:
-                template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
-
-                if template is None:
-                    print(f"Skipping unreadable template: {template_path}")
-                    continue
-
-                for scaled_template in scaled_templates(template):
-                    th, tw = scaled_template.shape[:2]
-
-                    if th > screenshot_h or tw > screenshot_w:
-                        continue
-
-                    result = combined_match_score(
-                        screenshot_features,
-                        scaled_template,
-                    )
-                    if diagnostics is not None:
-                        best_score = float(np.max(result))
-
-                        if best_score > diagnostics[label]["best_score"]:
-                            best_y, best_x = np.unravel_index(
-                                int(np.argmax(result)),
-                                result.shape,
-                            )
-                            diagnostics[label].update(
-                                {
-                                    "best_score": best_score,
-                                    "best_template": template_path.name,
-                                    "best_width": tw,
-                                    "best_height": th,
-                                    "best_x": int(best_x),
-                                    "best_y": int(best_y),
-                                }
-                            )
-
-                    local_max = result == cv2.dilate(
-                        result,
-                        np.ones((LOCAL_MAX_KERNEL, LOCAL_MAX_KERNEL), np.uint8),
-                    )
-                    ys, xs = np.where((result >= threshold) & local_max)
-
-                    for x, y in zip(xs, ys):
-                        detections.append(
-                            Detection(
-                                label=label,
-                                item=item,
-                                level=level,
-                                x=int(x),
-                                y=int(y),
-                                w=int(tw),
-                                h=int(th),
-                                score=float(result[y, x]),
-                            )
-                        )
+        for x, y in zip(xs, ys):
+            detections.append(
+                Detection(
+                    label=label,
+                    item=template.item,
+                    level=template.level,
+                    x=int(x + offset_x),
+                    y=int(y + offset_y),
+                    w=template.w,
+                    h=template.h,
+                    score=float(result[y, x]),
+                )
+            )
 
     detections = deduplicate_detections(detections)
 
@@ -289,21 +382,26 @@ def detect_all_items(screenshot_img, diagnostics=None):
     return detections
 
 
-def save_detection_debug_images(screenshot_img, detections, diagnostics=None):
+def save_detection_debug_images(
+    screenshot_img, detections, diagnostics=None, image_offset=(0, 0)
+):
     """Saves the captured board and an annotated copy for calibration."""
     DETECTION_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     raw_path = DETECTION_DEBUG_DIR / "board.png"
     annotated_path = DETECTION_DEBUG_DIR / "detections.png"
     scores_path = DETECTION_DEBUG_DIR / "scores.csv"
     annotated = screenshot_img.copy()
+    offset_x, offset_y = image_offset
     for detection in detections:
-        top_left = (detection.x, detection.y)
-        bottom_right = (detection.x + detection.w, detection.y + detection.h)
+        draw_x = detection.x - offset_x
+        draw_y = detection.y - offset_y
+        top_left = (draw_x, draw_y)
+        bottom_right = (draw_x + detection.w, draw_y + detection.h)
         cv2.rectangle(annotated, top_left, bottom_right, (0, 255, 0), 1)
         cv2.putText(
             annotated,
             f"{detection.label} {detection.score:.2f}",
-            (detection.x, max(10, detection.y - 3)),
+            (draw_x, max(10, draw_y - 3)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.32,
             (0, 0, 255),
@@ -1331,39 +1429,107 @@ def execute_swaps(slots, swaps):
         time.sleep(AFTER_SWAP_DELAY)
 
 
+# ---------------- runtime helpers ----------------
+
+
+def configure_runtime(accurate=False):
+    """Switches between fast defaults and the previous exhaustive search mode."""
+    global TEMPLATE_SCALES
+    global EXACT_LABEL_ORDER_LIMIT
+    global LABEL_ORDER_TRIALS
+    global CONNECTED_REGION_TRIALS
+    global COMPACTNESS_FINALISTS
+
+    if accurate:
+        TEMPLATE_SCALES = ACCURATE_TEMPLATE_SCALES
+        EXACT_LABEL_ORDER_LIMIT = ACCURATE_EXACT_LABEL_ORDER_LIMIT
+        LABEL_ORDER_TRIALS = ACCURATE_LABEL_ORDER_TRIALS
+        CONNECTED_REGION_TRIALS = ACCURATE_CONNECTED_REGION_TRIALS
+        COMPACTNESS_FINALISTS = ACCURATE_COMPACTNESS_FINALISTS
+    else:
+        TEMPLATE_SCALES = FAST_TEMPLATE_SCALES
+        EXACT_LABEL_ORDER_LIMIT = FAST_EXACT_LABEL_ORDER_LIMIT
+        LABEL_ORDER_TRIALS = FAST_LABEL_ORDER_TRIALS
+        CONNECTED_REGION_TRIALS = FAST_CONNECTED_REGION_TRIALS
+        COMPACTNESS_FINALISTS = FAST_COMPACTNESS_FINALISTS
+
+
+def capture_screenshot_bgr(region=None):
+    """Captures either the full screen or a smaller board rectangle."""
+    if region is None:
+        screenshot = pyautogui.screenshot()
+        offset = (0, 0)
+    else:
+        x, y, w, h = region
+        screenshot = pyautogui.screenshot(region=(x, y, w, h))
+        offset = (x, y)
+
+    return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR), offset
+
+
 # ---------------- main ----------------
 
 
-def main(detect_only=False, dry_run=False):
-    time.sleep(1)
+def main(
+    detect_only=False,
+    dry_run=False,
+    debug=DEBUG_BY_DEFAULT,
+    accurate=False,
+    region=None,
+    startup_delay=STARTUP_DELAY,
+    gray_only=False,
+    profile=False,
+):
+    configure_runtime(accurate=accurate)
 
-    screenshot = pyautogui.screenshot()
-    screenshot_img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+    if startup_delay > 0:
+        time.sleep(startup_delay)
 
-    diagnostics = {}
-    detections = detect_all_items(screenshot_img, diagnostics=diagnostics)
-    raw_debug_path, annotated_debug_path, scores_debug_path = (
-        save_detection_debug_images(
-            screenshot_img,
-            detections,
-            diagnostics=diagnostics,
-        )
+    timings = {}
+    started = time.perf_counter()
+    screenshot_img, offset = capture_screenshot_bgr(region=region)
+    timings["capture"] = time.perf_counter() - started
+
+    diagnostics = {} if (debug or detect_only) else None
+    started = time.perf_counter()
+    detections = detect_all_items(
+        screenshot_img,
+        diagnostics=diagnostics,
+        template_scales=TEMPLATE_SCALES,
+        offset=offset,
+        use_edges=not gray_only,
     )
+    timings["detect"] = time.perf_counter() - started
+
+    if debug or detect_only:
+        raw_debug_path, annotated_debug_path, scores_debug_path = (
+            save_detection_debug_images(
+                screenshot_img,
+                detections,
+                diagnostics=diagnostics,
+                image_offset=offset,
+            )
+        )
+        print(
+            "Detection debug files: "
+            f"{raw_debug_path}, {annotated_debug_path}, {scores_debug_path}"
+        )
 
     print(f"Detected {len(detections)} items.")
-    print(
-        "Detection debug files: "
-        f"{raw_debug_path}, {annotated_debug_path}, {scores_debug_path}"
-    )
 
     if detect_only:
         print("Detection-only mode. No mouse actions were executed.")
+        if profile:
+            print(
+                f"Timing: capture={timings['capture']:.3f}s, detect={timings['detect']:.3f}s"
+            )
         return
 
     if not detections:
-        print("No items detected. Try lowering THRESHOLD.")
+        print("No items detected. Try --accurate or lower THRESHOLD.")
         return
 
+    started = time.perf_counter()
     all_slots = stable_sort_slots(detections)
     slots = largest_orthogonal_component(all_slots)
     excluded_count = len(all_slots) - len(slots)
@@ -1375,6 +1541,7 @@ def main(detect_only=False, dry_run=False):
         )
 
     target_labels, swaps, adjacency = optimize_isometric_plan(slots)
+    timings["plan"] = time.perf_counter() - started
 
     print(f"Planned {len(swaps)} swaps.")
     print(f"Target label order: {target_labels}")
@@ -1385,6 +1552,14 @@ def main(detect_only=False, dry_run=False):
         print(
             f"{i}. slot {swap['from_slot']} -> slot {swap['to_slot']} | "
             f"{swap['moving_label']} swaps with {swap['replaced_label']}"
+        )
+
+    if profile:
+        print(
+            "Timing: "
+            f"capture={timings['capture']:.3f}s, "
+            f"detect={timings['detect']:.3f}s, "
+            f"plan={timings['plan']:.3f}s"
         )
 
     if DRY_RUN or dry_run:
@@ -1406,5 +1581,47 @@ if __name__ == "__main__":
         action="store_true",
         help="capture, detect, and print the swap plan without moving the mouse",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="save board.png, detections.png, and scores.csv; slower but useful for calibration",
+    )
+    parser.add_argument(
+        "--accurate",
+        action="store_true",
+        help="use the previous exhaustive planner and all template scales; slower but more robust",
+    )
+    parser.add_argument(
+        "--gray-only",
+        action="store_true",
+        help="skip edge template matching for faster but slightly less robust detection",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="print capture/detect/plan timing at the end",
+    )
+    parser.add_argument(
+        "--startup-delay",
+        type=float,
+        default=STARTUP_DELAY,
+        help="seconds to wait before capture; default is 0",
+    )
+    parser.add_argument(
+        "--region",
+        type=int,
+        nargs=4,
+        metavar=("X", "Y", "W", "H"),
+        help="capture only a fixed board rectangle to reduce screenshot and matching time",
+    )
     args = parser.parse_args()
-    main(detect_only=args.detect_only, dry_run=args.dry_run)
+    main(
+        detect_only=args.detect_only,
+        dry_run=args.dry_run,
+        debug=args.debug,
+        accurate=args.accurate,
+        region=tuple(args.region) if args.region else None,
+        startup_delay=args.startup_delay,
+        gray_only=args.gray_only,
+        profile=args.profile,
+    )
