@@ -25,6 +25,10 @@ items = [
 ]
 
 levels = [1, 2, 3]
+item_levels = {
+    "go": [1, 2, 3, 4, 5],
+    "da": [1, 2, 3, 4, 5],
+}
 
 # Screenshot region: left, top, width, height
 REGION = (510, 200, 850, 600)
@@ -110,7 +114,7 @@ def detect_all_items(screenshot_img):
     detections = []
 
     for item in items:
-        for level in levels:
+        for level in item_levels.get(item, levels):
             template_path = f"images/{item}{level}.png"
             template = cv2.imread(template_path, cv2.IMREAD_COLOR)
 
