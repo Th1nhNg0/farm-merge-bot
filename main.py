@@ -22,13 +22,11 @@ items = [
     "bap",
     "go",
     "da",
+    "congcu",
 ]
 
 levels = [1, 2, 3]
-item_levels = {
-    "go": [1, 2, 3, 4, 5],
-    "da": [1, 2, 3, 4, 5],
-}
+item_levels = {"go": [1, 2, 3, 4, 5], "da": [1, 2, 3, 4, 5], "congcu": [1, 2, 3, 4, 5]}
 
 # Screenshot region: left, top, width, height
 REGION = (510, 200, 850, 600)
@@ -74,7 +72,6 @@ DISTANCE_CLUSTER_NEIGHBORS = 4
 
 # Swap settings
 DRY_RUN = False
-MAX_SWAPS = 80
 DRAG_DURATION = 0.01
 AFTER_SWAP_DELAY = 0.005
 
@@ -904,47 +901,152 @@ def cluster_is_connected(slots, indices, dist, median_nn):
 # ---------------- swap planning ----------------
 
 
-def plan_swaps_nearest(slots, current_labels, target_labels, dist):
+def _shortest_label_cycles(edge_slots):
+    """Returns candidate shortest cycles in the current mismatch graph."""
+    adjacency = {}
+
+    for source_label, target_label in edge_slots:
+        adjacency.setdefault(source_label, set()).add(target_label)
+
+    cycles = set()
+    shortest_length = None
+
+    for first_edge in sorted(edge_slots):
+        start_label, next_label = first_edge
+        queue = [(next_label, (next_label,))]
+        head = 0
+
+        while head < len(queue):
+            label, path = queue[head]
+            head += 1
+
+            if shortest_length is not None and len(path) >= shortest_length:
+                continue
+
+            for following_label in sorted(adjacency.get(label, ())):
+                if following_label == start_label:
+                    cycle_labels = (start_label,) + path
+                    cycle_edges = tuple(
+                        (cycle_labels[i], cycle_labels[(i + 1) % len(cycle_labels)])
+                        for i in range(len(cycle_labels))
+                    )
+                    rotations = [
+                        cycle_edges[i:] + cycle_edges[:i]
+                        for i in range(len(cycle_edges))
+                    ]
+                    canonical = min(rotations)
+                    length = len(canonical)
+
+                    if shortest_length is None or length < shortest_length:
+                        shortest_length = length
+                        cycles.clear()
+
+                    if length == shortest_length:
+                        cycles.add(canonical)
+
+                    continue
+
+                if following_label not in path and following_label != start_label:
+                    queue.append((following_label, path + (following_label,)))
+
+    return sorted(cycles)
+
+
+def _lowest_cost_cycle_slots(cycle_edges, edge_slots, dist):
+    """Chooses concrete slots and the cheapest open path around a label cycle."""
+    best_cost = float("inf")
+    best_path = None
+    cycle_length = len(cycle_edges)
+
+    # Resolving a k-cycle needs k-1 swaps, so one ring edge is omitted. Try
+    # every possible omission and use dynamic programming for duplicate labels.
+    for break_after in range(cycle_length):
+        ordered_edges = tuple(
+            cycle_edges[(break_after + 1 + offset) % cycle_length]
+            for offset in range(cycle_length)
+        )
+        states = {
+            slot_idx: (0.0, (slot_idx,)) for slot_idx in edge_slots[ordered_edges[0]]
+        }
+
+        for edge in ordered_edges[1:]:
+            next_states = {}
+
+            for slot_idx in edge_slots[edge]:
+                choices = [
+                    (
+                        cost + float(dist[previous_slot, slot_idx]),
+                        path + (slot_idx,),
+                    )
+                    for previous_slot, (cost, path) in states.items()
+                ]
+                next_states[slot_idx] = min(choices)
+
+            states = next_states
+
+        cost, path = min(states.values())
+
+        if (cost, path) < (best_cost, best_path or ()):
+            best_cost = cost
+            best_path = path
+
+    return best_cost, best_path
+
+
+def plan_swaps(slots, current_labels, target_labels, dist):
     """
-    Plans swaps by filling target slots from nearest matching later slots.
+    Plans all swaps as short mismatch cycles, then minimizes drag distance.
+
+    Correct slots are never disturbed. Short cycles are preferred because each
+    independent k-cycle takes only k-1 swaps; reciprocal mismatches therefore
+    become one swap instead of being missed by slot-order greedy planning.
     """
+    if len(current_labels) != len(target_labels) or dist.shape != (
+        len(current_labels),
+        len(current_labels),
+    ):
+        raise ValueError("slot labels and distance matrix must have matching sizes")
+
+    if Counter(current_labels) != Counter(target_labels):
+        raise ValueError("current and target labels must contain the same items")
+
     current = current_labels[:]
     swaps = []
-    n = len(current)
 
-    for i, wanted_label in enumerate(target_labels):
-        if current[i] == wanted_label:
-            continue
+    while current != target_labels:
+        edge_slots = {}
 
-        candidates = [j for j in range(i + 1, n) if current[j] == wanted_label]
+        for slot_idx, (current_label, target_label) in enumerate(
+            zip(current, target_labels)
+        ):
+            if current_label != target_label:
+                edge_slots.setdefault((current_label, target_label), []).append(
+                    slot_idx
+                )
 
-        if not candidates:
-            print(f"Warning: no candidate found for slot {i}, label {wanted_label}")
-            continue
+        cycles = _shortest_label_cycles(edge_slots)
 
-        def candidate_cost(j):
-            cost = float(dist[i, j])
+        if not cycles:
+            raise RuntimeError("could not decompose label mismatches into swap cycles")
 
-            if current[j] == target_labels[j]:
-                cost += 10000.0
+        _, cycle_slots = min(
+            _lowest_cost_cycle_slots(cycle, edge_slots, dist) + (cycle,)
+            for cycle in cycles
+        )[:2]
 
-            if target_labels[j] == current[i]:
-                cost -= 500.0
-
-            return cost
-
-        j = min(candidates, key=candidate_cost)
-
-        swaps.append(
-            {
-                "from_slot": j,
-                "to_slot": i,
-                "moving_label": current[j],
-                "replaced_label": current[i],
-            }
-        )
-
-        current[i], current[j] = current[j], current[i]
+        for to_slot, from_slot in zip(cycle_slots, cycle_slots[1:]):
+            swaps.append(
+                {
+                    "from_slot": from_slot,
+                    "to_slot": to_slot,
+                    "moving_label": current[from_slot],
+                    "replaced_label": current[to_slot],
+                }
+            )
+            current[to_slot], current[from_slot] = (
+                current[from_slot],
+                current[to_slot],
+            )
 
     return swaps
 
@@ -970,7 +1072,7 @@ def execute_swaps(slots, swaps):
     Assumption:
         Dragging item A onto item B swaps their positions.
     """
-    for k, swap in enumerate(swaps[:MAX_SWAPS], start=1):
+    for k, swap in enumerate(swaps, start=1):
         src_slot = swap["from_slot"]
         dst_slot = swap["to_slot"]
 
@@ -1016,7 +1118,7 @@ def main():
         median_nn=median_nn,
     )
 
-    swaps = plan_swaps_nearest(
+    swaps = plan_swaps(
         slots=slots,
         current_labels=current_labels,
         target_labels=target_labels,
@@ -1039,7 +1141,7 @@ def main():
         )
 
     print("\nSwap plan:")
-    for i, swap in enumerate(swaps[:MAX_SWAPS], start=1):
+    for i, swap in enumerate(swaps, start=1):
         print(
             f"{i}. slot {swap['from_slot']} -> slot {swap['to_slot']} | "
             f"{swap['moving_label']} swaps with {swap['replaced_label']}"
