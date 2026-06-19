@@ -683,7 +683,7 @@ def orthogonal_scan_orders(slots):
 
 def candidate_label_orders(current_labels):
     """Yields exhaustive small-board orders and deterministic large-board trials."""
-    labels = tuple(dict.fromkeys(current_labels))
+    labels = tuple(sorted(set(current_labels)))
 
     if len(labels) <= EXACT_LABEL_ORDER_LIMIT:
         return itertools.permutations(labels)
@@ -783,9 +783,9 @@ def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
             target = [None] * len(current_labels)
 
             for size, segments in segments_by_size.items():
-                available_labels = [
+                available_labels = sorted(
                     label for label, count in label_counts.items() if count == size
-                ]
+                )
 
                 for segment in segments:
                     if trial == 0:
@@ -1039,19 +1039,31 @@ def labels_are_cardinally_connected(target_labels, adjacency):
     return True
 
 
-def layout_compactness_score(target_labels, adjacency):
-    """Rewards extra cardinal contacts inside each same-label group."""
+def layout_compactness_score(slots, target_labels, adjacency):
+    """Penalizes straight isometric lines, then rewards cardinal contacts."""
+    step_x, step_y, _ = estimate_isometric_step(slots)
+    points = layout_points(slots)
+    iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
+    iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
+    line_groups = 0
     internal_contacts = 0
 
-    for label in set(target_labels):
+    for label in sorted(set(target_labels)):
         indices = [i for i, value in enumerate(target_labels) if value == label]
         index_set = set(indices)
+
+        if len(indices) >= 3 and (
+            float(np.ptp(iso_u[indices])) <= 0.55
+            or float(np.ptp(iso_v[indices])) <= 0.55
+        ):
+            line_groups += 1
+
         internal_contacts += (
             sum(len(adjacency[index] & index_set) for index in indices) // 2
         )
 
-    # Lower scores are better, so negate the contact count.
-    return (-internal_contacts,)
+    # Lower scores are better. Lines are rejected before contact maximization.
+    return line_groups, -internal_contacts
 
 
 def optimize_isometric_plan(slots):
@@ -1071,11 +1083,17 @@ def optimize_isometric_plan(slots):
             return
 
         cheap_score = (
-            sum(current != target for current, target in zip(current_labels, target_labels)),
-            *layout_compactness_score(target_labels, adjacency),
+            *layout_compactness_score(slots, target_labels, adjacency),
+            sum(
+                current != target
+                for current, target in zip(current_labels, target_labels)
+            ),
             target_key,
         )
         candidates[target_key] = (cheap_score, list(target_labels))
+
+    # This makes a completed board an explicit zero-swap candidate on later runs.
+    add_candidate(current_labels)
 
     for scan_order in scan_orders:
         for label_order in candidate_label_orders(current_labels):
@@ -1110,9 +1128,16 @@ def optimize_isometric_plan(slots):
             "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
-    shortlist = sorted(candidates.values(), key=lambda candidate: candidate[0])[
-        :PLAN_SHORTLIST_SIZE
+    best_compactness = min(candidate[0][:2] for candidate in candidates.values())
+    effective_candidates = [
+        candidate
+        for candidate in candidates.values()
+        if candidate[0][:2] == best_compactness
     ]
+    shortlist = sorted(
+        effective_candidates,
+        key=lambda candidate: (candidate[0][2], candidate[0][3]),
+    )[:PLAN_SHORTLIST_SIZE]
     planned = []
 
     for _, target_labels in shortlist:
@@ -1123,7 +1148,6 @@ def optimize_isometric_plan(slots):
         score = (
             len(swaps),
             drag_distance,
-            *layout_compactness_score(target_labels, adjacency),
             tuple(target_labels),
         )
         planned.append((score, target_labels, swaps))

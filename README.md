@@ -27,3 +27,6 @@ item grid are excluded as a final safeguard.
 Name template variants `<item><level>_<variant>.png`, such as `bo1_1.png` and
 `bo1_2.png`. The unsuffixed `<item><level>.png` form also works. Templates should
 be tightly cropped around one complete item at the same UI zoom as the board.
+
+Repeated runs keep an already compact connected layout unchanged, producing
+zero swaps unless the detected board contents change.
