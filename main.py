@@ -57,7 +57,7 @@ COMPACT_CONTACT_REWARD = 2.75
 # Maximum number of objects in one same-label cluster.
 # If one label appears more than this, it is split into several compact
 # clusters with the same target label.
-MAX_CLUSTER_SIZE = 5
+MAX_CLUSTER_SIZE = 4
 
 # Orthogonal connectivity means left/right/up/down only.
 # It is stricter, but on an isometric board it can easily make vertical or
@@ -72,8 +72,8 @@ DISTANCE_CLUSTER_NEIGHBORS = 4
 
 # Swap settings
 DRY_RUN = False
-DRAG_DURATION = 0.01
-AFTER_SWAP_DELAY = 0.005
+DRAG_DURATION = 0.1
+AFTER_SWAP_DELAY = 0.05
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
@@ -99,8 +99,7 @@ class Detection:
 
     @property
     def screen_center(self):
-        cx, cy = self.center
-        return SCREEN_X0 + cx, SCREEN_Y0 + cy
+        return SCREEN_X0 + self.x + self.w // 2, SCREEN_Y0 + self.y + self.h
 
 
 # ---------------- detection ----------------

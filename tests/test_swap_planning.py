@@ -27,6 +27,14 @@ def apply_swaps(labels, swaps):
 
 
 class SwapPlanningTests(unittest.TestCase):
+    def test_detection_screen_click_position_is_bottom_center(self):
+        detection = main.Detection("bo_1", "bo", 1, 10, 20, 30, 40, 0.9)
+
+        self.assertEqual(
+            (main.SCREEN_X0 + 25, main.SCREEN_Y0 + 60),
+            detection.screen_center,
+        )
+
     def test_three_cycle_uses_two_swaps(self):
         current = ["a", "b", "c"]
         target = ["b", "c", "a"]
