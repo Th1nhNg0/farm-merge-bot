@@ -27,6 +27,7 @@ items = [
     "go",
     "da",
     "congcu",
+    "cuu"
 ]
 
 levels = [1, 2, 3]
