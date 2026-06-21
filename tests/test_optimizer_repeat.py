@@ -85,6 +85,48 @@ class OptimizerRepeatTests(unittest.TestCase):
         self.assertEqual(target, repeated_target)
         self.assertEqual([], repeated_swaps)
 
+    def test_optimizer_keeps_connected_layout_instead_of_chasing_contacts(self):
+        current = ["a", "b", "b", "a", "a", "b", "b", "a", "b"]
+        denser = ["a", "a", "a", "a", "b", "b", "b", "b", "b"]
+        points = [
+            (0, 0),
+            (40, 20),
+            (80, 40),
+            (-40, 20),
+            (0, 40),
+            (40, 60),
+            (80, 80),
+            (-40, 60),
+            (0, 80),
+        ]
+        slots = make_slots(current, points)
+
+        adjacency = main.build_isometric_adjacency(slots)
+        self.assertTrue(main.labels_are_cardinally_connected(current, adjacency))
+        self.assertTrue(main.labels_are_cardinally_connected(denser, adjacency))
+        self.assertLess(
+            main.layout_compactness_score(slots, denser, adjacency),
+            main.layout_compactness_score(slots, current, adjacency),
+        )
+
+        with (
+            mock.patch.object(
+                main,
+                "orthogonal_scan_orders",
+                return_value=[tuple(range(len(slots)))],
+            ),
+            mock.patch.object(main, "candidate_label_orders", return_value=[]),
+            mock.patch.object(
+                main,
+                "candidate_targets_for_scan",
+                return_value=[denser],
+            ),
+        ):
+            target, swaps, _ = main.optimize_isometric_plan(slots)
+
+        self.assertEqual(current, target)
+        self.assertEqual([], swaps)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1129,15 +1129,23 @@ def optimize_isometric_plan(slots):
             "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
-    best_compactness = min(candidate[0][:2] for candidate in candidates.values())
+    # Avoid inferior straight-line regions, but do not require the absolute
+    # maximum number of internal contacts before considering movement cost.
+    # That old ordering could discard an already-connected zero-swap layout in
+    # favor of a marginally denser layout that moved most of the board.
+    fewest_line_groups = min(candidate[0][0] for candidate in candidates.values())
     effective_candidates = [
         candidate
         for candidate in candidates.values()
-        if candidate[0][:2] == best_compactness
+        if candidate[0][0] == fewest_line_groups
     ]
     shortlist = sorted(
         effective_candidates,
-        key=lambda candidate: (candidate[0][2], candidate[0][3]),
+        key=lambda candidate: (
+            candidate[0][2],
+            candidate[0][1],
+            candidate[0][3],
+        ),
     )[:PLAN_SHORTLIST_SIZE]
     planned = []
 
@@ -1148,6 +1156,7 @@ def optimize_isometric_plan(slots):
         )
         score = (
             len(swaps),
+            *layout_compactness_score(slots, target_labels, adjacency),
             drag_distance,
             tuple(target_labels),
         )
