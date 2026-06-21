@@ -20,10 +20,13 @@ detections to `debug/detections.png`, and matching details to
 
 Detected slots are connected only through their nearest top, right, bottom, and
 left neighbors within one inferred isometric cell step. Each identical item and
-level is placed in one connected group. Candidate layouts avoid straight-line
-groups, then minimize swaps before using compactness and drag distance as
-tie-breakers. Any isolated matches outside the main item grid are excluded as a
-final safeguard.
+level is placed in one connected group. Candidate layouts preserve the best
+compactness score, then minimize swaps and drag distance. Exact swap planning
+continues past its normal bounded shortlist only while a later candidate can
+still tie or improve the best plan. A bounded local beam search then exchanges
+target assignments only when connectivity and the exact compactness score
+remain unchanged. Any isolated matches outside the main item grid are excluded
+as a final safeguard.
 
 Name template variants `<item><level>_<variant>.png`, such as `bo1_1.png` and
 `bo1_2.png`. The unsuffixed `<item><level>.png` form also works. Templates should

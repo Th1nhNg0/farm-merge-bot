@@ -44,6 +44,44 @@ class SwapPlanningTests(unittest.TestCase):
             for label, point in zip(labels, points)
         ]
 
+    def test_drag_moves_quickly_to_source_but_keeps_drag_timing(self):
+        events = []
+
+        with (
+            mock.patch.object(
+                main.pyautogui,
+                "moveTo",
+                side_effect=lambda x, y, duration, **kwargs: events.append(
+                    ("move", x, y, duration, kwargs)
+                ),
+                create=True,
+            ),
+            mock.patch.object(
+                main.pyautogui,
+                "mouseDown",
+                side_effect=lambda: events.append(("down",)),
+                create=True,
+            ),
+            mock.patch.object(
+                main.pyautogui,
+                "mouseUp",
+                side_effect=lambda: events.append(("up",)),
+                create=True,
+            ),
+            mock.patch.object(main.time, "sleep"),
+        ):
+            main.drag_swap((10, 20), (30, 40))
+
+        self.assertEqual(
+            [
+                ("move", 10, 20, 0, {"_pause": False}),
+                ("down",),
+                ("move", 30, 40, main.DRAG_DURATION, {}),
+                ("up",),
+            ],
+            events,
+        )
+
     def test_isometric_adjacency_excludes_logical_diagonal(self):
         slots = self.make_isometric_slots(
             ["a", "b", "c", "d"],
@@ -253,7 +291,7 @@ class SwapPlanningTests(unittest.TestCase):
             },
         )
 
-    def test_optimizer_plans_only_bounded_shortlist(self):
+    def test_optimizer_stops_planning_after_zero_swap_candidate(self):
         labels = list("abcdef")
         slots = self.make_isometric_slots(
             labels,
@@ -277,7 +315,7 @@ class SwapPlanningTests(unittest.TestCase):
         ):
             target, swaps, planned_adjacency = main.optimize_isometric_plan(slots)
 
-        self.assertEqual(main.PLAN_SHORTLIST_SIZE, planner.call_count)
+        self.assertEqual(1, planner.call_count)
         self.assertEqual(target, apply_swaps(labels, swaps))
         self.assertTrue(
             main.labels_are_cardinally_connected(target, planned_adjacency)

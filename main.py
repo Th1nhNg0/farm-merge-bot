@@ -70,6 +70,9 @@ LABEL_ORDER_TRIALS = 96
 LABEL_ORDER_SEED = 20260619
 CONNECTED_REGION_TRIALS = 8
 PLAN_SHORTLIST_SIZE = 24
+TARGET_REPAIR_BEAM_WIDTH = 8
+TARGET_REPAIR_DEPTH = 8
+TARGET_REPAIR_EXACT_LIMIT = 40
 
 # Swap settings
 DRAG_DURATION = 0.05
@@ -1067,6 +1070,232 @@ def layout_compactness_score(slots, target_labels, adjacency):
     return line_groups, -internal_contacts
 
 
+def refine_target_assignments(
+    slots,
+    current_labels,
+    target_labels,
+    adjacency,
+    dist,
+    swaps,
+):
+    """Moves target labels closer to their current slots without quality loss."""
+    required_quality = layout_compactness_score(slots, target_labels, adjacency)
+    working_target = list(target_labels)
+    best_target = working_target
+    best_swaps = swaps
+    best_score = (
+        len(swaps),
+        sum(float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps),
+    )
+
+    if not swaps:
+        return best_target, best_swaps
+
+    while True:
+        mismatch_count = sum(
+            current != target
+            for current, target in zip(current_labels, working_target)
+        )
+        mismatched_slots = [
+            index
+            for index, (current, target) in enumerate(
+                zip(current_labels, working_target)
+            )
+            if current != target
+        ]
+        best_repair = None
+
+        for offset, left in enumerate(mismatched_slots):
+            for right in mismatched_slots[offset + 1 :]:
+                if working_target[left] == working_target[right]:
+                    continue
+                if (
+                    working_target[right] != current_labels[left]
+                    and working_target[left] != current_labels[right]
+                ):
+                    continue
+
+                candidate = working_target[:]
+                candidate[left], candidate[right] = candidate[right], candidate[left]
+                candidate_mismatches = sum(
+                    current != target
+                    for current, target in zip(current_labels, candidate)
+                )
+
+                if candidate_mismatches >= mismatch_count:
+                    continue
+                if (
+                    layout_compactness_score(slots, candidate, adjacency)
+                    != required_quality
+                ):
+                    continue
+                if not labels_are_cardinally_connected(candidate, adjacency):
+                    continue
+
+                repair_key = (candidate_mismatches, left, right)
+
+                if best_repair is None or repair_key < best_repair[0]:
+                    best_repair = (repair_key, candidate)
+
+        if best_repair is None:
+            break
+
+        working_target = best_repair[1]
+        candidate_swaps = plan_swaps(current_labels, working_target, dist)
+        candidate_score = (
+            len(candidate_swaps),
+            sum(
+                float(dist[swap["from_slot"], swap["to_slot"]])
+                for swap in candidate_swaps
+            ),
+        )
+
+        if candidate_score < best_score:
+            best_target = working_target
+            best_swaps = candidate_swaps
+            best_score = candidate_score
+
+    step_x, step_y, _ = estimate_isometric_step(slots)
+    points = layout_points(slots)
+    iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
+    iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
+
+    def label_score(labels, label):
+        indices = [index for index, value in enumerate(labels) if value == label]
+        index_set = set(indices)
+        line_group = int(
+            len(indices) >= 3
+            and (
+                float(np.ptp(iso_u[indices])) <= 0.55
+                or float(np.ptp(iso_v[indices])) <= 0.55
+            )
+        )
+        contacts = (
+            sum(len(adjacency[index] & index_set) for index in indices) // 2
+        )
+        return line_group, -contacts
+
+    def label_is_connected(labels, label):
+        indices = {index for index, value in enumerate(labels) if value == label}
+        pending = [next(iter(indices))]
+        visited = set()
+
+        while pending:
+            index = pending.pop()
+
+            if index in visited:
+                continue
+
+            visited.add(index)
+            pending.extend((adjacency[index] & indices) - visited)
+
+        return visited == indices
+
+    beam = [best_target]
+    visited_targets = {tuple(best_target)}
+    best_rank = (*best_score, tuple(best_target))
+
+    for _ in range(TARGET_REPAIR_DEPTH):
+        generated = []
+
+        for state in beam:
+            base_mismatches = sum(
+                current != target
+                for current, target in zip(current_labels, state)
+            )
+            contributions = {
+                label: label_score(state, label) for label in set(state)
+            }
+
+            for left in range(len(state)):
+                for right in range(left + 1, len(state)):
+                    if state[left] == state[right]:
+                        continue
+
+                    candidate = state[:]
+                    candidate[left], candidate[right] = (
+                        candidate[right],
+                        candidate[left],
+                    )
+                    candidate_key = tuple(candidate)
+
+                    if candidate_key in visited_targets:
+                        continue
+
+                    candidate_mismatches = sum(
+                        current != target
+                        for current, target in zip(current_labels, candidate)
+                    )
+
+                    if candidate_mismatches > base_mismatches:
+                        continue
+
+                    left_label = state[left]
+                    right_label = state[right]
+                    previous_score = tuple(
+                        sum(values)
+                        for values in zip(
+                            contributions[left_label],
+                            contributions[right_label],
+                        )
+                    )
+                    candidate_score = tuple(
+                        sum(values)
+                        for values in zip(
+                            label_score(candidate, left_label),
+                            label_score(candidate, right_label),
+                        )
+                    )
+
+                    if candidate_score != previous_score:
+                        continue
+                    if not label_is_connected(candidate, left_label):
+                        continue
+                    if not label_is_connected(candidate, right_label):
+                        continue
+
+                    visited_targets.add(candidate_key)
+                    generated.append(
+                        (candidate_mismatches, candidate_key, candidate)
+                    )
+
+        generated.sort()
+        ranked = []
+
+        for _, candidate_key, candidate in generated[
+            :TARGET_REPAIR_EXACT_LIMIT
+        ]:
+            candidate_swaps = plan_swaps(current_labels, candidate, dist)
+            drag_distance = sum(
+                float(dist[swap["from_slot"], swap["to_slot"]])
+                for swap in candidate_swaps
+            )
+            candidate_rank = (
+                len(candidate_swaps),
+                drag_distance,
+                candidate_key,
+            )
+            ranked.append(
+                (candidate_rank, candidate, candidate_swaps)
+            )
+
+            if candidate_rank < best_rank:
+                best_rank = candidate_rank
+                best_target = candidate
+                best_swaps = candidate_swaps
+
+        ranked.sort(key=lambda candidate: candidate[0])
+        beam = [
+            candidate
+            for _, candidate, _ in ranked[:TARGET_REPAIR_BEAM_WIDTH]
+        ]
+
+        if not beam or best_rank[0] == 0:
+            break
+
+    return best_target, best_swaps
+
+
 def optimize_isometric_plan(slots):
     """Ranks connected layouts cheaply, then plans swaps for a small shortlist."""
     current_labels = [slot.label for slot in slots]
@@ -1129,40 +1358,61 @@ def optimize_isometric_plan(slots):
             "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
-    # Avoid inferior straight-line regions, but do not require the absolute
-    # maximum number of internal contacts before considering movement cost.
-    # That old ordering could discard an already-connected zero-swap layout in
-    # favor of a marginally denser layout that moved most of the board.
-    fewest_line_groups = min(candidate[0][0] for candidate in candidates.values())
+    best_compactness = min(candidate[0][:2] for candidate in candidates.values())
     effective_candidates = [
         candidate
         for candidate in candidates.values()
-        if candidate[0][0] == fewest_line_groups
+        if candidate[0][:2] == best_compactness
     ]
-    shortlist = sorted(
+    ordered_candidates = sorted(
         effective_candidates,
-        key=lambda candidate: (
-            candidate[0][2],
-            candidate[0][1],
-            candidate[0][3],
-        ),
-    )[:PLAN_SHORTLIST_SIZE]
-    planned = []
+        key=lambda candidate: (candidate[0][2], candidate[0][3]),
+    )
+    best_plan = None
 
-    for _, target_labels in shortlist:
+    for candidate_index, (cheap_score, target_labels) in enumerate(
+        ordered_candidates
+    ):
+        mismatch_count = cheap_score[2]
+        swap_lower_bound = (mismatch_count + 1) // 2
+
+        if best_plan is not None and best_plan[0][0] == 0:
+            break
+
+        # Every swap fixes at most two mismatched slots. After the normal
+        # shortlist budget, stop once later candidates cannot tie the best
+        # exact plan found so far. This retains bounded work in the common case
+        # while no longer hiding a potentially better plan behind a hard cut.
+        if (
+            candidate_index >= PLAN_SHORTLIST_SIZE
+            and best_plan is not None
+            and swap_lower_bound > best_plan[0][0]
+        ):
+            break
+
         swaps = plan_swaps(current_labels, target_labels, dist)
         drag_distance = sum(
             float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
         )
         score = (
             len(swaps),
-            *layout_compactness_score(slots, target_labels, adjacency),
             drag_distance,
             tuple(target_labels),
         )
-        planned.append((score, target_labels, swaps))
+        candidate_plan = (score, target_labels, swaps)
 
-    _, target_labels, swaps = min(planned, key=lambda candidate: candidate[0])
+        if best_plan is None or candidate_plan < best_plan:
+            best_plan = candidate_plan
+
+    _, target_labels, swaps = best_plan
+    target_labels, swaps = refine_target_assignments(
+        slots,
+        current_labels,
+        target_labels,
+        adjacency,
+        dist,
+        swaps,
+    )
 
     return target_labels, swaps, adjacency
 
@@ -1193,7 +1443,10 @@ def drag_swap(src_xy, dst_xy):
     sx, sy = src_xy
     dx, dy = dst_xy
 
-    pyautogui.moveTo(sx, sy, duration=0.08)
+    # The cursor is not interacting with the game yet, so the automatic pause
+    # after this positioning move is redundant. Keep all pauses once the drag
+    # begins, where they protect input reliability.
+    pyautogui.moveTo(sx, sy, duration=0, _pause=False)
     pyautogui.mouseDown()
     pyautogui.moveTo(dx, dy, duration=DRAG_DURATION)
     time.sleep(0.05)
