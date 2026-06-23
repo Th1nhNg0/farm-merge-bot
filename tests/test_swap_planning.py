@@ -68,7 +68,7 @@ class SwapPlanningTests(unittest.TestCase):
                 side_effect=lambda: events.append(("up",)),
                 create=True,
             ),
-            mock.patch.object(main.time, "sleep"),
+            mock.patch.object(main.time, "sleep") as sleep,
         ):
             main.drag_swap((10, 20), (30, 40))
 
@@ -81,6 +81,7 @@ class SwapPlanningTests(unittest.TestCase):
             ],
             events,
         )
+        sleep.assert_called_once_with(main.SWAP_SETTLE_DELAY)
 
     def test_isometric_adjacency_excludes_logical_diagonal(self):
         slots = self.make_isometric_slots(
@@ -291,6 +292,23 @@ class SwapPlanningTests(unittest.TestCase):
             },
         )
 
+    def test_shortest_cycles_returns_all_reciprocal_cycles(self):
+        edge_slots = {
+            ("a", "b"): [0],
+            ("b", "a"): [1],
+            ("b", "c"): [2],
+            ("c", "b"): [3],
+            ("c", "a"): [4],
+        }
+
+        self.assertEqual(
+            [
+                (("a", "b"), ("b", "a")),
+                (("b", "c"), ("c", "b")),
+            ],
+            main._shortest_label_cycles(edge_slots),
+        )
+
     def test_optimizer_stops_planning_after_zero_swap_candidate(self):
         labels = list("abcdef")
         slots = self.make_isometric_slots(
@@ -368,7 +386,14 @@ class SwapPlanningTests(unittest.TestCase):
             main.plan_swaps(["a", "b"], ["a", "a"], np.zeros((2, 2)))
 
     def test_execute_swaps_has_no_limit(self):
-        slots = [types.SimpleNamespace(screen_center=(i, i)) for i in range(102)]
+        slots = [
+            types.SimpleNamespace(
+                label="a" if i % 2 == 0 else "b",
+                screen_center=(i, i),
+                grid_anchor=(i, i),
+            )
+            for i in range(102)
+        ]
         swaps = [
             {
                 "from_slot": i + 1,
@@ -387,6 +412,48 @@ class SwapPlanningTests(unittest.TestCase):
             main.execute_swaps(slots, swaps)
 
         self.assertEqual(101, drag_swap.call_count)
+
+    def test_execute_swaps_tracks_sprite_center_after_it_moves(self):
+        slots = [
+            types.SimpleNamespace(
+                label="a", screen_center=(100, 80), grid_anchor=(100, 100)
+            ),
+            types.SimpleNamespace(
+                label="b", screen_center=(200, 70), grid_anchor=(200, 100)
+            ),
+            types.SimpleNamespace(
+                label="c", screen_center=(300, 90), grid_anchor=(300, 100)
+            ),
+        ]
+        swaps = [
+            {
+                "from_slot": 1,
+                "to_slot": 0,
+                "moving_label": "b",
+                "replaced_label": "a",
+            },
+            {
+                "from_slot": 0,
+                "to_slot": 2,
+                "moving_label": "b",
+                "replaced_label": "c",
+            },
+        ]
+
+        with (
+            mock.patch.object(main, "drag_swap") as drag_swap,
+            mock.patch.object(main.time, "sleep"),
+            mock.patch("builtins.print"),
+        ):
+            main.execute_swaps(slots, swaps)
+
+        self.assertEqual(
+            [
+                mock.call((200, 70), (100, 80)),
+                mock.call((100, 70), (300, 90)),
+            ],
+            drag_swap.call_args_list,
+        )
 
 
 if __name__ == "__main__":

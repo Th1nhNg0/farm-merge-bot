@@ -20,8 +20,10 @@ detections to `debug/detections.png`, and matching details to
 
 Detected slots are connected only through their nearest top, right, bottom, and
 left neighbors within one inferred isometric cell step. Each identical item and
-level is placed in one connected group. Candidate layouts preserve the best
-compactness score, then minimize swaps and drag distance. Exact swap planning
+level is placed in one connected group. Groups belonging to the same item stay
+adjacent across levels whenever the board topology allows it. Candidate layouts
+preserve the best family grouping and compactness score, then minimize swaps
+and drag distance. Exact swap planning
 continues past its normal bounded shortlist only while a later candidate can
 still tie or improve the best plan. A bounded local beam search then exchanges
 target assignments only when connectivity and the exact compactness score

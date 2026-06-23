@@ -1,4 +1,5 @@
 import itertools
+import random
 import sys
 import types
 import unittest
@@ -49,8 +50,71 @@ class OptimizerRepeatTests(unittest.TestCase):
             main.build_isometric_adjacency(l_slots),
         )
 
-        self.assertEqual((1, -2), line_score)
-        self.assertEqual((0, -2), l_score)
+        self.assertEqual((0, 1, 0, -2), line_score)
+        self.assertEqual((0, 0, 0, -2), l_score)
+
+    def test_levels_of_the_same_item_prefer_adjacent_groups(self):
+        points = [(0, 0), (40, 20), (-40, 20), (0, 40)]
+        separated = ["bo_1", "ga_1", "ga_2", "bo_2"]
+        adjacent = ["bo_1", "bo_2", "ga_1", "ga_2"]
+        slots = make_slots(separated, points)
+        adjacency = main.build_isometric_adjacency(slots)
+
+        self.assertLess(
+            main.layout_compactness_score(slots, adjacent, adjacency),
+            main.layout_compactness_score(slots, separated, adjacency),
+        )
+
+        with (
+            mock.patch.object(
+                main,
+                "orthogonal_scan_orders",
+                return_value=[tuple(range(len(slots)))],
+            ),
+            mock.patch.object(main, "candidate_label_orders", return_value=[]),
+            mock.patch.object(
+                main,
+                "candidate_targets_for_scan",
+                return_value=[adjacent],
+            ),
+        ):
+            target, swaps, _ = main.optimize_isometric_plan(slots)
+
+        self.assertEqual(
+            main.layout_compactness_score(slots, adjacent, adjacency),
+            main.layout_compactness_score(slots, target, adjacency),
+        )
+        bo_slots = {index for index, label in enumerate(target) if label.startswith("bo_")}
+        self.assertTrue(any(adjacency[index] & bo_slots for index in bo_slots))
+        self.assertGreater(len(swaps), 0)
+
+    def test_scan_candidates_ignore_current_slot_order(self):
+        first = ["bo_1", "bo_1", "bo_2", "ga_1", "ga_1", "ga_2"]
+        second = ["ga_1", "bo_2", "bo_1", "ga_2", "bo_1", "ga_1"]
+        scan_order = tuple(range(len(first)))
+        adjacency = {
+            index: set(range(len(first))) - {index}
+            for index in range(len(first))
+        }
+
+        first_candidates = list(
+            main.candidate_targets_for_scan(
+                first,
+                scan_order,
+                adjacency,
+                random.Random(main.LABEL_ORDER_SEED),
+            )
+        )
+        second_candidates = list(
+            main.candidate_targets_for_scan(
+                second,
+                scan_order,
+                adjacency,
+                random.Random(main.LABEL_ORDER_SEED),
+            )
+        )
+
+        self.assertEqual(first_candidates, second_candidates)
 
     def test_optimizer_converges_then_repeats_with_zero_swaps(self):
         current = ["a", "a", "a", "b", "b", "b"]

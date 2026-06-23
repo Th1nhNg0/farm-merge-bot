@@ -1,4 +1,5 @@
 import csv
+import functools
 import itertools
 import random
 import time
@@ -75,11 +76,12 @@ TARGET_REPAIR_DEPTH = 8
 TARGET_REPAIR_EXACT_LIMIT = 40
 
 # Swap settings
-DRAG_DURATION = 0.05
-AFTER_SWAP_DELAY = 0.005
+DRAG_DURATION = 0.03
+SWAP_SETTLE_DELAY = 0.025
+AFTER_SWAP_DELAY = 0.002
 
 pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.05
+pyautogui.PAUSE = 0.02
 
 
 # ---------------- data model ----------------
@@ -741,7 +743,7 @@ def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
             return True
 
         found = False
-        options = list(sizes)
+        options = sorted(sizes)
         rng.shuffle(options)
 
         for size in options:
@@ -775,16 +777,62 @@ def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
 
     for size_order in size_orders:
         segments_by_size = {}
+        ordered_segments = []
         offset = 0
 
         for size in size_order:
-            segments_by_size.setdefault(size, []).append(
-                scan_order[offset : offset + size]
-            )
+            segment = scan_order[offset : offset + size]
+            segments_by_size.setdefault(size, []).append(segment)
+            ordered_segments.append((size, segment))
             offset += size
 
-        for trial in range(8):
+        for trial in range(10):
             target = [None] * len(current_labels)
+
+            if trial in (0, 1, 2):
+                available_by_size = {
+                    size: sorted(
+                        (
+                            label
+                            for label, count in label_counts.items()
+                            if count == size
+                        ),
+                        reverse=trial == 2,
+                    )
+                    for size in segments_by_size
+                }
+                active_family = None
+
+                for size, segment in ordered_segments:
+                    available_labels = available_by_size[size]
+                    if trial == 0:
+                        label = available_labels[0]
+                        available_labels.remove(label)
+
+                        for index in segment:
+                            target[index] = label
+
+                        continue
+
+                    matching_family = [
+                        label
+                        for label in available_labels
+                        if label_family(label) == active_family
+                    ]
+
+                    if matching_family:
+                        label = matching_family[0]
+                    else:
+                        label = available_labels[0]
+                        active_family = label_family(label)
+
+                    available_labels.remove(label)
+
+                    for index in segment:
+                        target[index] = label
+
+                yield target
+                continue
 
             for size, segments in segments_by_size.items():
                 available_labels = sorted(
@@ -792,15 +840,7 @@ def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
                 )
 
                 for segment in segments:
-                    if trial == 0:
-                        label = max(
-                            available_labels,
-                            key=lambda candidate: sum(
-                                current_labels[index] == candidate for index in segment
-                            ),
-                        )
-                    else:
-                        label = rng.choice(available_labels)
+                    label = rng.choice(available_labels)
 
                     available_labels.remove(label)
 
@@ -813,7 +853,7 @@ def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
 def grow_connected_target(current_labels, adjacency, rng):
     """Grows one cardinally connected region per label from current-label seeds."""
     counts = Counter(current_labels)
-    label_order = list(counts)
+    label_order = sorted(counts)
     rng.shuffle(label_order)
     target = [None] * len(current_labels)
     regions = {}
@@ -870,6 +910,18 @@ def grow_connected_target(current_labels, adjacency, rng):
 
 def _shortest_label_cycles(edge_slots):
     """Returns shortest mismatch cycles using polynomial breadth-first paths."""
+    edge_set = set(edge_slots)
+    reciprocal_cycles = {
+        min(((source, target), (target, source)), ((target, source), (source, target)))
+        for source, target in edge_set
+        if (target, source) in edge_set
+    }
+
+    # A mismatch cycle cannot be shorter than two edges. If reciprocal edges
+    # exist, they are therefore the complete set of globally shortest cycles.
+    if reciprocal_cycles:
+        return sorted(reciprocal_cycles)
+
     adjacency = {}
 
     for source_label, target_label in edge_slots:
@@ -1043,31 +1095,110 @@ def labels_are_cardinally_connected(target_labels, adjacency):
     return True
 
 
-def layout_compactness_score(slots, target_labels, adjacency):
-    """Penalizes straight isometric lines, then rewards cardinal contacts."""
+def label_family(label):
+    """Returns the item name shared by labels such as bo_1, bo_2, and bo_3."""
+    item, separator, level = label.rpartition("_")
+    return item if separator and level.isdigit() else label
+
+
+def _layout_compactness_scorer(slots, adjacency):
+    """Builds a compactness scorer with board geometry computed once."""
     step_x, step_y, _ = estimate_isometric_step(slots)
     points = layout_points(slots)
     iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
     iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
-    line_groups = 0
-    internal_contacts = 0
 
-    for label in sorted(set(target_labels)):
-        indices = [i for i, value in enumerate(target_labels) if value == label]
+    @functools.lru_cache(maxsize=None)
+    def label_score(indices):
         index_set = set(indices)
-
-        if len(indices) >= 3 and (
-            float(np.ptp(iso_u[indices])) <= 0.55
-            or float(np.ptp(iso_v[indices])) <= 0.55
-        ):
-            line_groups += 1
-
-        internal_contacts += (
+        line_group = int(
+            len(indices) >= 3
+            and (
+                float(np.ptp(iso_u[list(indices)])) <= 0.55
+                or float(np.ptp(iso_v[list(indices)])) <= 0.55
+            )
+        )
+        contacts = (
             sum(len(adjacency[index] & index_set) for index in indices) // 2
         )
+        return line_group, -contacts
+
+    @functools.lru_cache(maxsize=None)
+    def family_score(label_groups):
+        index_labels = {
+            index: group_index
+            for group_index, indices in enumerate(label_groups)
+            for index in indices
+        }
+        family_indices = set(index_labels)
+        pending_indices = set(family_indices)
+        component_count = 0
+
+        while pending_indices:
+            component_count += 1
+            pending = [min(pending_indices)]
+
+            while pending:
+                index = pending.pop()
+
+                if index not in pending_indices:
+                    continue
+
+                pending_indices.remove(index)
+                pending.extend(adjacency[index] & pending_indices)
+
+        cross_level_contacts = sum(
+            1
+            for left in family_indices
+            for right in adjacency[left]
+            if left < right
+            and right in family_indices
+            and index_labels[left] != index_labels[right]
+        )
+        return component_count - 1, -cross_level_contacts
+
+    def score(target_labels):
+        label_indices = {}
+
+        for index, label in enumerate(target_labels):
+            label_indices.setdefault(label, []).append(index)
+
+        line_groups, internal_contacts = tuple(
+            sum(values)
+            for values in zip(
+                *(label_score(tuple(indices)) for indices in label_indices.values())
+            )
+        )
+        family_groups = {}
+
+        for label, indices in label_indices.items():
+            family_groups.setdefault(label_family(label), []).append(tuple(indices))
+
+        family_disconnects, cross_level_contacts = tuple(
+            sum(values)
+            for values in zip(
+                *(
+                    family_score(tuple(sorted(groups)))
+                    for groups in family_groups.values()
+                )
+            )
+        )
+        return (
+            family_disconnects,
+            line_groups,
+            cross_level_contacts,
+            internal_contacts,
+        )
+
+    return score
+
+
+def layout_compactness_score(slots, target_labels, adjacency):
+    """Penalizes straight isometric lines, then rewards cardinal contacts."""
+    score = _layout_compactness_scorer(slots, adjacency)
 
     # Lower scores are better. Lines are rejected before contact maximization.
-    return line_groups, -internal_contacts
+    return score(target_labels)
 
 
 def refine_target_assignments(
@@ -1079,7 +1210,8 @@ def refine_target_assignments(
     swaps,
 ):
     """Moves target labels closer to their current slots without quality loss."""
-    required_quality = layout_compactness_score(slots, target_labels, adjacency)
+    compactness_score = _layout_compactness_scorer(slots, adjacency)
+    required_quality = compactness_score(target_labels)
     working_target = list(target_labels)
     best_target = working_target
     best_swaps = swaps
@@ -1125,8 +1257,7 @@ def refine_target_assignments(
                 if candidate_mismatches >= mismatch_count:
                     continue
                 if (
-                    layout_compactness_score(slots, candidate, adjacency)
-                    != required_quality
+                    compactness_score(candidate) != required_quality
                 ):
                     continue
                 if not labels_are_cardinally_connected(candidate, adjacency):
@@ -1160,14 +1291,14 @@ def refine_target_assignments(
     iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
     iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
 
-    def label_score(labels, label):
-        indices = [index for index, value in enumerate(labels) if value == label]
+    @functools.lru_cache(maxsize=None)
+    def label_score(indices):
         index_set = set(indices)
         line_group = int(
             len(indices) >= 3
             and (
-                float(np.ptp(iso_u[indices])) <= 0.55
-                or float(np.ptp(iso_v[indices])) <= 0.55
+                float(np.ptp(iso_u[list(indices)])) <= 0.55
+                or float(np.ptp(iso_v[list(indices)])) <= 0.55
             )
         )
         contacts = (
@@ -1175,9 +1306,10 @@ def refine_target_assignments(
         )
         return line_group, -contacts
 
-    def label_is_connected(labels, label):
-        indices = {index for index, value in enumerate(labels) if value == label}
-        pending = [next(iter(indices))]
+    @functools.lru_cache(maxsize=None)
+    def label_is_connected(index_tuple):
+        indices = set(index_tuple)
+        pending = [index_tuple[0]]
         visited = set()
 
         while pending:
@@ -1203,8 +1335,14 @@ def refine_target_assignments(
                 current != target
                 for current, target in zip(current_labels, state)
             )
+            label_indices = {}
+
+            for index, label in enumerate(state):
+                label_indices.setdefault(label, []).append(index)
+
             contributions = {
-                label: label_score(state, label) for label in set(state)
+                label: label_score(tuple(indices))
+                for label, indices in label_indices.items()
             }
 
             for left in range(len(state)):
@@ -1212,19 +1350,10 @@ def refine_target_assignments(
                     if state[left] == state[right]:
                         continue
 
-                    candidate = state[:]
-                    candidate[left], candidate[right] = (
-                        candidate[right],
-                        candidate[left],
-                    )
-                    candidate_key = tuple(candidate)
-
-                    if candidate_key in visited_targets:
-                        continue
-
-                    candidate_mismatches = sum(
-                        current != target
-                        for current, target in zip(current_labels, candidate)
+                    candidate_mismatches = base_mismatches + sum(
+                        (current_labels[index] != state[other_index])
+                        - (current_labels[index] != state[index])
+                        for index, other_index in ((left, right), (right, left))
                     )
 
                     if candidate_mismatches > base_mismatches:
@@ -1232,6 +1361,12 @@ def refine_target_assignments(
 
                     left_label = state[left]
                     right_label = state[right]
+                    left_indices = tuple(
+                        sorted((set(label_indices[left_label]) - {left}) | {right})
+                    )
+                    right_indices = tuple(
+                        sorted((set(label_indices[right_label]) - {right}) | {left})
+                    )
                     previous_score = tuple(
                         sum(values)
                         for values in zip(
@@ -1242,16 +1377,30 @@ def refine_target_assignments(
                     candidate_score = tuple(
                         sum(values)
                         for values in zip(
-                            label_score(candidate, left_label),
-                            label_score(candidate, right_label),
+                            label_score(left_indices),
+                            label_score(right_indices),
                         )
                     )
 
                     if candidate_score != previous_score:
                         continue
-                    if not label_is_connected(candidate, left_label):
+                    if not label_is_connected(left_indices):
                         continue
-                    if not label_is_connected(candidate, right_label):
+                    if not label_is_connected(right_indices):
+                        continue
+
+                    candidate = state[:]
+                    candidate[left], candidate[right] = (
+                        candidate[right],
+                        candidate[left],
+                    )
+
+                    if compactness_score(candidate) != required_quality:
+                        continue
+
+                    candidate_key = tuple(candidate)
+
+                    if candidate_key in visited_targets:
                         continue
 
                     visited_targets.add(candidate_key)
@@ -1301,6 +1450,7 @@ def optimize_isometric_plan(slots):
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots)
+    compactness_score = _layout_compactness_scorer(slots, adjacency)
     scan_orders = orthogonal_scan_orders(slots)
     candidates = {}
 
@@ -1313,7 +1463,7 @@ def optimize_isometric_plan(slots):
             return
 
         cheap_score = (
-            *layout_compactness_score(slots, target_labels, adjacency),
+            compactness_score(target_labels),
             sum(
                 current != target
                 for current, target in zip(current_labels, target_labels)
@@ -1358,22 +1508,22 @@ def optimize_isometric_plan(slots):
             "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
-    best_compactness = min(candidate[0][:2] for candidate in candidates.values())
+    best_compactness = min(candidate[0][0] for candidate in candidates.values())
     effective_candidates = [
         candidate
         for candidate in candidates.values()
-        if candidate[0][:2] == best_compactness
+        if candidate[0][0] == best_compactness
     ]
     ordered_candidates = sorted(
         effective_candidates,
-        key=lambda candidate: (candidate[0][2], candidate[0][3]),
+        key=lambda candidate: (candidate[0][1], candidate[0][2]),
     )
     best_plan = None
 
     for candidate_index, (cheap_score, target_labels) in enumerate(
         ordered_candidates
     ):
-        mismatch_count = cheap_score[2]
+        mismatch_count = cheap_score[1]
         swap_lower_bound = (mismatch_count + 1) // 2
 
         if best_plan is not None and best_plan[0][0] == 0:
@@ -1449,8 +1599,38 @@ def drag_swap(src_xy, dst_xy):
     pyautogui.moveTo(sx, sy, duration=0, _pause=False)
     pyautogui.mouseDown()
     pyautogui.moveTo(dx, dy, duration=DRAG_DURATION)
-    time.sleep(0.05)
+    time.sleep(SWAP_SETTLE_DELAY)
     pyautogui.mouseUp()
+
+
+def label_click_offsets(slots):
+    """Returns each label's median clickable-center offset from a slot anchor."""
+    offsets = {}
+
+    for slot in slots:
+        offsets.setdefault(slot.label, []).append(
+            (
+                slot.screen_center[0] - slot.grid_anchor[0],
+                slot.screen_center[1] - slot.grid_anchor[1],
+            )
+        )
+
+    return {
+        label: (
+            float(np.median([offset[0] for offset in label_offsets])),
+            float(np.median([offset[1] for offset in label_offsets])),
+        )
+        for label, label_offsets in offsets.items()
+    }
+
+
+def slot_click_point(slot, label, click_offsets):
+    """Finds where a label is clickable after it has moved to a new slot."""
+    offset_x, offset_y = click_offsets.get(label, (0.0, 0.0))
+    return (
+        int(round(slot.grid_anchor[0] + offset_x)),
+        int(round(slot.grid_anchor[1] + offset_y)),
+    )
 
 
 def execute_swaps(slots, swaps):
@@ -1460,12 +1640,21 @@ def execute_swaps(slots, swaps):
     Assumption:
         Dragging item A onto item B swaps their positions.
     """
+    click_offsets = label_click_offsets(slots)
+
     for k, swap in enumerate(swaps, start=1):
         src_slot = swap["from_slot"]
         dst_slot = swap["to_slot"]
 
-        src_xy = slots[src_slot].screen_center
-        dst_xy = slots[dst_slot].screen_center
+        # Slot anchors stay fixed, while sprite centers depend on the label
+        # currently occupying that slot. Use the planned labels so later swaps
+        # still click the right sprite after earlier swaps moved it.
+        src_xy = slot_click_point(
+            slots[src_slot], swap["moving_label"], click_offsets
+        )
+        dst_xy = slot_click_point(
+            slots[dst_slot], swap["replaced_label"], click_offsets
+        )
 
         print(
             f"Swap {k}: "
