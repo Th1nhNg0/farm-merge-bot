@@ -4,37 +4,45 @@ from pathlib import Path
 
 @dataclass
 class Config:
-    items: list[str] = field(default_factory=lambda: [
-        "bo",
-        "carot",
-        "daunanh",
-        "ga",
-        "heo",
-        "huongduong",
-        "luami",
-        "mia",
-        "de",
-        "bap",
-        "go",
-        "da",
-        "congcu",
-        "cuu",
-    ])
+    items: list[str] = field(
+        default_factory=lambda: [
+            "bo",
+            "carot",
+            "daunanh",
+            "ga",
+            "heo",
+            "huongduong",
+            "luami",
+            "mia",
+            "de",
+            "bap",
+            "go",
+            "da",
+            "congcu",
+            "cuu",
+            "xu",
+        ]
+    )
     levels: list[int] = field(default_factory=lambda: [1, 2, 3])
-    item_levels: dict[str, list[int]] = field(default_factory=lambda: {
-        "go": [1, 2, 3, 4, 5],
-        "da": [1, 2, 3, 4, 5],
-        "congcu": [1, 2, 3, 4, 5],
-    })
+    item_levels: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "go": [1, 2, 3, 4, 5],
+            "da": [1, 2, 3, 4, 5],
+            "congcu": [1, 2, 3, 4, 5],
+            "xu": [1, 2, 3, 4, 5, 6],
+        }
+    )
     window_title: str | None = None
 
     # Detection settings
     threshold: float = 0.70
     template_dir: Path = Path("images")
     template_scales: tuple[float, ...] = (1.00,)
-    template_thresholds: dict[str, float] = field(default_factory=lambda: {
-        "go_1": 0.62,
-    })
+    template_thresholds: dict[str, float] = field(
+        default_factory=lambda: {
+            "go_1": 0.62,
+        }
+    )
     grayscale_score_weight: float = 0.70
     edge_score_weight: float = 0.30
     local_max_kernel: int = 5
@@ -58,12 +66,13 @@ class Config:
     label_order_trials: int = 96
     label_order_seed: int = 20260619
     connected_region_trials: int = 8
+    max_group_size: int = 5
     plan_shortlist_size: int = 24
     target_repair_beam_width: int = 8
     target_repair_depth: int = 8
     target_repair_exact_limit: int = 40
 
     # Swap settings
-    drag_duration: float = 0.012
+    drag_duration: float = 0.015
     swap_settle_delay: float = 0.01
-    after_swap_delay: float = 0.001
+    after_swap_delay: float = 0.01

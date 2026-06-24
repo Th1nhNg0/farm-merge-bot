@@ -201,8 +201,45 @@ def labels_are_cardinally_connected(target_labels, adjacency):
 
 def label_family(label):
     """Returns the item name shared by labels such as bo_1, bo_2, and bo_3."""
-    item, separator, level = label.rpartition("_")
-    return item if separator and level.isdigit() else label
+    # Strip split-group suffix (e.g. "bo_1§0" -> "bo_1") before extracting family.
+    base_label = label.partition("§")[0]
+    item, separator, level = base_label.rpartition("_")
+    return item if separator and level.isdigit() else base_label
+
+
+def split_oversized_labels(current_labels, max_group_size):
+    """Splits labels into groups of exactly max_group_size.
+
+    Any leftover items (or if total < max_group_size) get unique sub-labels
+    so they do not form smaller groups that would auto-merge.
+    """
+    if max_group_size <= 0:
+        return current_labels[:], {label: label for label in set(current_labels)}
+
+    counts = Counter(current_labels)
+    seen = {}
+    rewritten = []
+    sub_label_map = {}
+    for label in current_labels:
+        idx = seen.get(label, 0)
+        seen[label] = idx + 1
+        
+        complete_groups = counts[label] // max_group_size
+        
+        if idx < complete_groups * max_group_size:
+            sub = f"{label}§{idx // max_group_size}"
+        else:
+            sub = f"{label}§single{idx}"
+            
+        rewritten.append(sub)
+        sub_label_map[sub] = label
+    return rewritten, sub_label_map
+
+
+
+def unsplit_labels(labels, sub_label_map):
+    """Maps sub-labels back to their original labels."""
+    return [sub_label_map.get(label, label) for label in labels]
 
 
 def _layout_compactness_scorer(slots, adjacency, config):
@@ -211,15 +248,19 @@ def _layout_compactness_scorer(slots, adjacency, config):
     points = layout_points(slots)
     iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
     iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
+    iso_u_list = iso_u.tolist()
+    iso_v_list = iso_v.tolist()
 
     @functools.lru_cache(maxsize=None)
     def label_score(indices):
         index_set = set(indices)
+        u_vals = [iso_u_list[i] for i in indices]
+        v_vals = [iso_v_list[i] for i in indices]
         line_group = int(
             len(indices) >= 3
             and (
-                float(np.ptp(iso_u[list(indices)])) <= 0.55
-                or float(np.ptp(iso_v[list(indices)])) <= 0.55
+                (max(u_vals) - min(u_vals)) <= 0.55
+                or (max(v_vals) - min(v_vals)) <= 0.55
             )
         )
         contacts = sum(len(adjacency[index] & index_set) for index in indices) // 2
@@ -238,7 +279,7 @@ def _layout_compactness_scorer(slots, adjacency, config):
 
         while pending_indices:
             component_count += 1
-            pending = [min(pending_indices)]
+            pending = [next(iter(pending_indices))]
 
             while pending:
                 index = pending.pop()
@@ -349,18 +390,37 @@ def refine_target_assignments(
                 ):
                     continue
 
-                candidate = working_target[:]
-                candidate[left], candidate[right] = candidate[right], candidate[left]
-                candidate_mismatches = sum(
-                    current != target
-                    for current, target in zip(current_labels, candidate)
-                )
+                mismatches_before = (current_labels[left] != working_target[left]) + (current_labels[right] != working_target[right])
+                mismatches_after = (current_labels[left] != working_target[right]) + (current_labels[right] != working_target[left])
+                candidate_mismatches = mismatch_count - mismatches_before + mismatches_after
 
                 if candidate_mismatches >= mismatch_count:
                     continue
+
+                candidate = working_target[:]
+                candidate[left], candidate[right] = candidate[right], candidate[left]
+
                 if compactness_score(candidate) != required_quality:
                     continue
-                if not labels_are_cardinally_connected(candidate, adjacency):
+
+                left_label = working_target[left]
+                right_label = working_target[right]
+
+                def is_label_connected(lbl):
+                    indices = [i for i, val in enumerate(candidate) if val == lbl]
+                    start = indices[0]
+                    visited = set()
+                    pending = [start]
+                    index_set = set(indices)
+                    while pending:
+                        idx = pending.pop()
+                        if idx in visited:
+                            continue
+                        visited.add(idx)
+                        pending.extend((adjacency[idx] & index_set) - visited)
+                    return visited == index_set
+
+                if not is_label_connected(left_label) or not is_label_connected(right_label):
                     continue
 
                 repair_key = (candidate_mismatches, left, right)
@@ -390,15 +450,19 @@ def refine_target_assignments(
     points = layout_points(slots)
     iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
     iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
+    iso_u_list = iso_u.tolist()
+    iso_v_list = iso_v.tolist()
 
     @functools.lru_cache(maxsize=None)
     def label_score(indices):
         index_set = set(indices)
+        u_vals = [iso_u_list[i] for i in indices]
+        v_vals = [iso_v_list[i] for i in indices]
         line_group = int(
             len(indices) >= 3
             and (
-                float(np.ptp(iso_u[list(indices)])) <= 0.55
-                or float(np.ptp(iso_v[list(indices)])) <= 0.55
+                (max(u_vals) - min(u_vals)) <= 0.55
+                or (max(v_vals) - min(v_vals)) <= 0.55
             )
         )
         contacts = sum(len(adjacency[index] & index_set) for index in indices) // 2
@@ -458,12 +522,15 @@ def refine_target_assignments(
 
                     left_label = state[left]
                     right_label = state[right]
-                    left_indices = tuple(
-                        sorted((set(label_indices[left_label]) - {left}) | {right})
-                    )
-                    right_indices = tuple(
-                        sorted((set(label_indices[right_label]) - {right}) | {left})
-                    )
+                    left_indices_list = list(label_indices[left_label])
+                    left_indices_list[left_indices_list.index(left)] = right
+                    left_indices_list.sort()
+                    left_indices = tuple(left_indices_list)
+
+                    right_indices_list = list(label_indices[right_label])
+                    right_indices_list[right_indices_list.index(right)] = left
+                    right_indices_list.sort()
+                    right_indices = tuple(right_indices_list)
                     previous_score = tuple(
                         sum(values)
                         for values in zip(
@@ -823,8 +890,151 @@ def grow_connected_target(current_labels, adjacency, rng):
     return target
 
 
+def plan_merge_triggers(target_labels, adjacency, max_group_size):
+    """Plans one merge drag per connected component of exactly max_group_size items of the same label.
+
+    Returns a list of {from_slot, to_slot, label} dicts.
+    """
+    label_slots = {}
+    for slot_idx, label in enumerate(target_labels):
+        label_slots.setdefault(label, []).append(slot_idx)
+
+    triggers = []
+
+    for label, slot_indices in label_slots.items():
+        # Find connected components of this label
+        components = []
+        unvisited = set(slot_indices)
+        while unvisited:
+            start = next(iter(unvisited))
+            component = []
+            pending = [start]
+            unvisited.remove(start)
+            while pending:
+                curr = pending.pop()
+                component.append(curr)
+                for neighbor in adjacency[curr]:
+                    if neighbor in unvisited:
+                        unvisited.remove(neighbor)
+                        pending.append(neighbor)
+            components.append(component)
+
+        for component_slots in components:
+            if len(component_slots) < max_group_size:
+                continue
+
+            # Extract a connected subset of exactly max_group_size slots
+            index_set = set()
+            pending_subset = [component_slots[0]]
+            while pending_subset and len(index_set) < max_group_size:
+                curr = pending_subset.pop(0)
+                if curr not in index_set:
+                    index_set.add(curr)
+                    pending_subset.extend(n for n in adjacency[curr] if n in component_slots and n not in index_set)
+
+            if len(index_set) != max_group_size:
+                continue
+
+            found = False
+
+            for from_slot in index_set:
+                remaining = index_set - {from_slot}
+
+                # Check that removing from_slot keeps the rest connected.
+                start = next(iter(remaining))
+                visited = set()
+                pending = [start]
+                while pending:
+                    idx = pending.pop()
+                    if idx in visited:
+                        continue
+                    visited.add(idx)
+                    pending.extend((adjacency[idx] & remaining) - visited)
+
+                if visited != remaining:
+                    continue  # from_slot is an articulation point — skip it
+
+                # Pick any adjacent slot in the group as the drag target.
+                neighbors_in_group = adjacency[from_slot] & (index_set - {from_slot})
+                if not neighbors_in_group:
+                    continue
+
+                to_slot = min(neighbors_in_group)
+                triggers.append(
+                    {
+                        "from_slot": from_slot,
+                        "to_slot": to_slot,
+                        "label": label,
+                    }
+                )
+                found = True
+                break
+
+            if not found:
+                print(
+                    f"[merge] WARNING: component of '{label}' (slots {component_slots}) "
+                    "has no removable non-articulation slot — skipping merge."
+                )
+
+    return triggers
+
+
+
 def optimize_isometric_plan(slots, config):
-    """Ranks connected layouts cheaply, then plans swaps for a small shortlist."""
+    """Plans swaps in two phases when any label count exceeds max_group_size.
+
+    Phase 1 aligns split sub-groups (each at most max_group_size items) so
+    items of the same type cluster together without any single group being too
+    large.  Phase 2 then merges those sub-groups into one connected region per
+    original label.
+
+    Returns (target_labels, phase1_swaps, phase2_swaps, adjacency).
+    phase2_swaps is an empty list when no splitting was needed.
+    """
+    original_labels = [slot.label for slot in slots]
+    max_size = getattr(config, "max_group_size", 5)
+    needs_split = max_size > 0 and any(
+        count > 1 and count != max_size for count in Counter(original_labels).values()
+    )
+
+    if not needs_split:
+        target_labels, phase1_swaps, adjacency = _optimize_isometric_plan_inner(
+            slots, config
+        )
+        merge_triggers = plan_merge_triggers(target_labels, adjacency, max_size)
+        return target_labels, phase1_swaps, merge_triggers, adjacency
+
+    # ── Phase 1: align sub-groups of at most max_size ────────────────────────
+    split_labels, sub_label_map = split_oversized_labels(original_labels, max_size)
+    for slot, new_label in zip(slots, split_labels):
+        slot.label = new_label
+
+    try:
+        phase1_target_split, phase1_swaps, adjacency = _optimize_isometric_plan_inner(
+            slots, config
+        )
+    finally:
+        for slot, orig in zip(slots, original_labels):
+            slot.label = orig
+
+    # Map sub-labels in phase 1 swap descriptions back to original labels.
+    phase1_target = unsplit_labels(phase1_target_split, sub_label_map)
+    for swap in phase1_swaps:
+        swap["moving_label"] = sub_label_map.get(
+            swap["moving_label"], swap["moving_label"]
+        )
+        swap["replaced_label"] = sub_label_map.get(
+            swap["replaced_label"], swap["replaced_label"]
+        )
+
+    # ── Phase 2: plan one merge drag per group of exactly max_size ────────────
+    merge_triggers = plan_merge_triggers(phase1_target, adjacency, max_size)
+
+    return phase1_target, phase1_swaps, merge_triggers, adjacency
+
+
+def _optimize_isometric_plan_inner(slots, config):
+    """Core planner logic, operates on whatever labels slots currently have."""
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots, config)

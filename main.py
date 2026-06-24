@@ -2,94 +2,67 @@ import time
 import pyautogui
 
 from src.config import Config
-from src.detection import capture_game_bgr, detect_all_items, save_detection_debug_images, focus_game_window
-from src.geometry import stable_sort_slots, largest_orthogonal_component
-from src.planner import optimize_isometric_plan
-from src.executor import execute_swaps
+from src.detection import capture_game_bgr, detect_all_items, save_detection_debug_images, save_merge_debug_image, focus_game_window
+from src.geometry import stable_sort_slots, largest_orthogonal_component, build_isometric_adjacency
+from src.planner import optimize_isometric_plan, plan_merge_triggers
+from src.executor import execute_swaps, execute_merges
 
 
-def print_adjacency_summary(adjacency, target_labels):
-    """Prints a concise verification that no diagonal-only groups remain."""
-    edge_count = sum(len(neighbors) for neighbors in adjacency.values()) // 2
-    print(f"Isometric cardinal adjacency edges: {edge_count}")
-
-    for label in sorted(set(target_labels)):
-        indices = [i for i, value in enumerate(target_labels) if value == label]
-        if len(indices) <= 1:
-            continue
-
-        internal_contacts = (
-            sum(len(adjacency[index] & set(indices)) for index in indices) // 2
-        )
-        print(
-            f"Group {label}: {len(indices)} slots, "
-            f"{internal_contacts} cardinal contacts"
-        )
+def detect_slots(config, save_debug=True):
+    """Captures the board and returns (screenshot_img, offset, slots)."""
+    screenshot_img, offset = capture_game_bgr(config)
+    diagnostics = {}
+    detections = detect_all_items(screenshot_img, config=config, diagnostics=diagnostics, offset=offset)
+    if save_debug:
+        save_detection_debug_images(screenshot_img, detections, config=config, diagnostics=diagnostics, image_offset=offset)
+    all_slots = stable_sort_slots(detections)
+    slots = largest_orthogonal_component(all_slots, config)
+    excluded = len(all_slots) - len(slots)
+    print(f"Detected {len(detections)} items." + (f" Excluded {excluded} outside the main grid." if excluded else ""))
+    return screenshot_img, offset, slots
 
 
 def main():
     config = Config()
 
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE = config.swap_settle_delay  # Default pause matching settle delay
+    pyautogui.PAUSE = config.swap_settle_delay
 
-    screenshot_img, offset = capture_game_bgr(config)
-    print(
-        f"Game region: x={offset[0]}, y={offset[1]}, "
-        f"w={screenshot_img.shape[1]}, h={screenshot_img.shape[0]}"
-    )
+    # ── Phase 1: detect → plan align swaps → execute ─────────────────────────
+    screenshot_img, offset, slots = detect_slots(config)
 
-    diagnostics = {}
-    detections = detect_all_items(
-        screenshot_img,
-        config=config,
-        diagnostics=diagnostics,
-        offset=offset,
-    )
-    raw_path, annotated_path, scores_path = save_detection_debug_images(
-        screenshot_img,
-        detections,
-        config=config,
-        diagnostics=diagnostics,
-        image_offset=offset,
-    )
-    print(f"Detection debug files: {raw_path}, {annotated_path}, {scores_path}")
-
-    print(f"Detected {len(detections)} items.")
-
-    if not detections:
+    if not slots:
         print("No items detected. Check the game window or lower THRESHOLD.")
         return
 
-    all_slots = stable_sort_slots(detections)
-    slots = largest_orthogonal_component(all_slots, config)
-    excluded_count = len(all_slots) - len(slots)
-
-    if excluded_count:
-        print(
-            f"Excluded {excluded_count} detections outside the main "
-            "isometric item grid."
-        )
-
-    print("Planning swaps...")
+    print("Planning...")
     started = time.perf_counter()
-    target_labels, swaps, adjacency = optimize_isometric_plan(slots, config)
-    planning_seconds = time.perf_counter() - started
+    _, phase1_swaps, _, _ = optimize_isometric_plan(slots, config)
+    print(f"Done in {time.perf_counter() - started:.2f}s: {len(phase1_swaps)} align swaps.")
 
-    print(f"Planned {len(swaps)} swaps in {planning_seconds:.2f}s.")
-    print(f"Target label order: {target_labels}")
-    print_adjacency_summary(adjacency, target_labels)
-
-    print("\nSwap plan:")
-    for i, swap in enumerate(swaps, start=1):
-        print(
-            f"{i}. slot {swap['from_slot']} -> slot {swap['to_slot']} | "
-            f"{swap['moving_label']} swaps with {swap['replaced_label']}"
-        )
-
-    print("\nFocusing game window before executing swaps...")
     focus_game_window(config)
-    execute_swaps(slots, swaps, config)
+
+    if phase1_swaps:
+        print(f"\nPhase 1: aligning ({len(phase1_swaps)} swaps)...")
+        execute_swaps(slots, phase1_swaps, config)
+
+    # ── Phase 2: fresh detect → plan merge triggers → execute ─────────────────
+    screenshot_img, offset, slots = detect_slots(config, save_debug=False)
+
+    if not slots:
+        print("Phase 2: no items detected after Phase 1.")
+        return
+
+    adjacency = build_isometric_adjacency(slots, config)
+    current_labels = [slot.label for slot in slots]
+    merge_triggers = plan_merge_triggers(current_labels, adjacency, config.max_group_size)
+    merge_debug_path = save_merge_debug_image(
+        screenshot_img, slots, merge_triggers, config, image_offset=offset
+    )
+    print(f"Merge debug: {merge_debug_path} ({len(merge_triggers)} triggers)")
+    if merge_triggers:
+        print(f"\nPhase 2: merging ({len(merge_triggers)} triggers)...")
+        execute_merges(slots, merge_triggers, config)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+- [x] Optimize geometry step in `src/geometry.py`
+- [x] Optimize initial hill-climbing search in `src/planner.py`
+- [x] Optimize target repair beam search loops in `src/planner.py`
+- [x] Optimize compactness scoring and graph traversals in `src/planner.py`
+- [x] Optimize screen capture/processing in `src/detection.py`
+- [x] Run test suite and fix any test signature failures

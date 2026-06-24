@@ -40,7 +40,10 @@ def label_click_offsets(slots):
 
 def slot_click_point(slot, label, click_offsets):
     """Finds where a label is clickable after it has moved to a new slot."""
-    offset_x, offset_y = click_offsets.get(label, (0.0, 0.0))
+    if label.startswith("xu_"):
+        offset_x, offset_y = 0.0, 0.0
+    else:
+        offset_x, offset_y = click_offsets.get(label, (0.0, 0.0))
     return (
         int(round(slot.grid_anchor[0] + offset_x)),
         int(round(slot.grid_anchor[1] + offset_y)),
@@ -76,3 +79,29 @@ def execute_swaps(slots, swaps, config):
 
         drag_swap(src_xy, dst_xy, config)
         time.sleep(config.after_swap_delay)
+
+
+def execute_merges(slots, merge_triggers, config):
+    """Executes one merge drag per full group of max_group_size items.
+
+    Drags the from_slot item onto the to_slot item. The game then combines
+    all items in the group (the remaining 4 stay connected without the
+    dragged item, so the merge triggers correctly).
+    """
+    click_offsets = label_click_offsets(slots)
+
+    for k, trigger in enumerate(merge_triggers, start=1):
+        src_slot = trigger["from_slot"]
+        dst_slot = trigger["to_slot"]
+        label = trigger["label"]
+
+        src_xy = slot_click_point(slots[src_slot], label, click_offsets)
+        dst_xy = slot_click_point(slots[dst_slot], label, click_offsets)
+
+        print(
+            f"Merge {k}: drag {label} from slot {src_slot} onto slot {dst_slot}"
+        )
+
+        drag_swap(src_xy, dst_xy, config)
+        time.sleep(config.after_swap_delay)
+

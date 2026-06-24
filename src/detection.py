@@ -216,12 +216,24 @@ def _init_diagnostics(threshold):
     }
 
 
+def _match_template_worker(template, screenshot_features, screenshot_h, screenshot_w, config):
+    if template.h > screenshot_h or template.w > screenshot_w:
+        return None
+    label = template.label
+    threshold = config.template_thresholds.get(label, config.threshold)
+    result = combined_match_score(screenshot_features, template.features, config)
+    return label, threshold, result, template.w, template.h, template.template_name
+
+
 def detect_all_items(
     screenshot_img,
     config,
     diagnostics=None,
     offset=(0, 0),
 ):
+    from concurrent.futures import ThreadPoolExecutor
+    import os
+
     screenshot_features = matching_features(screenshot_img)
     screenshot_h, screenshot_w = screenshot_img.shape[:2]
     detections = []
@@ -241,51 +253,57 @@ def detect_all_items(
                 config.template_thresholds.get(label, config.threshold)
             )
 
-    for template in prepared_templates:
-        if template.h > screenshot_h or template.w > screenshot_w:
-            continue
+    num_workers = min(8, os.cpu_count() or 4)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(_match_template_worker, template, screenshot_features, screenshot_h, screenshot_w, config)
+            for template in prepared_templates
+        ]
 
-        label = template.label
-        threshold = config.template_thresholds.get(label, config.threshold)
-        result = combined_match_score(screenshot_features, template.features, config)
+        for future in futures:
+            res_one = future.result()
+            if res_one is None:
+                continue
 
-        if diagnostics is not None:
-            best_score = float(np.max(result))
+            label, threshold, result, tw, th, template_name = res_one
 
-            if best_score > diagnostics[label]["best_score"]:
-                best_y, best_x = np.unravel_index(
-                    int(np.argmax(result)),
-                    result.shape,
-                )
-                diagnostics[label].update(
-                    {
-                        "best_score": best_score,
-                        "best_template": template.template_name,
-                        "best_width": template.w,
-                        "best_height": template.h,
-                        "best_x": int(best_x + offset_x),
-                        "best_y": int(best_y + offset_y),
-                    }
-                )
+            if diagnostics is not None:
+                best_score = float(np.max(result))
 
-        local_max = result == cv2.dilate(
-            result,
-            np.ones((config.local_max_kernel, config.local_max_kernel), np.uint8),
-        )
-        ys, xs = np.where((result >= threshold) & local_max)
+                if best_score > diagnostics[label]["best_score"]:
+                    best_y, best_x = np.unravel_index(
+                        int(np.argmax(result)),
+                        result.shape,
+                    )
+                    diagnostics[label].update(
+                        {
+                            "best_score": best_score,
+                            "best_template": template_name,
+                            "best_width": tw,
+                            "best_height": th,
+                            "best_x": int(best_x + offset_x),
+                            "best_y": int(best_y + offset_y),
+                        }
+                    )
 
-        for x, y in zip(xs, ys):
-            detections.append(
-                Detection(
-                    label=label,
-                    x=int(x + offset_x),
-                    y=int(y + offset_y),
-                    w=template.w,
-                    h=template.h,
-                    score=float(result[y, x]),
-                    grid_anchor_y_factor=config.grid_anchor_y_factor,
-                )
+            local_max = result == cv2.dilate(
+                result,
+                np.ones((config.local_max_kernel, config.local_max_kernel), np.uint8),
             )
+            ys, xs = np.where((result >= threshold) & local_max)
+
+            for x, y in zip(xs, ys):
+                detections.append(
+                    Detection(
+                        label=label,
+                        x=int(x + offset_x),
+                        y=int(y + offset_y),
+                        w=tw,
+                        h=th,
+                        score=float(result[y, x]),
+                        grid_anchor_y_factor=config.grid_anchor_y_factor,
+                    )
+                )
 
     detections = deduplicate_detections(detections, config)
 
@@ -364,6 +382,34 @@ def save_detection_debug_images(
     return raw_path, annotated_path, scores_path
 
 
+def save_merge_debug_image(screenshot_img, slots, merge_triggers, config, image_offset=(0, 0)):
+    """Saves a debug image showing merge drags."""
+    config.detection_debug_dir.mkdir(parents=True, exist_ok=True)
+    out_path = config.detection_debug_dir / "merges.png"
+    canvas = screenshot_img.copy()
+    offset_x, offset_y = image_offset
+
+    for slot in slots:
+        draw_x = slot.x - offset_x
+        draw_y = slot.y - offset_y
+        cv2.rectangle(canvas, (draw_x, draw_y), (draw_x + slot.w, draw_y + slot.h), (255, 0, 0), 1)
+        cv2.putText(
+            canvas, slot.label,
+            (draw_x + 2, draw_y + 12),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+
+    for trigger in merge_triggers:
+        src = slots[trigger["from_slot"]]
+        dst = slots[trigger["to_slot"]]
+        src_pt = (src.center[0] - offset_x, src.center[1] - offset_y)
+        dst_pt = (dst.center[0] - offset_x, dst.center[1] - offset_y)
+        cv2.arrowedLine(canvas, src_pt, dst_pt, (0, 255, 0), 2, tipLength=0.3, line_type=cv2.LINE_AA)
+
+    cv2.imwrite(str(out_path), canvas)
+    return out_path
+
+
 def find_game_region(screenshot_img, config):
     """Returns the largest dense, colorful viewport as an (x, y, w, h) box."""
     screen_h, screen_w = screenshot_img.shape[:2]
@@ -396,7 +442,6 @@ def capture_game_bgr(config):
     """Captures the desktop once, then keeps only the detected game viewport."""
     win = focus_game_window(config)
 
-
     with mss.mss() as sct:
         if win is not None:
             monitor = {
@@ -405,26 +450,18 @@ def capture_game_bgr(config):
                 "width": win.width,
                 "height": win.height,
             }
-            sct_img = sct.grab(monitor)
-            full_image = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
-            offset = (win.left, win.top)
-
-            region = find_game_region(full_image, config)
-            if region is None:
-                x, y, w, h = 0, 0, win.width, win.height
-            else:
-                x, y, w, h = region
+            fallback = (0, 0, win.width, win.height)
         else:
             monitor = sct.monitors[1]
-            sct_img = sct.grab(monitor)
-            full_image = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
-            offset = (monitor["left"], monitor["top"])
+            fallback = None
 
-            region = find_game_region(full_image, config)
-            if region is None:
-                raise RuntimeError("Game viewport not found. Keep the game visible and retry.")
-            x, y, w, h = region
+        sct_img = sct.grab(monitor)
+        full_image = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
+        region = find_game_region(full_image, config) or fallback
+        if region is None:
+            raise RuntimeError("Game viewport not found. Keep the game visible and retry.")
 
+        x, y, w, h = region
         cropped_image = full_image[y : y + h, x : x + w]
-        actual_offset = (offset[0] + x, offset[1] + y)
+        actual_offset = (monitor["left"] + x, monitor["top"] + y)
         return cropped_image, actual_offset

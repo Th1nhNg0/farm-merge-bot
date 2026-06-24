@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 
@@ -55,7 +56,7 @@ def estimate_isometric_step(slots):
         step_x = max(1.0, median_width * 0.50)
         step_y = max(1.0, median_height * 0.35)
 
-    step_distance = float(np.hypot(step_x, step_y))
+    step_distance = float(math.hypot(step_x, step_y))
     return step_x, step_y, max(step_distance, 1.0)
 
 
@@ -108,7 +109,7 @@ def build_isometric_adjacency(slots, config):
             if axis_error > config.isometric_axis_tolerance:
                 continue
 
-            distance = float(np.hypot(dx, dy))
+            distance = float(math.hypot(dx, dy))
             if distance > step_distance * config.isometric_max_step_factor:
                 continue
 
@@ -142,19 +143,13 @@ def connected_components(adjacency):
     components = []
 
     while remaining:
-        pending = [min(remaining)]
         component = set()
-
+        pending = {remaining.pop()}
         while pending:
-            index = pending.pop()
-
-            if index in component:
-                continue
-
-            component.add(index)
-            pending.extend(adjacency[index] - component)
-
-        remaining -= component
+            curr = pending.pop()
+            component.add(curr)
+            pending.update(adjacency[curr] & remaining)
+            remaining.difference_update(pending)
         components.append(component)
 
     return sorted(components, key=lambda component: (-len(component), min(component)))

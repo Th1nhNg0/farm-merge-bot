@@ -84,7 +84,7 @@ class OptimizerRepeatTests(unittest.TestCase):
                 return_value=[adjacent],
             ),
         ):
-            target, swaps, _ = planner.optimize_isometric_plan(slots, config)
+            target, swaps, _, _ = planner.optimize_isometric_plan(slots, config)
 
         self.assertEqual(
             planner.layout_compactness_score(slots, adjacent, adjacency, config),
@@ -147,13 +147,13 @@ class OptimizerRepeatTests(unittest.TestCase):
             ):
                 return planner.optimize_isometric_plan(slots, config)
 
-        target, swaps, adjacency = optimize(current)
+        target, swaps, _, adjacency = optimize(current)
 
         self.assertEqual(compact, target)
         self.assertGreater(len(swaps), 0)
         self.assertTrue(planner.labels_are_cardinally_connected(target, adjacency))
 
-        repeated_target, repeated_swaps, _ = optimize(target)
+        repeated_target, repeated_swaps, _, _ = optimize(target)
 
         self.assertEqual(target, repeated_target)
         self.assertEqual([], repeated_swaps)
@@ -196,7 +196,7 @@ class OptimizerRepeatTests(unittest.TestCase):
                 return_value=[denser],
             ),
         ):
-            target, swaps, _ = planner.optimize_isometric_plan(slots, config)
+            target, swaps, _, _ = planner.optimize_isometric_plan(slots, config)
 
         self.assertEqual(
             planner.layout_compactness_score(slots, denser, adjacency, config),
@@ -305,7 +305,7 @@ class OptimizerRepeatTests(unittest.TestCase):
                 ),
             ),
         ):
-            target, swaps, _ = planner.optimize_isometric_plan(slots, config)
+            target, swaps, _, _ = planner.optimize_isometric_plan(slots, config)
 
         self.assertGreater(mock_planner.call_count, config.plan_shortlist_size)
         self.assertEqual(better_target, target)
