@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import time
 import cv2
 import numpy as np
-import pyautogui
 import mss
 import pygetwindow as gw
 

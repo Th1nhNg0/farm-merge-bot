@@ -363,262 +363,6 @@ def layout_compactness_score(slots, target_labels, adjacency, config):
     return score(target_labels)
 
 
-def refine_target_assignments(
-    slots,
-    current_labels,
-    target_labels,
-    adjacency,
-    dist,
-    swaps,
-    config,
-):
-    """Moves target labels closer to their current slots without quality loss."""
-    compactness_score = _layout_compactness_scorer(slots, adjacency, config)
-    required_quality = compactness_score(target_labels)
-    working_target = list(target_labels)
-    best_target = working_target
-    best_swaps = swaps
-    best_score = (
-        len(swaps),
-        sum(float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps),
-    )
-
-    if not swaps:
-        return best_target, best_swaps
-
-    while True:
-        mismatch_count = sum(
-            current != target for current, target in zip(current_labels, working_target)
-        )
-        mismatched_slots = [
-            index
-            for index, (current, target) in enumerate(
-                zip(current_labels, working_target)
-            )
-            if current != target
-        ]
-        best_repair = None
-
-        for offset, left in enumerate(mismatched_slots):
-            for right in mismatched_slots[offset + 1 :]:
-                if working_target[left] == working_target[right]:
-                    continue
-                if (
-                    working_target[right] != current_labels[left]
-                    and working_target[left] != current_labels[right]
-                ):
-                    continue
-
-                mismatches_before = (current_labels[left] != working_target[left]) + (current_labels[right] != working_target[right])
-                mismatches_after = (current_labels[left] != working_target[right]) + (current_labels[right] != working_target[left])
-                candidate_mismatches = mismatch_count - mismatches_before + mismatches_after
-
-                if candidate_mismatches >= mismatch_count:
-                    continue
-
-                candidate = working_target[:]
-                candidate[left], candidate[right] = candidate[right], candidate[left]
-
-                if compactness_score(candidate) != required_quality:
-                    continue
-
-                left_label = working_target[left]
-                right_label = working_target[right]
-
-                def is_label_connected(lbl):
-                    indices = [i for i, val in enumerate(candidate) if val == lbl]
-                    start = indices[0]
-                    visited = set()
-                    pending = [start]
-                    index_set = set(indices)
-                    while pending:
-                        idx = pending.pop()
-                        if idx in visited:
-                            continue
-                        visited.add(idx)
-                        pending.extend((adjacency[idx] & index_set) - visited)
-                    return visited == index_set
-
-                if not is_label_connected(left_label) or not is_label_connected(right_label):
-                    continue
-
-                repair_key = (candidate_mismatches, left, right)
-
-                if best_repair is None or repair_key < best_repair[0]:
-                    best_repair = (repair_key, candidate)
-
-        if best_repair is None:
-            break
-
-        working_target = best_repair[1]
-        candidate_swaps = plan_swaps(current_labels, working_target, dist)
-        candidate_score = (
-            len(candidate_swaps),
-            sum(
-                float(dist[swap["from_slot"], swap["to_slot"]])
-                for swap in candidate_swaps
-            ),
-        )
-
-        if candidate_score < best_score:
-            best_target = working_target
-            best_swaps = candidate_swaps
-            best_score = candidate_score
-
-    step_x, step_y, _ = estimate_isometric_step(slots)
-    points = layout_points(slots)
-    iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
-    iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
-    iso_u_list = iso_u.tolist()
-    iso_v_list = iso_v.tolist()
-
-    @functools.lru_cache(maxsize=None)
-    def label_score(indices):
-        index_set = set(indices)
-        u_vals = [iso_u_list[i] for i in indices]
-        v_vals = [iso_v_list[i] for i in indices]
-        line_group = int(
-            len(indices) >= 3
-            and (
-                (max(u_vals) - min(u_vals)) <= 0.55
-                or (max(v_vals) - min(v_vals)) <= 0.55
-            )
-        )
-        contacts = sum(len(adjacency[index] & index_set) for index in indices) // 2
-        return line_group, -contacts
-
-    @functools.lru_cache(maxsize=None)
-    def label_is_connected(index_tuple):
-        indices = set(index_tuple)
-        pending = [index_tuple[0]]
-        visited = set()
-
-        while pending:
-            index = pending.pop()
-
-            if index in visited:
-                continue
-
-            visited.add(index)
-            pending.extend((adjacency[index] & indices) - visited)
-
-        return visited == indices
-
-    beam = [best_target]
-    visited_targets = {tuple(best_target)}
-    best_rank = (*best_score, tuple(best_target))
-
-    for _ in range(config.target_repair_depth):
-        generated = []
-
-        for state in beam:
-            base_mismatches = sum(
-                current != target for current, target in zip(current_labels, state)
-            )
-            label_indices = {}
-
-            for index, label in enumerate(state):
-                label_indices.setdefault(label, []).append(index)
-
-            contributions = {
-                label: label_score(tuple(indices))
-                for label, indices in label_indices.items()
-            }
-
-            for left in range(len(state)):
-                for right in range(left + 1, len(state)):
-                    if state[left] == state[right]:
-                        continue
-
-                    candidate_mismatches = base_mismatches + sum(
-                        (current_labels[index] != state[other_index])
-                        - (current_labels[index] != state[index])
-                        for index, other_index in ((left, right), (right, left))
-                    )
-
-                    if candidate_mismatches > base_mismatches:
-                        continue
-
-                    left_label = state[left]
-                    right_label = state[right]
-                    left_indices_list = list(label_indices[left_label])
-                    left_indices_list[left_indices_list.index(left)] = right
-                    left_indices_list.sort()
-                    left_indices = tuple(left_indices_list)
-
-                    right_indices_list = list(label_indices[right_label])
-                    right_indices_list[right_indices_list.index(right)] = left
-                    right_indices_list.sort()
-                    right_indices = tuple(right_indices_list)
-                    previous_score = tuple(
-                        sum(values)
-                        for values in zip(
-                            contributions[left_label],
-                            contributions[right_label],
-                        )
-                    )
-                    candidate_score = tuple(
-                        sum(values)
-                        for values in zip(
-                            label_score(left_indices),
-                            label_score(right_indices),
-                        )
-                    )
-
-                    if candidate_score != previous_score:
-                        continue
-                    if not label_is_connected(left_indices):
-                        continue
-                    if not label_is_connected(right_indices):
-                        continue
-
-                    candidate = state[:]
-                    candidate[left], candidate[right] = (
-                        candidate[right],
-                        candidate[left],
-                    )
-
-                    if compactness_score(candidate) != required_quality:
-                        continue
-
-                    candidate_key = tuple(candidate)
-
-                    if candidate_key in visited_targets:
-                        continue
-
-                    visited_targets.add(candidate_key)
-                    generated.append((candidate_mismatches, candidate_key, candidate))
-
-        generated.sort()
-        ranked = []
-
-        for _, candidate_key, candidate in generated[:config.target_repair_exact_limit]:
-            candidate_swaps = plan_swaps(current_labels, candidate, dist)
-            drag_distance = sum(
-                float(dist[swap["from_slot"], swap["to_slot"]])
-                for swap in candidate_swaps
-            )
-            candidate_rank = (
-                len(candidate_swaps),
-                drag_distance,
-                candidate_key,
-            )
-            ranked.append((candidate_rank, candidate, candidate_swaps))
-
-            if candidate_rank < best_rank:
-                best_rank = candidate_rank
-                best_target = candidate
-                best_swaps = candidate_swaps
-
-        ranked.sort(key=lambda candidate: candidate[0])
-        beam = [candidate for _, candidate, _ in ranked[:config.target_repair_beam_width]]
-
-        if not beam or best_rank[0] == 0:
-            break
-
-    return best_target, best_swaps
-
-
 def _numeric_axis_groups(values, tolerance):
     """Groups numeric coordinates into bands."""
     groups = []
@@ -702,7 +446,6 @@ def candidate_label_orders(current_labels, config):
     candidates = [
         labels,
         tuple(reversed(labels)),
-        tuple(sorted(labels)),
         tuple(sorted(labels, key=lambda label: (-counts[label], label))),
         tuple(sorted(labels, key=lambda label: (counts[label], label))),
     ]
@@ -992,15 +735,12 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
 
 
 def optimize_isometric_plan(slots, config):
-    """Plans swaps in two phases when any label count exceeds max_group_size.
+    """Plans phase 1 alignment swaps.
 
-    Phase 1 aligns split sub-groups (each at most max_group_size items) so
-    items of the same type cluster together without any single group being too
-    large.  Phase 2 then merges those sub-groups into one connected region per
-    original label.
+    Oversized labels are temporarily split into max_group_size chunks so the
+    alignment target keeps mergeable groups separate.
 
-    Returns (target_labels, phase1_swaps, phase2_swaps, adjacency).
-    phase2_swaps is an empty list when no splitting was needed.
+    Returns (target_labels, phase1_swaps, adjacency).
     """
     original_labels = [slot.label for slot in slots]
     max_size = getattr(config, "max_group_size", 5)
@@ -1012,8 +752,7 @@ def optimize_isometric_plan(slots, config):
         target_labels, phase1_swaps, adjacency = _optimize_isometric_plan_inner(
             slots, config
         )
-        merge_triggers = plan_merge_triggers(target_labels, adjacency, max_size)
-        return target_labels, phase1_swaps, merge_triggers, adjacency
+        return target_labels, phase1_swaps, adjacency
 
     # ── Phase 1: align sub-groups of at most max_size ────────────────────────
     split_labels, sub_label_map = split_oversized_labels(original_labels, max_size)
@@ -1038,10 +777,7 @@ def optimize_isometric_plan(slots, config):
             swap["replaced_label"], swap["replaced_label"]
         )
 
-    # ── Phase 2: plan one merge drag per group of exactly max_size ────────────
-    merge_triggers = plan_merge_triggers(phase1_target, adjacency, max_size)
-
-    return phase1_target, phase1_swaps, merge_triggers, adjacency
+    return phase1_target, phase1_swaps, adjacency
 
 
 def _optimize_isometric_plan_inner(slots, config):

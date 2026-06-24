@@ -41,7 +41,7 @@ def main():
 
     print("Planning...")
     started = time.perf_counter()
-    _, phase1_swaps, _, _ = optimize_isometric_plan(slots, config)
+    _, phase1_swaps, _ = optimize_isometric_plan(slots, config)
     print(f"Done in {time.perf_counter() - started:.2f}s: {len(phase1_swaps)} align swaps.")
 
     focus_game_window(config)

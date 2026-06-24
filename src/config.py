@@ -67,9 +67,6 @@ class Config:
     label_order_seed: int = 20260619
     connected_region_trials: int = 8
     max_group_size: int = 5
-    target_repair_beam_width: int = 8
-    target_repair_depth: int = 8
-    target_repair_exact_limit: int = 40
 
     # Swap settings
     drag_duration: float = 0.005

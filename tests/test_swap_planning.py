@@ -466,7 +466,7 @@ class SwapPlanningTests(unittest.TestCase):
             mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
             mock.patch.object(planner, "_plan_swaps", wraps=planner._plan_swaps) as mock_planner,
         ):
-            target, swaps, _, planned_adjacency = planner.optimize_isometric_plan(slots, config)
+            target, swaps, planned_adjacency = planner.optimize_isometric_plan(slots, config)
 
         self.assertEqual(1, mock_planner.call_count)
         self.assertEqual(target, apply_swaps(labels, swaps))
