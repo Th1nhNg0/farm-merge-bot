@@ -23,12 +23,8 @@ left neighbors within one inferred isometric cell step. Each identical item and
 level is placed in one connected group. Groups belonging to the same item stay
 adjacent across levels whenever the board topology allows it. Candidate layouts
 preserve the best family grouping and compactness score, then minimize swaps
-and drag distance. Exact swap planning
-continues past its normal bounded shortlist only while a later candidate can
-still tie or improve the best plan. A bounded local beam search then exchanges
-target assignments only when connectivity and the exact compactness score
-remain unchanged. Any isolated matches outside the main item grid are excluded
-as a final safeguard.
+with a cheap mismatch score. Exact swap planning runs once for the chosen
+layout because mouse movement is fast enough to tolerate a few extra swaps.
 
 Name template variants `<item><level>_<variant>.png`, such as `bo1_1.png` and
 `bo1_2.png`. The unsuffixed `<item><level>.png` form also works. Templates should

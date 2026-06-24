@@ -12,9 +12,19 @@ from src.geometry import (
 )
 
 
+@functools.lru_cache(maxsize=256)
+def _label_counts(labels):
+    return Counter(labels)
+
+
 def _shortest_label_cycles(edge_slots):
+    return _shortest_label_cycles_for_edges(tuple(sorted(edge_slots)))
+
+
+@functools.lru_cache(maxsize=4096)
+def _shortest_label_cycles_for_edges(edges):
     """Returns shortest mismatch cycles using polynomial breadth-first paths."""
-    edge_set = set(edge_slots)
+    edge_set = set(edges)
     reciprocal_cycles = {
         min(((source, target), (target, source)), ((target, source), (source, target)))
         for source, target in edge_set
@@ -28,13 +38,13 @@ def _shortest_label_cycles(edge_slots):
 
     adjacency = {}
 
-    for source_label, target_label in edge_slots:
+    for source_label, target_label in edges:
         adjacency.setdefault(source_label, set()).add(target_label)
 
     cycles = set()
     shortest_length = None
 
-    for start_label, next_label in sorted(edge_slots):
+    for start_label, next_label in edges:
         queue = [next_label]
         parent = {next_label: None}
         head = 0
@@ -99,14 +109,13 @@ def _lowest_cost_cycle_slots(cycle_edges, edge_slots, dist):
             next_states = {}
 
             for slot_idx in edge_slots[edge]:
-                choices = [
+                next_states[slot_idx] = min(
                     (
                         cost + float(dist[previous_slot, slot_idx]),
                         path + (slot_idx,),
                     )
                     for previous_slot, (cost, path) in states.items()
-                ]
-                next_states[slot_idx] = min(choices)
+                )
 
             states = next_states
 
@@ -119,31 +128,16 @@ def _lowest_cost_cycle_slots(cycle_edges, edge_slots, dist):
     return best_cost, best_path
 
 
-def plan_swaps(current_labels, target_labels, dist):
-    """
-    Plans all swaps as short mismatch cycles, then minimizes drag distance.
-
-    Correct slots are never disturbed. Short cycles are preferred because each
-    independent k-cycle takes only k-1 swaps; reciprocal mismatches therefore
-    become one swap instead of being missed by slot-order greedy planning.
-    """
-    if len(current_labels) != len(target_labels) or dist.shape != (
-        len(current_labels),
-        len(current_labels),
-    ):
-        raise ValueError("slot labels and distance matrix must have matching sizes")
-
-    if Counter(current_labels) != Counter(target_labels):
-        raise ValueError("current and target labels must contain the same items")
-
-    current = current_labels[:]
+def _plan_swaps(current_labels, target_labels, dist, max_swaps=None):
+    target = list(target_labels)
+    current = list(current_labels)
     swaps = []
 
-    while current != target_labels:
+    while current != target:
         edge_slots = {}
 
         for slot_idx, (current_label, target_label) in enumerate(
-            zip(current, target_labels)
+            zip(current, target)
         ):
             if current_label != target_label:
                 edge_slots.setdefault((current_label, target_label), []).append(
@@ -173,8 +167,32 @@ def plan_swaps(current_labels, target_labels, dist):
                 current[from_slot],
                 current[to_slot],
             )
+            if max_swaps is not None and len(swaps) > max_swaps:
+                return None
 
     return swaps
+
+
+def plan_swaps(current_labels, target_labels, dist):
+    """
+    Plans all swaps as short mismatch cycles, then minimizes drag distance.
+
+    Correct slots are never disturbed. Short cycles are preferred because each
+    independent k-cycle takes only k-1 swaps; reciprocal mismatches therefore
+    become one swap instead of being missed by slot-order greedy planning.
+    """
+    current_key = tuple(current_labels)
+    target_key = tuple(target_labels)
+    if len(current_key) != len(target_key) or dist.shape != (
+        len(current_key),
+        len(current_key),
+    ):
+        raise ValueError("slot labels and distance matrix must have matching sizes")
+
+    if _label_counts(current_key) != _label_counts(target_key):
+        raise ValueError("current and target labels must contain the same items")
+
+    return _plan_swaps(current_labels, target_labels, dist)
 
 
 def labels_are_cardinally_connected(target_labels, adjacency):
@@ -199,6 +217,7 @@ def labels_are_cardinally_connected(target_labels, adjacency):
     return True
 
 
+@functools.lru_cache(maxsize=None)
 def label_family(label):
     """Returns the item name shared by labels such as bo_1, bo_2, and bo_3."""
     # Strip split-group suffix (e.g. "bo_1§0" -> "bo_1") before extracting family.
@@ -697,9 +716,9 @@ def candidate_label_orders(current_labels, config):
     return iter(dict.fromkeys(candidates))
 
 
-def target_labels_for_scan(current_labels, scan_order, label_order):
+def target_labels_for_scan(current_labels, scan_order, label_order, counts=None):
     """Places each label in one connected segment of a scan path."""
-    counts = Counter(current_labels)
+    counts = counts or Counter(current_labels)
     target = [None] * len(current_labels)
     offset = 0
 
@@ -891,7 +910,7 @@ def grow_connected_target(current_labels, adjacency, rng):
 
 
 def plan_merge_triggers(target_labels, adjacency, max_group_size):
-    """Plans one merge drag per connected component of exactly max_group_size items of the same label.
+    """Plans drags from one item into a connected group of max_group_size - 1.
 
     Returns a list of {from_slot, to_slot, label} dicts.
     """
@@ -919,47 +938,39 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
                         pending.append(neighbor)
             components.append(component)
 
+        target_group_size = max_group_size - 1
+
         for component_slots in components:
             if len(component_slots) < max_group_size:
                 continue
 
-            # Extract a connected subset of exactly max_group_size slots
-            index_set = set()
-            pending_subset = [component_slots[0]]
-            while pending_subset and len(index_set) < max_group_size:
-                curr = pending_subset.pop(0)
-                if curr not in index_set:
-                    index_set.add(curr)
-                    pending_subset.extend(n for n in adjacency[curr] if n in component_slots and n not in index_set)
-
-            if len(index_set) != max_group_size:
-                continue
-
             found = False
+            component_set = set(component_slots)
 
-            for from_slot in index_set:
-                remaining = index_set - {from_slot}
+            for from_slot in sorted(component_slots):
+                remaining = component_set - {from_slot}
+                groups = []
 
-                # Check that removing from_slot keeps the rest connected.
-                start = next(iter(remaining))
-                visited = set()
-                pending = [start]
-                while pending:
-                    idx = pending.pop()
-                    if idx in visited:
-                        continue
-                    visited.add(idx)
-                    pending.extend((adjacency[idx] & remaining) - visited)
+                while remaining:
+                    group = set()
+                    pending = [remaining.pop()]
 
-                if visited != remaining:
-                    continue  # from_slot is an articulation point — skip it
+                    while pending:
+                        idx = pending.pop()
+                        group.add(idx)
+                        next_slots = adjacency[idx] & remaining
+                        remaining.difference_update(next_slots)
+                        pending.extend(next_slots)
 
-                # Pick any adjacent slot in the group as the drag target.
-                neighbors_in_group = adjacency[from_slot] & (index_set - {from_slot})
-                if not neighbors_in_group:
+                    groups.append(group)
+
+                target_groups = [
+                    group for group in groups if len(group) == target_group_size
+                ]
+                if not target_groups:
                     continue
 
-                to_slot = min(neighbors_in_group)
+                to_slot = min(min(target_groups))
                 triggers.append(
                     {
                         "from_slot": from_slot,
@@ -973,7 +984,7 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
             if not found:
                 print(
                     f"[merge] WARNING: component of '{label}' (slots {component_slots}) "
-                    "has no removable non-articulation slot — skipping merge."
+                    "has no connected 4-item target group — skipping merge."
                 )
 
     return triggers
@@ -994,7 +1005,7 @@ def optimize_isometric_plan(slots, config):
     original_labels = [slot.label for slot in slots]
     max_size = getattr(config, "max_group_size", 5)
     needs_split = max_size > 0 and any(
-        count > 1 and count != max_size for count in Counter(original_labels).values()
+        count > max_size for count in Counter(original_labels).values()
     )
 
     if not needs_split:
@@ -1041,13 +1052,16 @@ def _optimize_isometric_plan_inner(slots, config):
     compactness_score = _layout_compactness_scorer(slots, adjacency, config)
     scan_orders = orthogonal_scan_orders(slots)
     candidates = {}
+    rejected_candidates = set()
+    label_counts = Counter(current_labels)
 
     def add_candidate(target_labels):
         target_key = tuple(target_labels)
 
-        if target_key in candidates:
+        if target_key in candidates or target_key in rejected_candidates:
             return
         if not labels_are_cardinally_connected(target_labels, adjacency):
+            rejected_candidates.add(target_key)
             return
 
         cheap_score = (
@@ -1070,6 +1084,7 @@ def _optimize_isometric_plan_inner(slots, config):
                     current_labels,
                     scan_order,
                     label_order,
+                    label_counts,
                 )
             )
 
@@ -1106,49 +1121,7 @@ def _optimize_isometric_plan_inner(slots, config):
         effective_candidates,
         key=lambda candidate: (candidate[0][1], candidate[0][2]),
     )
-    best_plan = None
-
-    for candidate_index, (cheap_score, target_labels) in enumerate(ordered_candidates):
-        mismatch_count = cheap_score[1]
-        swap_lower_bound = (mismatch_count + 1) // 2
-
-        if best_plan is not None and best_plan[0][0] == 0:
-            break
-
-        # Every swap fixes at most two mismatched slots. After the normal
-        # shortlist budget, stop once later candidates cannot tie the best
-        # exact plan found so far. This retains bounded work in the common case
-        # while no longer hiding a potentially better plan behind a hard cut.
-        if (
-            candidate_index >= config.plan_shortlist_size
-            and best_plan is not None
-            and swap_lower_bound > best_plan[0][0]
-        ):
-            break
-
-        swaps = plan_swaps(current_labels, target_labels, dist)
-        drag_distance = sum(
-            float(dist[swap["from_slot"], swap["to_slot"]]) for swap in swaps
-        )
-        score = (
-            len(swaps),
-            drag_distance,
-            tuple(target_labels),
-        )
-        candidate_plan = (score, target_labels, swaps)
-
-        if best_plan is None or candidate_plan < best_plan:
-            best_plan = candidate_plan
-
-    _, target_labels, swaps = best_plan
-    target_labels, swaps = refine_target_assignments(
-        slots,
-        current_labels,
-        target_labels,
-        adjacency,
-        dist,
-        swaps,
-        config,
-    )
+    _, target_labels = ordered_candidates[0]
+    swaps = plan_swaps(current_labels, target_labels, dist)
 
     return target_labels, swaps, adjacency

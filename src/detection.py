@@ -317,7 +317,12 @@ def detect_all_items(
 
 
 def save_detection_debug_images(
-    screenshot_img, detections, config, diagnostics=None, image_offset=(0, 0)
+    screenshot_img,
+    detections,
+    config,
+    diagnostics=None,
+    image_offset=(0, 0),
+    excluded_detections=None,
 ):
     """Saves the captured board and an annotated copy for calibration."""
     config.detection_debug_dir.mkdir(parents=True, exist_ok=True)
@@ -339,6 +344,23 @@ def save_detection_debug_images(
             cv2.FONT_HERSHEY_SIMPLEX,
             0.32,
             (0, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    for detection in excluded_detections or []:
+        draw_x = detection.x - offset_x
+        draw_y = detection.y - offset_y
+        top_left = (draw_x, draw_y)
+        bottom_right = (draw_x + detection.w, draw_y + detection.h)
+        cv2.rectangle(annotated, top_left, bottom_right, (0, 165, 255), 2)
+        cv2.putText(
+            annotated,
+            f"EXCLUDED {detection.label}",
+            (draw_x, max(10, draw_y - 3)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            (0, 165, 255),
             1,
             cv2.LINE_AA,
         )
@@ -440,7 +462,7 @@ def find_game_region(screenshot_img, config):
 
 def capture_game_bgr(config):
     """Captures the desktop once, then keeps only the detected game viewport."""
-    win = focus_game_window(config)
+    win = focus_game_window(config) if config.window_title else None
 
     with mss.mss() as sct:
         if win is not None:

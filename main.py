@@ -3,7 +3,7 @@ import pyautogui
 
 from src.config import Config
 from src.detection import capture_game_bgr, detect_all_items, save_detection_debug_images, save_merge_debug_image, focus_game_window
-from src.geometry import stable_sort_slots, largest_orthogonal_component, build_isometric_adjacency
+from src.geometry import stable_sort_slots, build_isometric_adjacency
 from src.planner import optimize_isometric_plan, plan_merge_triggers
 from src.executor import execute_swaps, execute_merges
 
@@ -13,12 +13,16 @@ def detect_slots(config, save_debug=True):
     screenshot_img, offset = capture_game_bgr(config)
     diagnostics = {}
     detections = detect_all_items(screenshot_img, config=config, diagnostics=diagnostics, offset=offset)
+    slots = stable_sort_slots(detections)
     if save_debug:
-        save_detection_debug_images(screenshot_img, detections, config=config, diagnostics=diagnostics, image_offset=offset)
-    all_slots = stable_sort_slots(detections)
-    slots = largest_orthogonal_component(all_slots, config)
-    excluded = len(all_slots) - len(slots)
-    print(f"Detected {len(detections)} items." + (f" Excluded {excluded} outside the main grid." if excluded else ""))
+        save_detection_debug_images(
+            screenshot_img,
+            slots,
+            config=config,
+            diagnostics=diagnostics,
+            image_offset=offset,
+        )
+    print(f"Detected {len(detections)} items.")
     return screenshot_img, offset, slots
 
 

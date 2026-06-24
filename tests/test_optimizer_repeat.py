@@ -246,7 +246,7 @@ class OptimizerRepeatTests(unittest.TestCase):
             planner.labels_are_cardinally_connected(repaired_target, adjacency)
         )
 
-    def test_optimizer_checks_beyond_shortlist_when_fewer_swaps_are_possible(self):
+    def test_optimizer_plans_only_the_best_cheap_candidate(self):
         config = Config()
         labels = list("abcdef")
         points = [(index * 40, index * 20) for index in range(len(labels))]
@@ -268,13 +268,12 @@ class OptimizerRepeatTests(unittest.TestCase):
                 tuple(target),
             ),
         )
-        better_target = ordered_targets[config.plan_shortlist_size]
+        cheap_target = ordered_targets[0]
 
         def scorer(slots, adjacency, config):
             return lambda target: (1, 0) if target == labels else (0, 0)
 
-        def plan(_current, target, _dist):
-            count = 2 if target == better_target else 3
+        def plan(_current, target, _dist, _max_swaps=None):
             return [
                 {
                     "from_slot": 1,
@@ -282,7 +281,7 @@ class OptimizerRepeatTests(unittest.TestCase):
                     "moving_label": "b",
                     "replaced_label": "a",
                 }
-                for _ in range(count)
+                for _ in range(3)
             ]
 
         with (
@@ -295,7 +294,7 @@ class OptimizerRepeatTests(unittest.TestCase):
             mock.patch.object(planner, "candidate_label_orders", return_value=orders),
             mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
             mock.patch.object(planner, "_layout_compactness_scorer", side_effect=scorer),
-            mock.patch.object(planner, "plan_swaps", side_effect=plan) as mock_planner,
+            mock.patch.object(planner, "_plan_swaps", side_effect=plan) as mock_planner,
             mock.patch.object(
                 planner,
                 "refine_target_assignments",
@@ -307,9 +306,9 @@ class OptimizerRepeatTests(unittest.TestCase):
         ):
             target, swaps, _, _ = planner.optimize_isometric_plan(slots, config)
 
-        self.assertGreater(mock_planner.call_count, config.plan_shortlist_size)
-        self.assertEqual(better_target, target)
-        self.assertEqual(2, len(swaps))
+        self.assertEqual(1, mock_planner.call_count)
+        self.assertEqual(cheap_target, target)
+        self.assertEqual(3, len(swaps))
 
 
 if __name__ == "__main__":

@@ -55,6 +55,21 @@ class SwapPlanningTests(unittest.TestCase):
             for label, point in zip(labels, points)
         ]
 
+    def connected_group(self, start, allowed, adjacency):
+        visited = set()
+        pending = [start]
+
+        while pending:
+            index = pending.pop()
+
+            if index in visited:
+                continue
+
+            visited.add(index)
+            pending.extend((adjacency[index] & allowed) - visited)
+
+        return visited
+
     def test_drag_moves_quickly_to_source_but_keeps_drag_timing(self):
         events = []
         config = Config()
@@ -271,6 +286,53 @@ class SwapPlanningTests(unittest.TestCase):
             self.assertTrue((debug_dir / "detections.png").is_file())
             self.assertTrue((debug_dir / "scores.csv").is_file())
 
+    def test_detect_slots_keeps_all_cropped_detections(self):
+        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
+        config = Config()
+        slots = self.make_isometric_slots(
+            ["a", "a", "b", "b"],
+            [(0, 0), (40, 20), (-40, 20), (0, 40)],
+        )
+        noise = types.SimpleNamespace(
+            label="a",
+            center=(500, 500),
+            grid_anchor=(500, 500),
+            w=20,
+            h=20,
+        )
+
+        with (
+            mock.patch.object(main, "capture_game_bgr", return_value=(screenshot, (0, 0))),
+            mock.patch.object(main, "detect_all_items", return_value=slots + [noise]),
+            mock.patch("builtins.print"),
+        ):
+            _, _, detected_slots = main.detect_slots(config, save_debug=False)
+
+        self.assertEqual(5, len(detected_slots))
+        self.assertIn(noise, detected_slots)
+
+    def test_detection_debug_marks_excluded_slots(self):
+        screenshot = np.zeros((40, 60, 3), dtype=np.uint8)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_dir = Path(temp_dir)
+            config = Config()
+            config.detection_debug_dir = debug_dir
+            kept = detection.Detection("a_1", 5, 5, 10, 10, 0.9)
+            excluded = detection.Detection("b_1", 30, 5, 10, 10, 0.8)
+
+            detection.save_detection_debug_images(
+                screenshot,
+                [kept],
+                config=config,
+                excluded_detections=[excluded],
+            )
+
+            annotated = cv2.imread(str(debug_dir / "detections.png"))
+
+        self.assertEqual([0, 255, 0], annotated[5, 5].tolist())
+        self.assertEqual([0, 165, 255], annotated[5, 30].tolist())
+
     def test_three_cycle_uses_two_swaps(self):
         current = ["a", "b", "c"]
         target = ["b", "c", "a"]
@@ -290,6 +352,56 @@ class SwapPlanningTests(unittest.TestCase):
             [(1, 0), (2, 1)],
             [(swap["from_slot"], swap["to_slot"]) for swap in swaps],
         )
+
+    def test_plan_swaps_accepts_tuple_targets(self):
+        current = ["a", "b", "c"]
+        target = ("b", "c", "a")
+        dist = np.ones((3, 3))
+
+        swaps = planner.plan_swaps(current, target, dist)
+
+        self.assertEqual(list(target), apply_swaps(current, swaps))
+
+    def test_bounded_swap_planning_aborts_after_limit(self):
+        current = ["a", "b", "c"]
+        target = ["b", "c", "a"]
+        dist = np.ones((3, 3))
+
+        self.assertIsNone(planner._plan_swaps(current, target, dist, max_swaps=1))
+
+    def test_merge_triggers_use_five_slots_from_oversized_components(self):
+        labels = ["a"] * 6
+        adjacency = {
+            index: {
+                neighbor
+                for neighbor in (index - 1, index + 1)
+                if 0 <= neighbor < len(labels)
+            }
+            for index in range(len(labels))
+        }
+
+        triggers = planner.plan_merge_triggers(labels, adjacency, 5)
+
+        self.assertEqual(1, len(triggers))
+        self.assertEqual("a", triggers[0]["label"])
+        self.assertEqual(
+            {2, 3, 4, 5},
+            self.connected_group(
+                triggers[0]["to_slot"],
+                set(range(len(labels))) - {triggers[0]["from_slot"]},
+                adjacency,
+            ),
+        )
+
+    def test_merge_triggers_skip_when_no_exact_four_item_target_group(self):
+        labels = ["a"] * 6
+        adjacency = {
+            index: set(range(len(labels))) - {index}
+            for index in range(len(labels))
+        }
+
+        with mock.patch("builtins.print"):
+            self.assertEqual([], planner.plan_merge_triggers(labels, adjacency, 5))
 
     def test_duplicate_reciprocal_pairs_choose_lowest_total_distance(self):
         current = ["a", "a", "b", "b"]
@@ -352,7 +464,7 @@ class SwapPlanningTests(unittest.TestCase):
             ),
             mock.patch.object(planner, "candidate_label_orders", return_value=label_orders),
             mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
-            mock.patch.object(planner, "plan_swaps", wraps=planner.plan_swaps) as mock_planner,
+            mock.patch.object(planner, "_plan_swaps", wraps=planner._plan_swaps) as mock_planner,
         ):
             target, swaps, _, planned_adjacency = planner.optimize_isometric_plan(slots, config)
 
