@@ -2,7 +2,7 @@ import time
 import pyautogui
 
 from src.config import Config
-from src.detection import capture_game_bgr, detect_all_items, save_detection_debug_images
+from src.detection import capture_game_bgr, detect_all_items, save_detection_debug_images, focus_game_window
 from src.geometry import stable_sort_slots, largest_orthogonal_component
 from src.planner import optimize_isometric_plan
 from src.executor import execute_swaps
@@ -87,6 +87,8 @@ def main():
             f"{swap['moving_label']} swaps with {swap['replaced_label']}"
         )
 
+    print("\nFocusing game window before executing swaps...")
+    focus_game_window(config)
     execute_swaps(slots, swaps, config)
 
 

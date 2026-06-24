@@ -1,11 +1,42 @@
 import csv
 from collections import Counter
 from dataclasses import dataclass
+import time
 import cv2
 import numpy as np
 import pyautogui
 import mss
 import pygetwindow as gw
+
+
+def focus_game_window(config):
+    """Finds the configured or Discord window, restores and activates it."""
+    title = config.window_title
+    if not title:
+        # ponytail: auto-detect Discord by default if no window title is configured
+        titles = [t for t in gw.getAllTitles() if "discord" in t.lower()]
+        if titles:
+            title = titles[0]
+            config.window_title = title
+            print(f"Auto-detected Discord window: '{title}'")
+        else:
+            print("Warning: Could not auto-detect Discord window.")
+
+    if title:
+        windows = gw.getWindowsWithTitle(title)
+        if windows:
+            win = windows[0]
+            if win.width > 0 and win.height > 0:
+                if win.isMinimized:
+                    win.restore()
+                try:
+                    win.activate()
+                except Exception:
+                    pass
+                time.sleep(0.5)  # ponytail: sleep to allow window activation and rendering
+                return win
+    return None
+
 
 
 @dataclass
@@ -363,18 +394,8 @@ def find_game_region(screenshot_img, config):
 
 def capture_game_bgr(config):
     """Captures the desktop once, then keeps only the detected game viewport."""
-    win = None
-    if config.window_title:
-        windows = gw.getWindowsWithTitle(config.window_title)
-        if windows:
-            candidate = windows[0]
-            # Verify the window has a positive width and height
-            if candidate.width > 0 and candidate.height > 0:
-                win = candidate
-                if win.isMinimized:
-                    win.restore()
-        else:
-            print(f"Warning: No window found matching title '{config.window_title}'. Falling back to primary monitor.")
+    win = focus_game_window(config)
+
 
     with mss.mss() as sct:
         if win is not None:
