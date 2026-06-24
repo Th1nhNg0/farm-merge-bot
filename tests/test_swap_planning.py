@@ -10,13 +10,17 @@ from unittest import mock
 import cv2
 import numpy as np
 
-
 fake_pyautogui = types.ModuleType("pyautogui")
 fake_pyautogui.FAILSAFE = True
 fake_pyautogui.PAUSE = 0.0
 sys.modules.setdefault("pyautogui", fake_pyautogui)
 
-import main  # noqa: E402
+import main
+from src.config import Config
+import src.detection as detection
+import src.geometry as geometry
+import src.planner as planner
+import src.executor as executor
 
 
 def apply_swaps(labels, swaps):
@@ -30,13 +34,20 @@ def apply_swaps(labels, swaps):
     return result
 
 
+class MockScreenShot:
+    def __init__(self, data):
+        self.data = data
+
+    def __array__(self, *args, **kwargs):
+        return self.data
+
+
 class SwapPlanningTests(unittest.TestCase):
     def make_isometric_slots(self, labels, points):
         return [
             types.SimpleNamespace(
                 label=label,
                 center=point,
-                screen_center=point,
                 grid_anchor=point,
                 w=20,
                 h=20,
@@ -46,10 +57,11 @@ class SwapPlanningTests(unittest.TestCase):
 
     def test_drag_moves_quickly_to_source_but_keeps_drag_timing(self):
         events = []
+        config = Config()
 
         with (
             mock.patch.object(
-                main.pyautogui,
+                executor.pyautogui,
                 "moveTo",
                 side_effect=lambda x, y, duration, **kwargs: events.append(
                     ("move", x, y, duration, kwargs)
@@ -57,44 +69,46 @@ class SwapPlanningTests(unittest.TestCase):
                 create=True,
             ),
             mock.patch.object(
-                main.pyautogui,
+                executor.pyautogui,
                 "mouseDown",
                 side_effect=lambda: events.append(("down",)),
                 create=True,
             ),
             mock.patch.object(
-                main.pyautogui,
+                executor.pyautogui,
                 "mouseUp",
                 side_effect=lambda: events.append(("up",)),
                 create=True,
             ),
-            mock.patch.object(main.time, "sleep") as sleep,
+            mock.patch.object(executor.time, "sleep") as sleep,
         ):
-            main.drag_swap((10, 20), (30, 40))
+            executor.drag_swap((10, 20), (30, 40), config)
 
         self.assertEqual(
             [
                 ("move", 10, 20, 0, {"_pause": False}),
                 ("down",),
-                ("move", 30, 40, main.DRAG_DURATION, {}),
+                ("move", 30, 40, config.drag_duration, {}),
                 ("up",),
             ],
             events,
         )
-        sleep.assert_called_once_with(main.SWAP_SETTLE_DELAY)
+        sleep.assert_called_once_with(config.swap_settle_delay)
 
     def test_isometric_adjacency_excludes_logical_diagonal(self):
+        config = Config()
         slots = self.make_isometric_slots(
             ["a", "b", "c", "d"],
             [(0, 0), (40, 20), (-40, 20), (0, 40)],
         )
 
-        adjacency = main.build_isometric_adjacency(slots)
+        adjacency = geometry.build_isometric_adjacency(slots, config)
 
         self.assertEqual({1, 2}, adjacency[0])
         self.assertNotIn(3, adjacency[0])
 
     def test_largest_isometric_component_excludes_distant_match(self):
+        config = Config()
         slots = self.make_isometric_slots(
             ["a", "a", "b", "b"],
             [(0, 0), (40, 20), (-40, 20), (0, 40)],
@@ -108,46 +122,50 @@ class SwapPlanningTests(unittest.TestCase):
             h=20,
         )
 
-        kept = main.largest_orthogonal_component(slots + [noise])
+        kept = geometry.largest_orthogonal_component(slots + [noise], config)
 
         self.assertEqual(slots, kept)
 
     def test_template_paths_include_only_base_and_underscore_variants(self):
+        config = Config()
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
+            config.template_dir = directory
 
             for name in ("bo1.png", "bo1_2.png", "bo10.png", "bo2.png"):
                 (directory / name).touch()
 
-            with mock.patch.object(main, "TEMPLATE_DIR", directory):
-                paths = main.template_paths("bo", 1)
+            paths = detection.template_paths("bo", 1, config)
 
         self.assertEqual(["bo1.png", "bo1_2.png"], [path.name for path in paths])
 
     def test_template_paths_allow_variant_only_template_sets(self):
+        config = Config()
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
+            config.template_dir = directory
 
             for name in ("bo1_1.png", "bo1_2.png", "bo2_1.png"):
                 (directory / name).touch()
 
-            with mock.patch.object(main, "TEMPLATE_DIR", directory):
-                paths = main.template_paths("bo", 1)
+            paths = detection.template_paths("bo", 1, config)
 
         self.assertEqual(["bo1_1.png", "bo1_2.png"], [path.name for path in paths])
 
     def test_center_deduplication_keeps_adjacent_overlapping_items(self):
+        config = Config()
         detections = [
-            main.Detection("a_1", "a", 1, 0, 0, 40, 40, 0.90),
-            main.Detection("b_1", "b", 1, 2, 1, 40, 40, 0.95),
-            main.Detection("c_1", "c", 1, 25, 0, 40, 40, 0.85),
+            detection.Detection("a_1", 0, 0, 40, 40, 0.90),
+            detection.Detection("b_1", 2, 1, 40, 40, 0.95),
+            detection.Detection("c_1", 25, 0, 40, 40, 0.85),
         ]
 
-        kept = main.deduplicate_detections(detections)
+        kept = detection.deduplicate_detections(detections, config)
 
         self.assertEqual(["b_1", "c_1"], [d.label for d in kept])
 
     def test_multiscale_detection_finds_a_scaled_template(self):
+        config = Config()
         rng = np.random.default_rng(7)
         template = rng.integers(0, 256, size=(20, 24, 3), dtype=np.uint8)
         scaled = cv2.resize(template, (26, 22), interpolation=cv2.INTER_CUBIC)
@@ -158,21 +176,21 @@ class SwapPlanningTests(unittest.TestCase):
             directory = Path(temp_dir)
             cv2.imwrite(str(directory / "test1.png"), template)
 
-            with (
-                mock.patch.object(main, "TEMPLATE_DIR", directory),
-                mock.patch.object(main, "TEMPLATE_SCALES", (1.0, 1.1)),
-                mock.patch.object(main, "THRESHOLD", 0.75),
-                mock.patch.object(main, "items", ["test"]),
-                mock.patch.object(main, "levels", [1]),
-                mock.patch.object(main, "item_levels", {}),
-            ):
-                diagnostics = {}
-                detections = main.detect_all_items(
-                    screenshot,
-                    diagnostics=diagnostics,
-                )
+            config.template_dir = directory
+            config.template_scales = (1.0, 1.1)
+            config.threshold = 0.75
+            config.items = ["test"]
+            config.levels = [1]
+            config.item_levels = {}
 
-        best = max(detections, key=lambda detection: detection.score)
+            diagnostics = {}
+            detections = detection.detect_all_items(
+                screenshot,
+                config=config,
+                diagnostics=diagnostics,
+            )
+
+        best = max(detections, key=lambda d: d.score)
         self.assertEqual("test_1", best.label)
         self.assertEqual((53, 41), best.center)
         self.assertGreater(diagnostics["test_1"]["best_score"], 0.75)
@@ -186,26 +204,29 @@ class SwapPlanningTests(unittest.TestCase):
         )
 
     def test_detection_screen_click_position_is_rectangle_center(self):
-        detection = main.Detection("bo_1", "bo", 1, 10, 20, 30, 40, 0.9)
+        d = detection.Detection("bo_1", 10, 20, 30, 40, 0.9)
 
-        self.assertEqual((25, 40), detection.screen_center)
+        self.assertEqual((25, 40), d.center)
 
     def test_find_game_region_ignores_surrounding_desktop_panels(self):
+        config = Config()
+        config.game_crop_padding = 0
         screenshot = np.zeros((500, 900, 3), dtype=np.uint8)
         screenshot[70:430, 220:710] = (40, 180, 80)
         screenshot[100:400, 20:160] = (50, 50, 50)
 
-        with mock.patch.object(main, "GAME_CROP_PADDING", 0):
-            region = main.find_game_region(screenshot)
+        region = detection.find_game_region(screenshot, config)
 
         self.assertEqual((220, 70, 490, 360), region)
 
     def test_find_game_region_rejects_desktop_without_game(self):
+        config = Config()
         screenshot = np.full((500, 900, 3), 25, dtype=np.uint8)
 
-        self.assertIsNone(main.find_game_region(screenshot))
+        self.assertIsNone(detection.find_game_region(screenshot, config))
 
     def test_cropped_detection_keeps_absolute_screen_coordinates(self):
+        config = Config()
         rng = np.random.default_rng(11)
         template = rng.integers(0, 256, size=(18, 22, 3), dtype=np.uint8)
         crop = np.zeros((80, 100, 3), dtype=np.uint8)
@@ -215,23 +236,24 @@ class SwapPlanningTests(unittest.TestCase):
             directory = Path(temp_dir)
             cv2.imwrite(str(directory / "test1.png"), template)
 
-            with (
-                mock.patch.object(main, "TEMPLATE_DIR", directory),
-                mock.patch.object(main, "THRESHOLD", 0.70),
-                mock.patch.object(main, "items", ["test"]),
-                mock.patch.object(main, "levels", [1]),
-                mock.patch.object(main, "item_levels", {}),
-            ):
-                detections = main.detect_all_items(crop, offset=(200, 70))
+            config.template_dir = directory
+            config.threshold = 0.70
+            config.items = ["test"]
+            config.levels = [1]
+            config.item_levels = {}
 
-        best = max(detections, key=lambda detection: detection.score)
-        self.assertEqual((251, 109), best.screen_center)
+            detections = detection.detect_all_items(crop, config=config, offset=(200, 70))
+
+        best = max(detections, key=lambda d: d.score)
+        self.assertEqual((251, 109), best.center)
 
     def test_main_always_writes_debug_output(self):
         screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             debug_dir = Path(temp_dir)
+            config = Config()
+            config.detection_debug_dir = debug_dir
 
             with (
                 mock.patch.object(
@@ -240,7 +262,7 @@ class SwapPlanningTests(unittest.TestCase):
                     return_value=(screenshot, (0, 0)),
                 ),
                 mock.patch.object(main, "detect_all_items", return_value=[]),
-                mock.patch.object(main, "DETECTION_DEBUG_DIR", debug_dir),
+                mock.patch("main.Config", return_value=config),
                 mock.patch("builtins.print"),
             ):
                 main.main()
@@ -260,7 +282,7 @@ class SwapPlanningTests(unittest.TestCase):
             ]
         )
 
-        swaps = main.plan_swaps(current, target, dist)
+        swaps = planner.plan_swaps(current, target, dist)
 
         self.assertEqual(2, len(swaps))
         self.assertEqual(target, apply_swaps(current, swaps))
@@ -281,7 +303,7 @@ class SwapPlanningTests(unittest.TestCase):
             ]
         )
 
-        swaps = main.plan_swaps(current, target, dist)
+        swaps = planner.plan_swaps(current, target, dist)
 
         self.assertEqual(target, apply_swaps(current, swaps))
         self.assertEqual(
@@ -306,10 +328,11 @@ class SwapPlanningTests(unittest.TestCase):
                 (("a", "b"), ("b", "a")),
                 (("b", "c"), ("c", "b")),
             ],
-            main._shortest_label_cycles(edge_slots),
+            planner._shortest_label_cycles(edge_slots),
         )
 
     def test_optimizer_stops_planning_after_zero_swap_candidate(self):
+        config = Config()
         labels = list("abcdef")
         slots = self.make_isometric_slots(
             labels,
@@ -321,35 +344,35 @@ class SwapPlanningTests(unittest.TestCase):
         label_orders = list(itertools.islice(itertools.permutations(labels), 40))
 
         with (
-            mock.patch.object(main, "build_isometric_adjacency", return_value=adjacency),
+            mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),
             mock.patch.object(
-                main,
+                planner,
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(slots)))],
             ),
-            mock.patch.object(main, "candidate_label_orders", return_value=label_orders),
-            mock.patch.object(main, "candidate_targets_for_scan", return_value=[]),
-            mock.patch.object(main, "plan_swaps", wraps=main.plan_swaps) as planner,
+            mock.patch.object(planner, "candidate_label_orders", return_value=label_orders),
+            mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
+            mock.patch.object(planner, "plan_swaps", wraps=planner.plan_swaps) as mock_planner,
         ):
-            target, swaps, planned_adjacency = main.optimize_isometric_plan(slots)
+            target, swaps, planned_adjacency = planner.optimize_isometric_plan(slots, config)
 
-        self.assertEqual(1, planner.call_count)
+        self.assertEqual(1, mock_planner.call_count)
         self.assertEqual(target, apply_swaps(labels, swaps))
         self.assertTrue(
-            main.labels_are_cardinally_connected(target, planned_adjacency)
+            planner.labels_are_cardinally_connected(target, planned_adjacency)
         )
 
         with (
-            mock.patch.object(main, "build_isometric_adjacency", return_value=adjacency),
+            mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),
             mock.patch.object(
-                main,
+                planner,
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(slots)))],
             ),
-            mock.patch.object(main, "candidate_label_orders", return_value=label_orders),
-            mock.patch.object(main, "candidate_targets_for_scan", return_value=[]),
+            mock.patch.object(planner, "candidate_label_orders", return_value=label_orders),
+            mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
         ):
-            repeated = main.optimize_isometric_plan(slots)
+            repeated = planner.optimize_isometric_plan(slots, config)
 
         self.assertEqual((target, swaps), repeated[:2])
 
@@ -366,7 +389,7 @@ class SwapPlanningTests(unittest.TestCase):
             )
             dist = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
 
-            swaps = main.plan_swaps(current, target, dist)
+            swaps = planner.plan_swaps(current, target, dist)
 
             self.assertEqual(target, apply_swaps(current, swaps))
             initially_correct = {
@@ -383,13 +406,14 @@ class SwapPlanningTests(unittest.TestCase):
 
     def test_rejects_different_label_counts(self):
         with self.assertRaisesRegex(ValueError, "same items"):
-            main.plan_swaps(["a", "b"], ["a", "a"], np.zeros((2, 2)))
+            planner.plan_swaps(["a", "b"], ["a", "a"], np.zeros((2, 2)))
 
     def test_execute_swaps_has_no_limit(self):
+        config = Config()
         slots = [
             types.SimpleNamespace(
                 label="a" if i % 2 == 0 else "b",
-                screen_center=(i, i),
+                center=(i, i),
                 grid_anchor=(i, i),
             )
             for i in range(102)
@@ -405,24 +429,25 @@ class SwapPlanningTests(unittest.TestCase):
         ]
 
         with (
-            mock.patch.object(main, "drag_swap") as drag_swap,
-            mock.patch.object(main.time, "sleep"),
+            mock.patch.object(executor, "drag_swap") as drag_swap,
+            mock.patch.object(executor.time, "sleep"),
             mock.patch("builtins.print"),
         ):
-            main.execute_swaps(slots, swaps)
+            executor.execute_swaps(slots, swaps, config)
 
         self.assertEqual(101, drag_swap.call_count)
 
     def test_execute_swaps_tracks_sprite_center_after_it_moves(self):
+        config = Config()
         slots = [
             types.SimpleNamespace(
-                label="a", screen_center=(100, 80), grid_anchor=(100, 100)
+                label="a", center=(100, 80), grid_anchor=(100, 100)
             ),
             types.SimpleNamespace(
-                label="b", screen_center=(200, 70), grid_anchor=(200, 100)
+                label="b", center=(200, 70), grid_anchor=(200, 100)
             ),
             types.SimpleNamespace(
-                label="c", screen_center=(300, 90), grid_anchor=(300, 100)
+                label="c", center=(300, 90), grid_anchor=(300, 100)
             ),
         ]
         swaps = [
@@ -441,19 +466,77 @@ class SwapPlanningTests(unittest.TestCase):
         ]
 
         with (
-            mock.patch.object(main, "drag_swap") as drag_swap,
-            mock.patch.object(main.time, "sleep"),
+            mock.patch.object(executor, "drag_swap") as drag_swap,
+            mock.patch.object(executor.time, "sleep"),
             mock.patch("builtins.print"),
         ):
-            main.execute_swaps(slots, swaps)
+            executor.execute_swaps(slots, swaps, config)
 
         self.assertEqual(
             [
-                mock.call((200, 70), (100, 80)),
-                mock.call((100, 70), (300, 90)),
+                mock.call((200, 70), (100, 80), config),
+                mock.call((100, 70), (300, 90), config),
             ],
             drag_swap.call_args_list,
         )
+
+    def test_capture_game_bgr_falls_back_to_primary_monitor(self):
+        config = Config()
+        config.window_title = None
+
+        mock_region = (10, 10, 50, 50)
+
+        # Mock mss
+        mock_mss_instance = mock.MagicMock()
+        mock_mss_instance.__enter__.return_value = mock_mss_instance
+        mock_mss_instance.monitors = [None, {"left": 0, "top": 0, "width": 800, "height": 600}]
+        mock_grab_result = MockScreenShot(np.zeros((600, 800, 4), dtype=np.uint8))
+        mock_mss_instance.grab.return_value = mock_grab_result
+
+        with (
+            mock.patch("src.detection.mss.mss", return_value=mock_mss_instance),
+            mock.patch("src.detection.find_game_region", return_value=mock_region),
+        ):
+            img, offset = detection.capture_game_bgr(config)
+
+        self.assertEqual((10, 10), offset)
+        self.assertEqual((50, 50, 3), img.shape)
+
+    def test_capture_game_bgr_with_window_title_finds_window(self):
+        config = Config()
+        config.window_title = "My Game Window"
+
+        # Mock window
+        mock_window = mock.MagicMock()
+        mock_window.left = 100
+        mock_window.top = 200
+        mock_window.width = 400
+        mock_window.height = 300
+        mock_window.isMinimized = False
+
+        mock_windows = [mock_window]
+
+        # Mock mss
+        mock_mss_instance = mock.MagicMock()
+        mock_mss_instance.__enter__.return_value = mock_mss_instance
+        mock_grab_result = MockScreenShot(np.zeros((300, 400, 4), dtype=np.uint8))
+        mock_mss_instance.grab.return_value = mock_grab_result
+
+        with (
+            mock.patch("src.detection.gw.getWindowsWithTitle", return_value=mock_windows),
+            mock.patch("src.detection.mss.mss", return_value=mock_mss_instance),
+            mock.patch("src.detection.find_game_region", return_value=None), # fallback to whole window
+        ):
+            img, offset = detection.capture_game_bgr(config)
+
+        self.assertEqual((100, 200), offset)
+        self.assertEqual((300, 400, 3), img.shape)
+        mock_mss_instance.grab.assert_called_once_with({
+            "top": 200,
+            "left": 100,
+            "width": 400,
+            "height": 300,
+        })
 
 
 if __name__ == "__main__":

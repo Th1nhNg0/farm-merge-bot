@@ -10,7 +10,9 @@ fake_pyautogui.FAILSAFE = True
 fake_pyautogui.PAUSE = 0.0
 sys.modules.setdefault("pyautogui", fake_pyautogui)
 
-import main  # noqa: E402
+from src.config import Config
+import src.geometry as geometry
+import src.planner as planner
 
 
 def make_slots(labels, points):
@@ -18,7 +20,6 @@ def make_slots(labels, points):
         types.SimpleNamespace(
             label=label,
             center=point,
-            screen_center=point,
             grid_anchor=point,
             w=20,
             h=20,
@@ -29,66 +30,72 @@ def make_slots(labels, points):
 
 class OptimizerRepeatTests(unittest.TestCase):
     def test_candidate_orders_ignore_current_slot_order(self):
+        config = Config()
         self.assertEqual(
-            list(main.candidate_label_orders(["b", "a", "c", "a"])),
-            list(main.candidate_label_orders(["a", "c", "a", "b"])),
+            list(planner.candidate_label_orders(["b", "a", "c", "a"], config)),
+            list(planner.candidate_label_orders(["a", "c", "a", "b"], config)),
         )
 
     def test_line_scores_worse_than_l_shape_with_equal_contacts(self):
+        config = Config()
         labels = ["a", "a", "a"]
         line_slots = make_slots(labels, [(0, 0), (40, 20), (80, 40)])
         l_slots = make_slots(labels, [(0, 0), (40, 20), (0, 40)])
 
-        line_score = main.layout_compactness_score(
+        line_score = planner.layout_compactness_score(
             line_slots,
             labels,
-            main.build_isometric_adjacency(line_slots),
+            geometry.build_isometric_adjacency(line_slots, config),
+            config,
         )
-        l_score = main.layout_compactness_score(
+        l_score = planner.layout_compactness_score(
             l_slots,
             labels,
-            main.build_isometric_adjacency(l_slots),
+            geometry.build_isometric_adjacency(l_slots, config),
+            config,
         )
 
         self.assertEqual((0, 1, 0, -2), line_score)
         self.assertEqual((0, 0, 0, -2), l_score)
 
     def test_levels_of_the_same_item_prefer_adjacent_groups(self):
+        config = Config()
         points = [(0, 0), (40, 20), (-40, 20), (0, 40)]
         separated = ["bo_1", "ga_1", "ga_2", "bo_2"]
         adjacent = ["bo_1", "bo_2", "ga_1", "ga_2"]
         slots = make_slots(separated, points)
-        adjacency = main.build_isometric_adjacency(slots)
+        adjacency = geometry.build_isometric_adjacency(slots, config)
 
         self.assertLess(
-            main.layout_compactness_score(slots, adjacent, adjacency),
-            main.layout_compactness_score(slots, separated, adjacency),
+            planner.layout_compactness_score(slots, adjacent, adjacency, config),
+            planner.layout_compactness_score(slots, separated, adjacency, config),
         )
 
         with (
             mock.patch.object(
-                main,
+                planner,
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(slots)))],
             ),
-            mock.patch.object(main, "candidate_label_orders", return_value=[]),
+            mock.patch.object(planner, "candidate_label_orders", return_value=[]),
             mock.patch.object(
-                main,
+                planner,
                 "candidate_targets_for_scan",
                 return_value=[adjacent],
             ),
         ):
-            target, swaps, _ = main.optimize_isometric_plan(slots)
+            target, swaps, _ = planner.optimize_isometric_plan(slots, config)
 
         self.assertEqual(
-            main.layout_compactness_score(slots, adjacent, adjacency),
-            main.layout_compactness_score(slots, target, adjacency),
+            planner.layout_compactness_score(slots, adjacent, adjacency, config),
+            planner.layout_compactness_score(slots, target, adjacency, config),
         )
         bo_slots = {index for index, label in enumerate(target) if label.startswith("bo_")}
         self.assertTrue(any(adjacency[index] & bo_slots for index in bo_slots))
         self.assertGreater(len(swaps), 0)
 
     def test_scan_candidates_ignore_current_slot_order(self):
+        config = Config()
         first = ["bo_1", "bo_1", "bo_2", "ga_1", "ga_1", "ga_2"]
         second = ["ga_1", "bo_2", "bo_1", "ga_2", "bo_1", "ga_1"]
         scan_order = tuple(range(len(first)))
@@ -98,25 +105,26 @@ class OptimizerRepeatTests(unittest.TestCase):
         }
 
         first_candidates = list(
-            main.candidate_targets_for_scan(
+            planner.candidate_targets_for_scan(
                 first,
                 scan_order,
                 adjacency,
-                random.Random(main.LABEL_ORDER_SEED),
+                random.Random(config.label_order_seed),
             )
         )
         second_candidates = list(
-            main.candidate_targets_for_scan(
+            planner.candidate_targets_for_scan(
                 second,
                 scan_order,
                 adjacency,
-                random.Random(main.LABEL_ORDER_SEED),
+                random.Random(config.label_order_seed),
             )
         )
 
         self.assertEqual(first_candidates, second_candidates)
 
     def test_optimizer_converges_then_repeats_with_zero_swaps(self):
+        config = Config()
         current = ["a", "a", "a", "b", "b", "b"]
         compact = ["a", "a", "b", "a", "b", "b"]
         points = [(0, 0), (40, 20), (80, 40), (-40, 20), (0, 40), (40, 60)]
@@ -126,24 +134,24 @@ class OptimizerRepeatTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    main,
+                    planner,
                     "orthogonal_scan_orders",
                     return_value=[tuple(range(len(slots)))],
                 ),
-                mock.patch.object(main, "candidate_label_orders", return_value=[]),
+                mock.patch.object(planner, "candidate_label_orders", return_value=[]),
                 mock.patch.object(
-                    main,
+                    planner,
                     "candidate_targets_for_scan",
                     return_value=[compact],
                 ),
             ):
-                return main.optimize_isometric_plan(slots)
+                return planner.optimize_isometric_plan(slots, config)
 
         target, swaps, adjacency = optimize(current)
 
         self.assertEqual(compact, target)
         self.assertGreater(len(swaps), 0)
-        self.assertTrue(main.labels_are_cardinally_connected(target, adjacency))
+        self.assertTrue(planner.labels_are_cardinally_connected(target, adjacency))
 
         repeated_target, repeated_swaps, _ = optimize(target)
 
@@ -151,6 +159,7 @@ class OptimizerRepeatTests(unittest.TestCase):
         self.assertEqual([], repeated_swaps)
 
     def test_optimizer_preserves_best_compactness_before_reducing_swaps(self):
+        config = Config()
         current = ["a", "b", "b", "a", "a", "b", "b", "a", "b"]
         denser = ["a", "a", "a", "a", "b", "b", "b", "b", "b"]
         points = [
@@ -166,37 +175,38 @@ class OptimizerRepeatTests(unittest.TestCase):
         ]
         slots = make_slots(current, points)
 
-        adjacency = main.build_isometric_adjacency(slots)
-        self.assertTrue(main.labels_are_cardinally_connected(current, adjacency))
-        self.assertTrue(main.labels_are_cardinally_connected(denser, adjacency))
+        adjacency = geometry.build_isometric_adjacency(slots, config)
+        self.assertTrue(planner.labels_are_cardinally_connected(current, adjacency))
+        self.assertTrue(planner.labels_are_cardinally_connected(denser, adjacency))
         self.assertLess(
-            main.layout_compactness_score(slots, denser, adjacency),
-            main.layout_compactness_score(slots, current, adjacency),
+            planner.layout_compactness_score(slots, denser, adjacency, config),
+            planner.layout_compactness_score(slots, current, adjacency, config),
         )
 
         with (
             mock.patch.object(
-                main,
+                planner,
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(slots)))],
             ),
-            mock.patch.object(main, "candidate_label_orders", return_value=[]),
+            mock.patch.object(planner, "candidate_label_orders", return_value=[]),
             mock.patch.object(
-                main,
+                planner,
                 "candidate_targets_for_scan",
                 return_value=[denser],
             ),
         ):
-            target, swaps, _ = main.optimize_isometric_plan(slots)
+            target, swaps, _ = planner.optimize_isometric_plan(slots, config)
 
         self.assertEqual(
-            main.layout_compactness_score(slots, denser, adjacency),
-            main.layout_compactness_score(slots, target, adjacency),
+            planner.layout_compactness_score(slots, denser, adjacency, config),
+            planner.layout_compactness_score(slots, target, adjacency, config),
         )
-        self.assertTrue(main.labels_are_cardinally_connected(target, adjacency))
+        self.assertTrue(planner.labels_are_cardinally_connected(target, adjacency))
         self.assertGreater(len(swaps), 0)
 
     def test_target_repair_reduces_swaps_without_changing_quality(self):
+        config = Config()
         current = ["a", "a", "b", "a", "a", "b", "b", "b", "b"]
         target = ["a", "a", "a", "a", "b", "b", "b", "b", "b"]
         points = [
@@ -211,31 +221,33 @@ class OptimizerRepeatTests(unittest.TestCase):
             (0, 80),
         ]
         slots = make_slots(current, points)
-        adjacency = main.build_isometric_adjacency(slots)
-        dist = main.pairwise_distance_matrix(slots)
-        swaps = main.plan_swaps(current, target, dist)
-        quality = main.layout_compactness_score(slots, target, adjacency)
+        adjacency = geometry.build_isometric_adjacency(slots, config)
+        dist = geometry.pairwise_distance_matrix(slots)
+        swaps = planner.plan_swaps(current, target, dist)
+        quality = planner.layout_compactness_score(slots, target, adjacency, config)
 
-        repaired_target, repaired_swaps = main.refine_target_assignments(
+        repaired_target, repaired_swaps = planner.refine_target_assignments(
             slots,
             current,
             target,
             adjacency,
             dist,
             swaps,
+            config,
         )
 
         self.assertEqual(current, repaired_target)
         self.assertEqual([], repaired_swaps)
         self.assertEqual(
             quality,
-            main.layout_compactness_score(slots, repaired_target, adjacency),
+            planner.layout_compactness_score(slots, repaired_target, adjacency, config),
         )
         self.assertTrue(
-            main.labels_are_cardinally_connected(repaired_target, adjacency)
+            planner.labels_are_cardinally_connected(repaired_target, adjacency)
         )
 
     def test_optimizer_checks_beyond_shortlist_when_fewer_swaps_are_possible(self):
+        config = Config()
         labels = list("abcdef")
         points = [(index * 40, index * 20) for index in range(len(labels))]
         slots = make_slots(labels, points)
@@ -245,7 +257,7 @@ class OptimizerRepeatTests(unittest.TestCase):
         }
         orders = list(itertools.islice(itertools.permutations(labels), 40))
         targets = [
-            main.target_labels_for_scan(labels, tuple(range(len(labels))), order)
+            planner.target_labels_for_scan(labels, tuple(range(len(labels))), order)
             for order in orders
             if list(order) != labels
         ]
@@ -256,10 +268,10 @@ class OptimizerRepeatTests(unittest.TestCase):
                 tuple(target),
             ),
         )
-        better_target = ordered_targets[main.PLAN_SHORTLIST_SIZE]
+        better_target = ordered_targets[config.plan_shortlist_size]
 
-        def compactness(_slots, target, _adjacency):
-            return (1, 0) if target == labels else (0, 0)
+        def scorer(slots, adjacency, config):
+            return lambda target: (1, 0) if target == labels else (0, 0)
 
         def plan(_current, target, _dist):
             count = 2 if target == better_target else 3
@@ -274,28 +286,28 @@ class OptimizerRepeatTests(unittest.TestCase):
             ]
 
         with (
-            mock.patch.object(main, "build_isometric_adjacency", return_value=adjacency),
+            mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),
             mock.patch.object(
-                main,
+                planner,
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(labels)))],
             ),
-            mock.patch.object(main, "candidate_label_orders", return_value=orders),
-            mock.patch.object(main, "candidate_targets_for_scan", return_value=[]),
-            mock.patch.object(main, "layout_compactness_score", side_effect=compactness),
-            mock.patch.object(main, "plan_swaps", side_effect=plan) as planner,
+            mock.patch.object(planner, "candidate_label_orders", return_value=orders),
+            mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
+            mock.patch.object(planner, "_layout_compactness_scorer", side_effect=scorer),
+            mock.patch.object(planner, "plan_swaps", side_effect=plan) as mock_planner,
             mock.patch.object(
-                main,
+                planner,
                 "refine_target_assignments",
-                side_effect=lambda slots, current, target, adjacency, dist, swaps: (
+                side_effect=lambda slots, current, target, adjacency, dist, swaps, config: (
                     target,
                     swaps,
                 ),
             ),
         ):
-            target, swaps, _ = main.optimize_isometric_plan(slots)
+            target, swaps, _ = planner.optimize_isometric_plan(slots, config)
 
-        self.assertGreater(planner.call_count, main.PLAN_SHORTLIST_SIZE)
+        self.assertGreater(mock_planner.call_count, config.plan_shortlist_size)
         self.assertEqual(better_target, target)
         self.assertEqual(2, len(swaps))
 
