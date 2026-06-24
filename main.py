@@ -81,7 +81,7 @@ SWAP_SETTLE_DELAY = 0.01
 AFTER_SWAP_DELAY = 0.001
 
 pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.02
+pyautogui.PAUSE = 0.01
 
 
 # ---------------- data model ----------------
