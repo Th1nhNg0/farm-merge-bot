@@ -71,4 +71,4 @@ class Config:
     # Swap settings
     drag_duration: float = 0.005
     swap_settle_delay: float = 0.005
-    after_swap_delay: float = 0.005
+    after_swap_delay: float = 0.01
