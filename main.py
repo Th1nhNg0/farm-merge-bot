@@ -28,7 +28,7 @@ items = [
     "go",
     "da",
     "congcu",
-    "cuu"
+    "cuu",
 ]
 
 levels = [1, 2, 3]
@@ -76,9 +76,9 @@ TARGET_REPAIR_DEPTH = 8
 TARGET_REPAIR_EXACT_LIMIT = 40
 
 # Swap settings
-DRAG_DURATION = 0.03
-SWAP_SETTLE_DELAY = 0.025
-AFTER_SWAP_DELAY = 0.002
+DRAG_DURATION = 0.012
+SWAP_SETTLE_DELAY = 0.01
+AFTER_SWAP_DELAY = 0.001
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.02
@@ -1118,9 +1118,7 @@ def _layout_compactness_scorer(slots, adjacency):
                 or float(np.ptp(iso_v[list(indices)])) <= 0.55
             )
         )
-        contacts = (
-            sum(len(adjacency[index] & index_set) for index in indices) // 2
-        )
+        contacts = sum(len(adjacency[index] & index_set) for index in indices) // 2
         return line_group, -contacts
 
     @functools.lru_cache(maxsize=None)
@@ -1225,8 +1223,7 @@ def refine_target_assignments(
 
     while True:
         mismatch_count = sum(
-            current != target
-            for current, target in zip(current_labels, working_target)
+            current != target for current, target in zip(current_labels, working_target)
         )
         mismatched_slots = [
             index
@@ -1256,9 +1253,7 @@ def refine_target_assignments(
 
                 if candidate_mismatches >= mismatch_count:
                     continue
-                if (
-                    compactness_score(candidate) != required_quality
-                ):
+                if compactness_score(candidate) != required_quality:
                     continue
                 if not labels_are_cardinally_connected(candidate, adjacency):
                     continue
@@ -1301,9 +1296,7 @@ def refine_target_assignments(
                 or float(np.ptp(iso_v[list(indices)])) <= 0.55
             )
         )
-        contacts = (
-            sum(len(adjacency[index] & index_set) for index in indices) // 2
-        )
+        contacts = sum(len(adjacency[index] & index_set) for index in indices) // 2
         return line_group, -contacts
 
     @functools.lru_cache(maxsize=None)
@@ -1332,8 +1325,7 @@ def refine_target_assignments(
 
         for state in beam:
             base_mismatches = sum(
-                current != target
-                for current, target in zip(current_labels, state)
+                current != target for current, target in zip(current_labels, state)
             )
             label_indices = {}
 
@@ -1404,16 +1396,12 @@ def refine_target_assignments(
                         continue
 
                     visited_targets.add(candidate_key)
-                    generated.append(
-                        (candidate_mismatches, candidate_key, candidate)
-                    )
+                    generated.append((candidate_mismatches, candidate_key, candidate))
 
         generated.sort()
         ranked = []
 
-        for _, candidate_key, candidate in generated[
-            :TARGET_REPAIR_EXACT_LIMIT
-        ]:
+        for _, candidate_key, candidate in generated[:TARGET_REPAIR_EXACT_LIMIT]:
             candidate_swaps = plan_swaps(current_labels, candidate, dist)
             drag_distance = sum(
                 float(dist[swap["from_slot"], swap["to_slot"]])
@@ -1424,9 +1412,7 @@ def refine_target_assignments(
                 drag_distance,
                 candidate_key,
             )
-            ranked.append(
-                (candidate_rank, candidate, candidate_swaps)
-            )
+            ranked.append((candidate_rank, candidate, candidate_swaps))
 
             if candidate_rank < best_rank:
                 best_rank = candidate_rank
@@ -1434,10 +1420,7 @@ def refine_target_assignments(
                 best_swaps = candidate_swaps
 
         ranked.sort(key=lambda candidate: candidate[0])
-        beam = [
-            candidate
-            for _, candidate, _ in ranked[:TARGET_REPAIR_BEAM_WIDTH]
-        ]
+        beam = [candidate for _, candidate, _ in ranked[:TARGET_REPAIR_BEAM_WIDTH]]
 
         if not beam or best_rank[0] == 0:
             break
@@ -1520,9 +1503,7 @@ def optimize_isometric_plan(slots):
     )
     best_plan = None
 
-    for candidate_index, (cheap_score, target_labels) in enumerate(
-        ordered_candidates
-    ):
+    for candidate_index, (cheap_score, target_labels) in enumerate(ordered_candidates):
         mismatch_count = cheap_score[1]
         swap_lower_bound = (mismatch_count + 1) // 2
 
@@ -1649,9 +1630,7 @@ def execute_swaps(slots, swaps):
         # Slot anchors stay fixed, while sprite centers depend on the label
         # currently occupying that slot. Use the planned labels so later swaps
         # still click the right sprite after earlier swaps moved it.
-        src_xy = slot_click_point(
-            slots[src_slot], swap["moving_label"], click_offsets
-        )
+        src_xy = slot_click_point(slots[src_slot], swap["moving_label"], click_offsets)
         dst_xy = slot_click_point(
             slots[dst_slot], swap["replaced_label"], click_offsets
         )
@@ -1732,10 +1711,7 @@ def main():
         diagnostics=diagnostics,
         image_offset=offset,
     )
-    print(
-        "Detection debug files: "
-        f"{raw_path}, {annotated_path}, {scores_path}"
-    )
+    print(f"Detection debug files: {raw_path}, {annotated_path}, {scores_path}")
 
     print(f"Detected {len(detections)} items.")
 
