@@ -1,4 +1,3 @@
-import itertools
 import random
 import sys
 import tempfile
@@ -122,24 +121,6 @@ class SwapPlanningTests(unittest.TestCase):
         self.assertEqual({1, 2}, adjacency[0])
         self.assertNotIn(3, adjacency[0])
 
-    def test_largest_isometric_component_excludes_distant_match(self):
-        config = Config()
-        slots = self.make_isometric_slots(
-            ["a", "a", "b", "b"],
-            [(0, 0), (40, 20), (-40, 20), (0, 40)],
-        )
-        noise = types.SimpleNamespace(
-            label="a",
-            center=(500, 500),
-            screen_center=(500, 500),
-            grid_anchor=(500, 500),
-            w=20,
-            h=20,
-        )
-
-        kept = geometry.largest_orthogonal_component(slots + [noise], config)
-
-        self.assertEqual(slots, kept)
 
     def test_template_paths_include_only_base_and_underscore_variants(self):
         config = Config()
@@ -486,7 +467,6 @@ class SwapPlanningTests(unittest.TestCase):
         adjacency = {
             index: set(range(len(slots))) - {index} for index in range(len(slots))
         }
-        label_orders = list(itertools.islice(itertools.permutations(labels), 40))
 
         with (
             mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),
@@ -499,7 +479,7 @@ class SwapPlanningTests(unittest.TestCase):
         ):
             target, swaps, planned_adjacency = planner.optimize_isometric_plan(slots, config)
 
-        self.assertEqual(1, mock_planner.call_count)
+        self.assertEqual(0, mock_planner.call_count)
         self.assertEqual(target, apply_swaps(labels, swaps))
         self.assertTrue(
             planner.labels_are_cardinally_connected(target, planned_adjacency)

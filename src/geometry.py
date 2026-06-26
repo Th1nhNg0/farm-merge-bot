@@ -154,12 +154,3 @@ def connected_components(adjacency):
 
     return sorted(components, key=lambda component: (-len(component), min(component)))
 
-
-def largest_orthogonal_component(slots, config):
-    """Removes isolated full-screen matches outside the main isometric item grid."""
-    if not slots:
-        return []
-
-    adjacency = build_isometric_adjacency(slots, config)
-    component = connected_components(adjacency)[0]
-    return [slot for index, slot in enumerate(slots) if index in component]

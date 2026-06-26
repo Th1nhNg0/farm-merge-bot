@@ -1,5 +1,4 @@
 import functools
-import itertools
 import random
 from collections import Counter
 import numpy as np
@@ -217,13 +216,7 @@ def labels_are_cardinally_connected(target_labels, adjacency):
     return True
 
 
-@functools.lru_cache(maxsize=None)
-def label_family(label):
-    """Returns the item name shared by labels such as bo_1, bo_2, and bo_3."""
-    # Strip split-group suffix (e.g. "bo_1§0" -> "bo_1") before extracting family.
-    base_label = label.partition("§")[0]
-    item, separator, level = base_label.rpartition("_")
-    return item if separator and level.isdigit() else base_label
+
 
 
 def label_sort_key(label):
@@ -609,6 +602,7 @@ def _optimize_isometric_plan_inner(slots, config):
     adjacency = build_isometric_adjacency(slots, config)
     scan_orders = orthogonal_scan_orders(slots)
     label_counts = Counter(current_labels)
+    unsplit_current = [label.partition("§")[0] for label in current_labels]
     
     candidates = {}
     rejected_candidates = set()
@@ -622,7 +616,6 @@ def _optimize_isometric_plan_inner(slots, config):
             rejected_candidates.add(target_key)
             return
 
-        unsplit_current = [label.partition("§")[0] for label in current_labels]
         unsplit_target = [label.partition("§")[0] for label in target_labels]
         swaps = plan_swaps(unsplit_current, unsplit_target, dist)
         total_dist = sum(dist[swap["from_slot"], swap["to_slot"]] for swap in swaps)
@@ -640,10 +633,7 @@ def _optimize_isometric_plan_inner(slots, config):
         # If the target layout is already identical to current_labels, we can short-circuit.
         if target_labels == current_labels:
             if labels_are_cardinally_connected(target_labels, adjacency):
-                unsplit_current = [label.partition("§")[0] for label in current_labels]
-                unsplit_target = [label.partition("§")[0] for label in target_labels]
-                swaps = plan_swaps(unsplit_current, unsplit_target, dist)
-                return target_labels, swaps, adjacency
+                return target_labels, [], adjacency
 
         add_candidate(target_labels)
 
