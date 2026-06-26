@@ -62,10 +62,6 @@ class Config:
     isometric_axis_tolerance: float = 0.65
     isometric_min_step_factor: float = 0.45
     isometric_max_step_factor: float = 1.70
-    exact_label_order_limit: int = 6
-    label_order_trials: int = 96
-    label_order_seed: int = 20260619
-    connected_region_trials: int = 8
     max_group_size: int = 5
 
     # Swap settings

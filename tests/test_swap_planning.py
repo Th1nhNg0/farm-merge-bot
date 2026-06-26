@@ -462,8 +462,6 @@ class SwapPlanningTests(unittest.TestCase):
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(slots)))],
             ),
-            mock.patch.object(planner, "candidate_label_orders", return_value=label_orders),
-            mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
             mock.patch.object(planner, "_plan_swaps", wraps=planner._plan_swaps) as mock_planner,
         ):
             target, swaps, planned_adjacency = planner.optimize_isometric_plan(slots, config)
@@ -481,8 +479,6 @@ class SwapPlanningTests(unittest.TestCase):
                 "orthogonal_scan_orders",
                 return_value=[tuple(range(len(slots)))],
             ),
-            mock.patch.object(planner, "candidate_label_orders", return_value=label_orders),
-            mock.patch.object(planner, "candidate_targets_for_scan", return_value=[]),
         ):
             repeated = planner.optimize_isometric_plan(slots, config)
 

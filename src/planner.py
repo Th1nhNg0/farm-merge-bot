@@ -226,6 +226,20 @@ def label_family(label):
     return item if separator and level.isdigit() else base_label
 
 
+def label_sort_key(label):
+    """Returns a sort key for a sub-label.
+
+    1. Places 5-groups (e.g. 'bo_1§0') before singles (e.g. 'bo_1§single5').
+    2. Sorts alphabetically by the base label (e.g. 'bo_1', 'ga_1').
+    3. Sorts by the suffix part (e.g. group index or item index) as a tie-breaker.
+    """
+    base = label.partition("§")[0]
+    suffix = label.partition("§")[2]
+    is_single = 1 if "§single" in label else 0
+    return (is_single, base, suffix)
+
+
+
 def split_oversized_labels(current_labels, max_group_size):
     """Splits labels into groups of exactly max_group_size.
 
@@ -261,106 +275,6 @@ def unsplit_labels(labels, sub_label_map):
     return [sub_label_map.get(label, label) for label in labels]
 
 
-def _layout_compactness_scorer(slots, adjacency, config):
-    """Builds a compactness scorer with board geometry computed once."""
-    step_x, step_y, _ = estimate_isometric_step(slots)
-    points = layout_points(slots)
-    iso_u = 0.5 * ((points[:, 1] / step_y) + (points[:, 0] / step_x))
-    iso_v = 0.5 * ((points[:, 1] / step_y) - (points[:, 0] / step_x))
-    iso_u_list = iso_u.tolist()
-    iso_v_list = iso_v.tolist()
-
-    @functools.lru_cache(maxsize=None)
-    def label_score(indices):
-        index_set = set(indices)
-        u_vals = [iso_u_list[i] for i in indices]
-        v_vals = [iso_v_list[i] for i in indices]
-        line_group = int(
-            len(indices) >= 3
-            and (
-                (max(u_vals) - min(u_vals)) <= 0.55
-                or (max(v_vals) - min(v_vals)) <= 0.55
-            )
-        )
-        contacts = sum(len(adjacency[index] & index_set) for index in indices) // 2
-        return line_group, -contacts
-
-    @functools.lru_cache(maxsize=None)
-    def family_score(label_groups):
-        index_labels = {
-            index: group_index
-            for group_index, indices in enumerate(label_groups)
-            for index in indices
-        }
-        family_indices = set(index_labels)
-        pending_indices = set(family_indices)
-        component_count = 0
-
-        while pending_indices:
-            component_count += 1
-            pending = [next(iter(pending_indices))]
-
-            while pending:
-                index = pending.pop()
-
-                if index not in pending_indices:
-                    continue
-
-                pending_indices.remove(index)
-                pending.extend(adjacency[index] & pending_indices)
-
-        cross_level_contacts = sum(
-            1
-            for left in family_indices
-            for right in adjacency[left]
-            if left < right
-            and right in family_indices
-            and index_labels[left] != index_labels[right]
-        )
-        return component_count - 1, -cross_level_contacts
-
-    def score(target_labels):
-        label_indices = {}
-
-        for index, label in enumerate(target_labels):
-            label_indices.setdefault(label, []).append(index)
-
-        line_groups, internal_contacts = tuple(
-            sum(values)
-            for values in zip(
-                *(label_score(tuple(indices)) for indices in label_indices.values())
-            )
-        )
-        family_groups = {}
-
-        for label, indices in label_indices.items():
-            family_groups.setdefault(label_family(label), []).append(tuple(indices))
-
-        family_disconnects, cross_level_contacts = tuple(
-            sum(values)
-            for values in zip(
-                *(
-                    family_score(tuple(sorted(groups)))
-                    for groups in family_groups.values()
-                )
-            )
-        )
-        return (
-            family_disconnects,
-            line_groups,
-            cross_level_contacts,
-            internal_contacts,
-        )
-
-    return score
-
-
-def layout_compactness_score(slots, target_labels, adjacency, config):
-    """Penalizes straight isometric lines, then rewards cardinal contacts."""
-    score = _layout_compactness_scorer(slots, adjacency, config)
-
-    # Lower scores are better. Lines are rejected before contact maximization.
-    return score(target_labels)
 
 
 def _numeric_axis_groups(values, tolerance):
@@ -435,166 +349,6 @@ def orthogonal_scan_orders(slots):
     return list(dict.fromkeys(candidates))
 
 
-def candidate_label_orders(current_labels, config):
-    """Yields exhaustive small-board orders and deterministic large-board trials."""
-    labels = tuple(sorted(set(current_labels)))
-
-    if len(labels) <= config.exact_label_order_limit:
-        return itertools.permutations(labels)
-
-    counts = Counter(current_labels)
-    candidates = [
-        labels,
-        tuple(reversed(labels)),
-        tuple(sorted(labels, key=lambda label: (-counts[label], label))),
-        tuple(sorted(labels, key=lambda label: (counts[label], label))),
-    ]
-    rng = random.Random(config.label_order_seed)
-
-    for _ in range(config.label_order_trials):
-        shuffled = list(labels)
-        rng.shuffle(shuffled)
-        candidates.append(tuple(shuffled))
-
-    return iter(dict.fromkeys(candidates))
-
-
-def target_labels_for_scan(current_labels, scan_order, label_order, counts=None):
-    """Places each label in one connected segment of a scan path."""
-    counts = counts or Counter(current_labels)
-    target = [None] * len(current_labels)
-    offset = 0
-
-    for label in label_order:
-        for slot_index in scan_order[offset : offset + counts[label]]:
-            target[slot_index] = label
-        offset += counts[label]
-
-    return target
-
-
-def candidate_targets_for_scan(current_labels, scan_order, adjacency, rng):
-    """Builds targets whose group boundaries cover every broken snake edge."""
-    label_counts = Counter(current_labels)
-    remaining_sizes = Counter(label_counts.values())
-    size_orders = []
-    failed_states = set()
-
-    def search(offset, sizes):
-        state = (offset, tuple(sorted(sizes.items())))
-
-        if state in failed_states or len(size_orders) >= 16:
-            return False
-        if not sizes:
-            size_orders.append(())
-            return True
-
-        found = False
-        options = sorted(sizes)
-        rng.shuffle(options)
-
-        for size in options:
-            segment = scan_order[offset : offset + size]
-
-            if not all(
-                right in adjacency[left] for left, right in zip(segment, segment[1:])
-            ):
-                continue
-
-            next_sizes = sizes.copy()
-            next_sizes[size] -= 1
-
-            if next_sizes[size] == 0:
-                del next_sizes[size]
-
-            before = len(size_orders)
-            search(offset + size, next_sizes)
-
-            for index in range(before, len(size_orders)):
-                size_orders[index] = (size,) + size_orders[index]
-
-            found = found or len(size_orders) > before
-
-        if not found:
-            failed_states.add(state)
-
-        return found
-
-    search(0, remaining_sizes)
-
-    for size_order in size_orders:
-        segments_by_size = {}
-        ordered_segments = []
-        offset = 0
-
-        for size in size_order:
-            segment = scan_order[offset : offset + size]
-            segments_by_size.setdefault(size, []).append(segment)
-            ordered_segments.append((size, segment))
-            offset += size
-
-        for trial in range(10):
-            target = [None] * len(current_labels)
-
-            if trial in (0, 1, 2):
-                available_by_size = {
-                    size: sorted(
-                        (
-                            label
-                            for label, count in label_counts.items()
-                            if count == size
-                        ),
-                        reverse=trial == 2,
-                    )
-                    for size in segments_by_size
-                }
-                active_family = None
-
-                for size, segment in ordered_segments:
-                    available_labels = available_by_size[size]
-                    if trial == 0:
-                        label = available_labels[0]
-                        available_labels.remove(label)
-
-                        for index in segment:
-                            target[index] = label
-
-                        continue
-
-                    matching_family = [
-                        label
-                        for label in available_labels
-                        if label_family(label) == active_family
-                    ]
-
-                    if matching_family:
-                        label = matching_family[0]
-                    else:
-                        label = available_labels[0]
-                        active_family = label_family(label)
-
-                    available_labels.remove(label)
-
-                    for index in segment:
-                        target[index] = label
-
-                yield target
-                continue
-
-            for size, segments in segments_by_size.items():
-                available_labels = sorted(
-                    label for label, count in label_counts.items() if count == size
-                )
-
-                for segment in segments:
-                    label = rng.choice(available_labels)
-
-                    available_labels.remove(label)
-
-                    for index in segment:
-                        target[index] = label
-
-            yield target
 
 
 def grow_connected_target(current_labels, adjacency, rng):
@@ -780,16 +534,84 @@ def optimize_isometric_plan(slots, config):
     return phase1_target, phase1_swaps, adjacency
 
 
+def partition_scan_order(scan_order, label_counts, adjacency):
+    """Finds a partition of scan_order into connected segments matching label counts.
+    
+    Returns a list of sizes, or None.
+    """
+    remaining_sizes = Counter(label_counts.values())
+    failed_states = set()
+    result = []
+
+    def search(offset, sizes, current_path):
+        state = (offset, tuple(sorted(sizes.items())))
+        if state in failed_states:
+            return False
+        if not sizes:
+            result.append(current_path)
+            return True
+
+        options = sorted(sizes, reverse=True)
+
+        for size in options:
+            segment = scan_order[offset : offset + size]
+            if not all(
+                right in adjacency[left] for left, right in zip(segment, segment[1:])
+            ):
+                continue
+
+            next_sizes = sizes.copy()
+            next_sizes[size] -= 1
+            if next_sizes[size] == 0:
+                del next_sizes[size]
+
+            if search(offset + size, next_sizes, current_path + (size,)):
+                return True
+
+        failed_states.add(state)
+        return False
+
+    if search(0, remaining_sizes, ()):
+        return result[0]
+    return None
+
+
+def target_labels_from_size_order(scan_order, size_order, current_labels):
+    """Constructs target labels by placing sorted sub-labels in the partitioned scan order."""
+    label_counts = Counter(current_labels)
+    
+    # Group label names by count
+    labels_by_size = {}
+    for label, count in label_counts.items():
+        labels_by_size.setdefault(count, []).append(label)
+        
+    # Sort them using label_sort_key
+    for size in labels_by_size:
+        labels_by_size[size].sort(key=label_sort_key)
+        
+    labels_iter = {size: iter(labels_by_size[size]) for size in labels_by_size}
+    
+    target_labels = [None] * len(current_labels)
+    offset = 0
+    for size in size_order:
+        label = next(labels_iter[size])
+        for slot_idx in scan_order[offset : offset + size]:
+            target_labels[slot_idx] = label
+        offset += size
+        
+    return target_labels
+
+
 def _optimize_isometric_plan_inner(slots, config):
     """Core planner logic, operates on whatever labels slots currently have."""
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots, config)
-    compactness_score = _layout_compactness_scorer(slots, adjacency, config)
     scan_orders = orthogonal_scan_orders(slots)
+    label_counts = Counter(current_labels)
+    
     candidates = {}
     rejected_candidates = set()
-    label_counts = Counter(current_labels)
 
     def add_candidate(target_labels):
         target_key = tuple(target_labels)
@@ -800,45 +622,32 @@ def _optimize_isometric_plan_inner(slots, config):
             rejected_candidates.add(target_key)
             return
 
-        cheap_score = (
-            compactness_score(target_labels),
-            sum(
-                current != target
-                for current, target in zip(current_labels, target_labels)
-            ),
-            target_key,
-        )
-        candidates[target_key] = (cheap_score, list(target_labels))
+        swaps = plan_swaps(current_labels, target_labels, dist)
+        total_dist = sum(dist[swap["from_slot"], swap["to_slot"]] for swap in swaps)
+        
+        candidates[target_key] = (len(swaps), total_dist, list(target_labels), swaps)
 
-    # This makes a completed board an explicit zero-swap candidate on later runs.
-    add_candidate(current_labels)
-
+    # Try the partitioned sorted layout along each scan order
     for scan_order in scan_orders:
-        for label_order in candidate_label_orders(current_labels, config):
-            add_candidate(
-                target_labels_for_scan(
-                    current_labels,
-                    scan_order,
-                    label_order,
-                    label_counts,
-                )
-            )
+        size_order = partition_scan_order(scan_order, label_counts, adjacency)
+        if size_order is None:
+            continue
+            
+        target_labels = target_labels_from_size_order(scan_order, size_order, current_labels)
+        
+        # If the target layout is already identical to current_labels, we can short-circuit.
+        if target_labels == current_labels:
+            if labels_are_cardinally_connected(target_labels, adjacency):
+                swaps = plan_swaps(current_labels, target_labels, dist)
+                return target_labels, swaps, adjacency
 
-    rng = random.Random(config.label_order_seed)
+        add_candidate(target_labels)
 
-    for scan_order in scan_orders:
-        for target_labels in candidate_targets_for_scan(
-            current_labels,
-            scan_order,
-            adjacency,
-            rng,
-        ):
-            add_candidate(target_labels)
-
+    # Fallback to connected region growth if partition was not found for any scan path
     if not candidates:
-        for _ in range(config.connected_region_trials):
+        rng = random.Random(config.label_order_seed)
+        for _ in range(config.connected_region_trials * 4):
             target_labels = grow_connected_target(current_labels, adjacency, rng)
-
             if target_labels is not None:
                 add_candidate(target_labels)
 
@@ -847,17 +656,8 @@ def _optimize_isometric_plan_inner(slots, config):
             "could not allocate connected isometric top/right/bottom/left item regions"
         )
 
-    best_compactness = min(candidate[0][0] for candidate in candidates.values())
-    effective_candidates = [
-        candidate
-        for candidate in candidates.values()
-        if candidate[0][0] == best_compactness
-    ]
-    ordered_candidates = sorted(
-        effective_candidates,
-        key=lambda candidate: (candidate[0][1], candidate[0][2]),
-    )
-    _, target_labels = ordered_candidates[0]
-    swaps = plan_swaps(current_labels, target_labels, dist)
+    # Choose the candidate minimizing (num_swaps, total_drag_distance, target_key)
+    best_key = min(candidates.keys(), key=lambda k: (candidates[k][0], candidates[k][1], k))
+    _, _, target_labels, swaps = candidates[best_key]
 
     return target_labels, swaps, adjacency

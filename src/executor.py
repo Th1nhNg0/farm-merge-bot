@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 import numpy as np
 import pyautogui
 
@@ -19,10 +20,10 @@ def drag_swap(src_xy, dst_xy, config):
 
 def label_click_offsets(slots):
     """Returns each label's median clickable-center offset from a slot anchor."""
-    offsets = {}
+    offsets = defaultdict(list)
 
     for slot in slots:
-        offsets.setdefault(slot.label, []).append(
+        offsets[slot.label].append(
             (
                 slot.center[0] - slot.grid_anchor[0],
                 slot.center[1] - slot.grid_anchor[1],
@@ -31,8 +32,8 @@ def label_click_offsets(slots):
 
     return {
         label: (
-            float(np.median([offset[0] for offset in label_offsets])),
-            float(np.median([offset[1] for offset in label_offsets])),
+            float(np.median([x for x, y in label_offsets])),
+            float(np.median([y for x, y in label_offsets])),
         )
         for label, label_offsets in offsets.items()
     }
