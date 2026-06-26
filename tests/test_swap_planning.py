@@ -383,7 +383,7 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertIsNone(planner._plan_swaps(current, target, dist, max_swaps=1))
 
-    def test_merge_triggers_use_five_slots_from_oversized_components(self):
+    def test_merge_triggers_skip_non_multiple_components(self):
         labels = ["a"] * 6
         adjacency = {
             index: {
@@ -396,16 +396,23 @@ class SwapPlanningTests(unittest.TestCase):
 
         triggers = planner.plan_merge_triggers(labels, adjacency, 5)
 
-        self.assertEqual(1, len(triggers))
-        self.assertEqual("a", triggers[0]["label"])
-        self.assertEqual(
-            {2, 3, 4, 5},
-            self.connected_group(
-                triggers[0]["to_slot"],
-                set(range(len(labels))) - {triggers[0]["from_slot"]},
-                adjacency,
-            ),
-        )
+        self.assertEqual([], triggers)
+
+    def test_merge_triggers_use_all_five_slot_groups_from_multiple_components(self):
+        labels = ["a"] * 10
+        adjacency = {
+            index: {
+                neighbor
+                for neighbor in (index - 1, index + 1)
+                if 0 <= neighbor < len(labels)
+            }
+            for index in range(len(labels))
+        }
+
+        triggers = planner.plan_merge_triggers(labels, adjacency, 5)
+
+        self.assertEqual(2, len(triggers))
+        self.assertEqual(["a", "a"], [trigger["label"] for trigger in triggers])
 
     def test_merge_triggers_skip_when_no_exact_four_item_target_group(self):
         labels = ["a"] * 6

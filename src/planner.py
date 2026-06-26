@@ -399,8 +399,42 @@ def grow_connected_target(current_labels, adjacency, rng):
     return target
 
 
+def _plan_merge_trigger_for_group(label, group_slots, adjacency, max_group_size):
+    target_group_size = max_group_size - 1
+    group_set = set(group_slots)
+
+    for from_slot in sorted(group_slots):
+        remaining = group_set - {from_slot}
+        groups = []
+
+        while remaining:
+            group = set()
+            pending = [remaining.pop()]
+
+            while pending:
+                idx = pending.pop()
+                group.add(idx)
+                next_slots = adjacency[idx] & remaining
+                remaining.difference_update(next_slots)
+                pending.extend(next_slots)
+
+            groups.append(group)
+
+        target_groups = [
+            group for group in groups if len(group) == target_group_size
+        ]
+        if target_groups:
+            return {
+                "from_slot": from_slot,
+                "to_slot": min(min(target_groups)),
+                "label": label,
+            }
+
+    return None
+
+
 def plan_merge_triggers(target_labels, adjacency, max_group_size):
-    """Plans drags from one item into a connected group of max_group_size - 1.
+    """Plans drags for connected components whose size is a max_group_size multiple.
 
     Returns a list of {from_slot, to_slot, label} dicts.
     """
@@ -428,53 +462,32 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
                         pending.append(neighbor)
             components.append(component)
 
-        target_group_size = max_group_size - 1
-
         for component_slots in components:
-            if len(component_slots) < max_group_size:
+            if (
+                len(component_slots) < max_group_size
+                or len(component_slots) % max_group_size != 0
+            ):
                 continue
 
             found = False
-            component_set = set(component_slots)
-
-            for from_slot in sorted(component_slots):
-                remaining = component_set - {from_slot}
-                groups = []
-
-                while remaining:
-                    group = set()
-                    pending = [remaining.pop()]
-
-                    while pending:
-                        idx = pending.pop()
-                        group.add(idx)
-                        next_slots = adjacency[idx] & remaining
-                        remaining.difference_update(next_slots)
-                        pending.extend(next_slots)
-
-                    groups.append(group)
-
-                target_groups = [
-                    group for group in groups if len(group) == target_group_size
-                ]
-                if not target_groups:
+            for offset in range(0, len(component_slots), max_group_size):
+                group_slots = sorted(component_slots)[offset : offset + max_group_size]
+                if len(group_slots) < max_group_size:
                     continue
 
-                to_slot = min(min(target_groups))
-                triggers.append(
-                    {
-                        "from_slot": from_slot,
-                        "to_slot": to_slot,
-                        "label": label,
-                    }
+                trigger = _plan_merge_trigger_for_group(
+                    label, group_slots, adjacency, max_group_size
                 )
+                if trigger is None:
+                    continue
+
+                triggers.append(trigger)
                 found = True
-                break
 
             if not found:
                 print(
                     f"[merge] WARNING: component of '{label}' (slots {component_slots}) "
-                    "has no connected 4-item target group — skipping merge."
+                    f"has no connected {max_group_size - 1}-item target group — skipping merge."
                 )
 
     return triggers
