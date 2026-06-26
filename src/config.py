@@ -69,6 +69,6 @@ class Config:
     max_group_size: int = 5
 
     # Swap settings
-    drag_duration: float = 0.001
-    swap_settle_delay: float = 0.005
-    after_swap_delay: float = 0.005
+    drag_duration: float = 0.0015
+    swap_settle_delay: float = 0.01
+    after_swap_delay: float = 0.01
