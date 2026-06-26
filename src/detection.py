@@ -322,12 +322,13 @@ def save_detection_debug_images(
     diagnostics=None,
     image_offset=(0, 0),
     excluded_detections=None,
+    suffix="",
 ):
     """Saves the captured board and an annotated copy for calibration."""
     config.detection_debug_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = config.detection_debug_dir / "board.png"
-    annotated_path = config.detection_debug_dir / "detections.png"
-    scores_path = config.detection_debug_dir / "scores.csv"
+    raw_path = config.detection_debug_dir / f"board{suffix}.png"
+    annotated_path = config.detection_debug_dir / f"detections{suffix}.png"
+    scores_path = config.detection_debug_dir / f"scores{suffix}.csv"
     annotated = screenshot_img.copy()
     offset_x, offset_y = image_offset
     for detection in detections:

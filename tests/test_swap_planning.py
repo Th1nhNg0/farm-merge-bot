@@ -282,9 +282,42 @@ class SwapPlanningTests(unittest.TestCase):
             ):
                 main.main()
 
-            self.assertTrue((debug_dir / "board.png").is_file())
-            self.assertTrue((debug_dir / "detections.png").is_file())
-            self.assertTrue((debug_dir / "scores.csv").is_file())
+            # Find the run directory created inside debug_dir
+            run_dirs = list(debug_dir.glob("run_*"))
+            self.assertEqual(1, len(run_dirs))
+            actual_debug_dir = run_dirs[0]
+            self.assertTrue((actual_debug_dir / "board.png").is_file())
+            self.assertTrue((actual_debug_dir / "detections.png").is_file())
+            self.assertTrue((actual_debug_dir / "scores.csv").is_file())
+
+    def test_detect_slots_saves_with_custom_suffix(self):
+        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
+        config = Config()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_dir = Path(temp_dir)
+            config.detection_debug_dir = debug_dir
+
+            with (
+                mock.patch.object(main, "capture_game_bgr", return_value=(screenshot, (0, 0))),
+                mock.patch.object(main, "detect_all_items", return_value=[]),
+            ):
+                main.detect_slots(config, save_debug=True, suffix="_after_phase1")
+
+            self.assertTrue((debug_dir / "board_after_phase1.png").is_file())
+            self.assertTrue((debug_dir / "detections_after_phase1.png").is_file())
+            self.assertTrue((debug_dir / "scores_after_phase1.csv").is_file())
+
+    def test_optimizer_never_swaps_identical_base_labels(self):
+        config = Config()
+        current = ["bo_1", "ga_1", "bo_1", "ga_1"]
+        points = [(0, 0), (40, 20), (80, 40), (120, 60)]
+        slots = self.make_isometric_slots(current, points)
+
+        target, swaps, _ = planner.optimize_isometric_plan(slots, config)
+
+        for swap in swaps:
+            self.assertNotEqual(swap["moving_label"], swap["replaced_label"])
 
     def test_detect_slots_keeps_all_cropped_detections(self):
         screenshot = np.zeros((80, 100, 3), dtype=np.uint8)

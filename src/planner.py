@@ -622,7 +622,9 @@ def _optimize_isometric_plan_inner(slots, config):
             rejected_candidates.add(target_key)
             return
 
-        swaps = plan_swaps(current_labels, target_labels, dist)
+        unsplit_current = [label.partition("§")[0] for label in current_labels]
+        unsplit_target = [label.partition("§")[0] for label in target_labels]
+        swaps = plan_swaps(unsplit_current, unsplit_target, dist)
         total_dist = sum(dist[swap["from_slot"], swap["to_slot"]] for swap in swaps)
         
         candidates[target_key] = (len(swaps), total_dist, list(target_labels), swaps)
@@ -638,15 +640,17 @@ def _optimize_isometric_plan_inner(slots, config):
         # If the target layout is already identical to current_labels, we can short-circuit.
         if target_labels == current_labels:
             if labels_are_cardinally_connected(target_labels, adjacency):
-                swaps = plan_swaps(current_labels, target_labels, dist)
+                unsplit_current = [label.partition("§")[0] for label in current_labels]
+                unsplit_target = [label.partition("§")[0] for label in target_labels]
+                swaps = plan_swaps(unsplit_current, unsplit_target, dist)
                 return target_labels, swaps, adjacency
 
         add_candidate(target_labels)
 
     # Fallback to connected region growth if partition was not found for any scan path
     if not candidates:
-        rng = random.Random(config.label_order_seed)
-        for _ in range(config.connected_region_trials * 4):
+        rng = random.Random(20260619)
+        for _ in range(32):
             target_labels = grow_connected_target(current_labels, adjacency, rng)
             if target_labels is not None:
                 add_candidate(target_labels)

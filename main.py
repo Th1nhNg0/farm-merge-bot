@@ -8,7 +8,7 @@ from src.planner import optimize_isometric_plan, plan_merge_triggers
 from src.executor import execute_swaps, execute_merges
 
 
-def detect_slots(config, save_debug=True):
+def detect_slots(config, save_debug=True, suffix=""):
     """Captures the board and returns (screenshot_img, offset, slots)."""
     screenshot_img, offset = capture_game_bgr(config)
     diagnostics = {}
@@ -21,6 +21,7 @@ def detect_slots(config, save_debug=True):
             config=config,
             diagnostics=diagnostics,
             image_offset=offset,
+            suffix=suffix,
         )
     print(f"Detected {len(detections)} items.")
     return screenshot_img, offset, slots
@@ -28,6 +29,9 @@ def detect_slots(config, save_debug=True):
 
 def main():
     config = Config()
+    # Archive debug logs in unique run subdirectories to enable future analysis
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    config.detection_debug_dir = config.detection_debug_dir / f"run_{timestamp}"
 
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE = config.swap_settle_delay
@@ -51,7 +55,7 @@ def main():
         execute_swaps(slots, phase1_swaps, config)
 
     # ── Phase 2: fresh detect → plan merge triggers → execute ─────────────────
-    screenshot_img, offset, slots = detect_slots(config, save_debug=False)
+    screenshot_img, offset, slots = detect_slots(config, save_debug=True, suffix="_after_phase1")
 
     if not slots:
         print("Phase 2: no items detected after Phase 1.")
