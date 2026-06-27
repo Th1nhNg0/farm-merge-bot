@@ -224,6 +224,108 @@ def _match_template_worker(template, screenshot_features, screenshot_h, screensh
     return label, threshold, result, template.w, template.h, template.template_name
 
 
+def determine_best_scale(screenshot_img, config):
+    """Finds the best template scale factor dynamically by scanning a range of scales."""
+    representative_paths = []
+    for item in config.items:
+        paths = template_paths(item, 1, config)
+        if paths:
+            representative_paths.append(paths[0])
+
+    if not representative_paths:
+        return 1.0, 0.0
+
+    templates = []
+    for path in representative_paths:
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            templates.append(img)
+
+    if not templates:
+        return 1.0, 0.0
+
+    gray_screenshot = cv2.cvtColor(screenshot_img, cv2.COLOR_BGR2GRAY)
+    gray_screenshot = cv2.GaussianBlur(gray_screenshot, (3, 3), 0)
+    screen_h, screen_w = gray_screenshot.shape[:2]
+
+    # Coarse search range: 0.5 to 1.5 with 0.1 step
+    coarse_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    best_coarse_scale = 1.0
+    best_coarse_val = -1.0
+
+    for scale in coarse_scales:
+        scores = []
+        for template in templates:
+            th, tw = template.shape[:2]
+            width = max(3, int(round(tw * scale)))
+            height = max(3, int(round(th * scale)))
+
+            if height > screen_h or width > screen_w:
+                continue
+
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+            resized = cv2.resize(template, (width, height), interpolation=interpolation)
+
+            res = cv2.matchTemplate(gray_screenshot, resized, cv2.TM_CCOEFF_NORMED)
+            if res.size > 0:
+                scores.append(float(np.max(res)))
+
+        if scores:
+            scores.sort(reverse=True)
+            top_n = scores[:min(len(scores), 3)]
+            avg_score = sum(top_n) / len(top_n)
+            if avg_score > best_coarse_val:
+                best_coarse_val = avg_score
+                best_coarse_scale = scale
+
+    # Fine search around best_coarse_scale
+    fine_scales = [
+        best_coarse_scale - 0.08,
+        best_coarse_scale - 0.06,
+        best_coarse_scale - 0.04,
+        best_coarse_scale - 0.02,
+        best_coarse_scale,
+        best_coarse_scale + 0.02,
+        best_coarse_scale + 0.04,
+        best_coarse_scale + 0.06,
+        best_coarse_scale + 0.08,
+    ]
+    # Filter to valid ranges
+    fine_scales = [s for s in fine_scales if 0.4 <= s <= 1.6]
+
+    best_scale = best_coarse_scale
+    best_val = best_coarse_val
+
+    for scale in fine_scales:
+        if scale == best_coarse_scale:
+            continue
+        scores = []
+        for template in templates:
+            th, tw = template.shape[:2]
+            width = max(3, int(round(tw * scale)))
+            height = max(3, int(round(th * scale)))
+
+            if height > screen_h or width > screen_w:
+                continue
+
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+            resized = cv2.resize(template, (width, height), interpolation=interpolation)
+
+            res = cv2.matchTemplate(gray_screenshot, resized, cv2.TM_CCOEFF_NORMED)
+            if res.size > 0:
+                scores.append(float(np.max(res)))
+
+        if scores:
+            scores.sort(reverse=True)
+            top_n = scores[:min(len(scores), 3)]
+            avg_score = sum(top_n) / len(top_n)
+            if avg_score > best_val:
+                best_val = avg_score
+                best_scale = scale
+
+    return best_scale, best_val
+
+
 def detect_all_items(
     screenshot_img,
     config,
@@ -233,86 +335,95 @@ def detect_all_items(
     from concurrent.futures import ThreadPoolExecutor
     import os
 
-    screenshot_features = matching_features(screenshot_img)
-    screenshot_h, screenshot_w = screenshot_img.shape[:2]
-    detections = []
-    offset_x, offset_y = offset
-    prepared_templates, missing_templates = load_prepared_templates(config)
+    original_scales = config.template_scales
+    try:
+        if len(original_scales) == 1:
+            detected_scale, best_val = determine_best_scale(screenshot_img, config)
+            print(f"Dynamically detected board scale: {detected_scale:.2f} (score: {best_val:.3f})")
+            config.template_scales = (detected_scale,)
 
-    for item, level, _ in missing_templates:
-        print(
-            "Skipping missing templates: "
-            f"{config.template_dir / f'{item}{level}.png'} or "
-            f"{config.template_dir / f'{item}{level}_<variant>.png'}"
-        )
+        screenshot_features = matching_features(screenshot_img)
+        screenshot_h, screenshot_w = screenshot_img.shape[:2]
+        detections = []
+        offset_x, offset_y = offset
+        prepared_templates, missing_templates = load_prepared_templates(config)
 
-    if diagnostics is not None:
-        for _, _, label in configured_labels(config):
-            diagnostics[label] = _init_diagnostics(
-                config.template_thresholds.get(label, config.threshold)
+        for item, level, _ in missing_templates:
+            print(
+                "Skipping missing templates: "
+                f"{config.template_dir / f'{item}{level}.png'} or "
+                f"{config.template_dir / f'{item}{level}_<variant>.png'}"
             )
 
-    num_workers = min(8, os.cpu_count() or 4)
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [
-            executor.submit(_match_template_worker, template, screenshot_features, screenshot_h, screenshot_w, config)
-            for template in prepared_templates
-        ]
-
-        for future in futures:
-            res_one = future.result()
-            if res_one is None:
-                continue
-
-            label, threshold, result, tw, th, template_name = res_one
-
-            if diagnostics is not None:
-                best_score = float(np.max(result))
-
-                if best_score > diagnostics[label]["best_score"]:
-                    best_y, best_x = np.unravel_index(
-                        int(np.argmax(result)),
-                        result.shape,
-                    )
-                    diagnostics[label].update(
-                        {
-                            "best_score": best_score,
-                            "best_template": template_name,
-                            "best_width": tw,
-                            "best_height": th,
-                            "best_x": int(best_x + offset_x),
-                            "best_y": int(best_y + offset_y),
-                        }
-                    )
-
-            local_max = result == cv2.dilate(
-                result,
-                np.ones((config.local_max_kernel, config.local_max_kernel), np.uint8),
-            )
-            ys, xs = np.where((result >= threshold) & local_max)
-
-            for x, y in zip(xs, ys):
-                detections.append(
-                    Detection(
-                        label=label,
-                        x=int(x + offset_x),
-                        y=int(y + offset_y),
-                        w=tw,
-                        h=th,
-                        score=float(result[y, x]),
-                        grid_anchor_y_factor=config.grid_anchor_y_factor,
-                    )
+        if diagnostics is not None:
+            for _, _, label in configured_labels(config):
+                diagnostics[label] = _init_diagnostics(
+                    config.template_thresholds.get(label, config.threshold)
                 )
 
-    detections = deduplicate_detections(detections, config)
+        num_workers = min(8, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(_match_template_worker, template, screenshot_features, screenshot_h, screenshot_w, config)
+                for template in prepared_templates
+            ]
 
-    if diagnostics is not None:
-        detected_counts = Counter(detection.label for detection in detections)
+            for future in futures:
+                res_one = future.result()
+                if res_one is None:
+                    continue
 
-        for label, values in diagnostics.items():
-            values["detected_count"] = detected_counts[label]
+                label, threshold, result, tw, th, template_name = res_one
 
-    return detections
+                if diagnostics is not None:
+                    best_score = float(np.max(result))
+
+                    if best_score > diagnostics[label]["best_score"]:
+                        best_y, best_x = np.unravel_index(
+                            int(np.argmax(result)),
+                            result.shape,
+                        )
+                        diagnostics[label].update(
+                            {
+                                "best_score": best_score,
+                                "best_template": template_name,
+                                "best_width": tw,
+                                "best_height": th,
+                                "best_x": int(best_x + offset_x),
+                                "best_y": int(best_y + offset_y),
+                            }
+                        )
+
+                local_max = result == cv2.dilate(
+                    result,
+                    np.ones((config.local_max_kernel, config.local_max_kernel), np.uint8),
+                )
+                ys, xs = np.where((result >= threshold) & local_max)
+
+                for x, y in zip(xs, ys):
+                    detections.append(
+                        Detection(
+                            label=label,
+                            x=int(x + offset_x),
+                            y=int(y + offset_y),
+                            w=tw,
+                            h=th,
+                            score=float(result[y, x]),
+                            grid_anchor_y_factor=config.grid_anchor_y_factor,
+                        )
+                    )
+
+        detections = deduplicate_detections(detections, config)
+
+        if diagnostics is not None:
+            detected_counts = Counter(detection.label for detection in detections)
+
+            for label, values in diagnostics.items():
+                values["detected_count"] = detected_counts[label]
+
+        return detections
+    finally:
+        config.template_scales = original_scales
 
 
 def save_detection_debug_images(

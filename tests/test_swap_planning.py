@@ -204,6 +204,45 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertEqual((25, 40), d.center)
 
+    def test_auto_scale_detection_finds_correct_scale(self):
+        config = Config()
+        rng = np.random.default_rng(42)
+        template = rng.integers(0, 256, size=(20, 20, 3), dtype=np.uint8)
+        scaled = cv2.resize(template, (24, 24), interpolation=cv2.INTER_CUBIC)
+        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
+        screenshot[30:54, 40:64] = scaled
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            cv2.imwrite(str(directory / "test1.png"), template)
+
+            config.template_dir = directory
+            config.template_scales = (1.0,)
+            config.threshold = 0.70
+            config.items = ["test"]
+            config.levels = [1]
+            config.item_levels = {}
+
+            diagnostics = {}
+            detections = detection.detect_all_items(
+                screenshot,
+                config=config,
+                diagnostics=diagnostics,
+            )
+
+        best = max(detections, key=lambda d: d.score)
+        self.assertEqual("test_1", best.label)
+        self.assertEqual((52, 42), best.center)
+        self.assertGreater(diagnostics["test_1"]["best_score"], 0.70)
+        self.assertEqual(1, diagnostics["test_1"]["detected_count"])
+        self.assertEqual(
+            (24, 24),
+            (
+                diagnostics["test_1"]["best_width"],
+                diagnostics["test_1"]["best_height"],
+            ),
+        )
+
     def test_find_game_region_ignores_surrounding_desktop_panels(self):
         config = Config()
         config.game_crop_padding = 0
