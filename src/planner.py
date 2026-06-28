@@ -608,63 +608,90 @@ def target_labels_from_size_order(scan_order, size_order, current_labels):
     return target_labels
 
 
+def custom_item_sort_key(label):
+    base_with_level = label.partition("§")[0]
+    is_coin = base_with_level.startswith("xu")
+    coin_flag = 1 if is_coin else 0
+    
+    if "_" in base_with_level:
+        name_part, _, level_part = base_with_level.rpartition("_")
+        try:
+            level = int(level_part)
+        except ValueError:
+            name_part = base_with_level
+            level = 0
+    else:
+        name_part = base_with_level
+        level = 0
+        
+    suffix = label.partition("§")[2]
+    is_single = 1 if "§single" in label else 0
+    return (coin_flag, name_part, level, is_single, suffix)
+
+
 def _optimize_isometric_plan_inner(slots, config):
-    """Core planner logic, operates on whatever labels slots currently have."""
+    """Core planner logic, operates on whatever labels slots currently have.
+    
+    It finds a snake scan order that maps sorted labels to slots such that
+    every group is cardinally connected, and coins are positioned at the bottom.
+    """
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots, config)
     scan_orders = orthogonal_scan_orders(slots)
-    label_counts = Counter(current_labels)
+    
+    sorted_labels = sorted(current_labels, key=custom_item_sort_key)
     unsplit_current = [label.partition("§")[0] for label in current_labels]
     
-    candidates = {}
-    rejected_candidates = set()
-
-    def add_candidate(target_labels):
-        target_key = tuple(target_labels)
-
-        if target_key in candidates or target_key in rejected_candidates:
-            return
+    candidates = []
+    
+    for scan_order in scan_orders:
+        if len(scan_order) != len(slots):
+            continue
+            
+        target_labels = [None] * len(slots)
+        for i, slot_idx in enumerate(scan_order):
+            target_labels[slot_idx] = sorted_labels[i]
+            
+        # Verify that all item groups are cardinally connected
         if not labels_are_cardinally_connected(target_labels, adjacency):
-            rejected_candidates.add(target_key)
-            return
-
+            continue
+            
+        # Short-circuit if already in target layout
+        if target_labels == current_labels:
+            return target_labels, [], adjacency
+            
         unsplit_target = [label.partition("§")[0] for label in target_labels]
         swaps = plan_swaps(unsplit_current, unsplit_target, dist)
         total_dist = sum(dist[swap["from_slot"], swap["to_slot"]] for swap in swaps)
         
-        candidates[target_key] = (len(swaps), total_dist, list(target_labels), swaps)
-
-    # Try the partitioned sorted layout along each scan order
-    for scan_order in scan_orders:
-        size_order = partition_scan_order(scan_order, label_counts, adjacency)
-        if size_order is None:
-            continue
-            
-        target_labels = target_labels_from_size_order(scan_order, size_order, current_labels)
+        # Calculate coin positioning score (average Y of coins - average Y of non-coins)
+        coin_ys = [slots[i].grid_anchor[1] for i, label in enumerate(target_labels) if label.partition("§")[0].startswith("xu")]
+        non_coin_ys = [slots[i].grid_anchor[1] for i, label in enumerate(target_labels) if not label.partition("§")[0].startswith("xu")]
         
-        # If the target layout is already identical to current_labels, we can short-circuit.
-        if target_labels == current_labels:
-            if labels_are_cardinally_connected(target_labels, adjacency):
-                return target_labels, [], adjacency
-
-        add_candidate(target_labels)
-
-    # Fallback to connected region growth if partition was not found for any scan path
+        if coin_ys and non_coin_ys:
+            coin_score = sum(coin_ys) / len(coin_ys) - sum(non_coin_ys) / len(non_coin_ys)
+        else:
+            coin_score = 0.0
+            
+        candidates.append((coin_score, len(swaps), total_dist, target_labels, swaps))
+        
     if not candidates:
-        rng = random.Random(20260619)
-        for _ in range(32):
-            target_labels = grow_connected_target(current_labels, adjacency, rng)
-            if target_labels is not None:
-                add_candidate(target_labels)
-
-    if not candidates:
-        raise RuntimeError(
-            "could not allocate connected isometric top/right/bottom/left item regions"
+        # Fallback to simple sorted layout if no connected layout can be found
+        target_labels = sorted_labels
+        unsplit_target = [label.partition("§")[0] for label in target_labels]
+        swaps = plan_swaps(unsplit_current, unsplit_target, dist)
+        return target_labels, swaps, adjacency
+        
+    # Choose candidate prioritizing coin_score >= 0, then minimizing swaps, then distance
+    best_candidate = min(
+        candidates,
+        key=lambda c: (
+            1 if c[0] < 0 else 0, # coin_score >= 0 is preferred
+            c[1],                 # number of swaps
+            c[2]                  # total drag distance
         )
-
-    # Choose the candidate minimizing (num_swaps, total_drag_distance, target_key)
-    best_key = min(candidates.keys(), key=lambda k: (candidates[k][0], candidates[k][1], k))
-    _, _, target_labels, swaps = candidates[best_key]
-
+    )
+    
+    _, _, _, target_labels, swaps = best_candidate
     return target_labels, swaps, adjacency
