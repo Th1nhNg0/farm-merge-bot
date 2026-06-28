@@ -454,8 +454,6 @@ def custom_item_sort_key(label):
     is_coin = base_with_level.startswith("xu")
     coin_flag = 1 if is_coin else 0
     
-    is_single = 1 if "§single" in label else 0
-    
     if "_" in base_with_level:
         name_part, _, level_part = base_with_level.rpartition("_")
         try:
@@ -468,7 +466,7 @@ def custom_item_sort_key(label):
         level = 0
         
     suffix = label.partition("§")[2]
-    return (coin_flag, is_single, name_part, level, suffix)
+    return (coin_flag, name_part, level, suffix)
 
 
 def _optimize_isometric_plan_inner(slots, config):
