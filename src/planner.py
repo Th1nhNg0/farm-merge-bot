@@ -338,7 +338,6 @@ def orthogonal_scan_orders(slots):
 
                 candidates.append(tuple(order))
 
-    candidates.extend(_screen_snake_orders(slots))
     return list(dict.fromkeys(candidates))
 
 
