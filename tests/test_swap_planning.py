@@ -516,11 +516,6 @@ class SwapPlanningTests(unittest.TestCase):
 
         with (
             mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),
-            mock.patch.object(
-                planner,
-                "orthogonal_scan_orders",
-                return_value=[tuple(range(len(slots)))],
-            ),
             mock.patch.object(planner, "_plan_swaps", wraps=planner._plan_swaps) as mock_planner,
         ):
             target, swaps, planned_adjacency = planner.optimize_isometric_plan(slots, config)
@@ -533,11 +528,6 @@ class SwapPlanningTests(unittest.TestCase):
 
         with (
             mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),
-            mock.patch.object(
-                planner,
-                "orthogonal_scan_orders",
-                return_value=[tuple(range(len(slots)))],
-            ),
         ):
             repeated = planner.optimize_isometric_plan(slots, config)
 

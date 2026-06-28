@@ -66,7 +66,7 @@ class OptimizerRepeatTests(unittest.TestCase):
         
         runs = [(k, len(list(g))) for k, g in itertools.groupby(target)]
         bo_runs = [length for item, length in runs if item == "bo_1"]
-        self.assertEqual({6}, set(bo_runs))
+        self.assertEqual({1, 5}, set(bo_runs))
 
 
     def test_split_phase_plans_merge_from_exact_five_group(self):

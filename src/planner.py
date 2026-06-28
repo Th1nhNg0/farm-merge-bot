@@ -250,63 +250,7 @@ def unsplit_labels(labels, sub_label_map):
 
 
 
-def _numeric_axis_groups(values, tolerance):
-    """Groups numeric coordinates into bands."""
-    groups = []
 
-    for index in sorted(range(len(values)), key=lambda i: values[i]):
-        coordinate = values[index]
-
-        if not groups:
-            groups.append([index])
-            continue
-
-        group_coordinate = float(np.median([values[i] for i in groups[-1]]))
-
-        if abs(coordinate - group_coordinate) <= tolerance:
-            groups[-1].append(index)
-        else:
-            groups.append([index])
-
-    return groups
-
-def orthogonal_scan_orders(slots):
-    """Returns isometric row/column snake orders for target generation."""
-    if not slots:
-        return [()]
-
-    step_x, step_y, _ = estimate_isometric_step(slots)
-    points = layout_points(slots)
-    xs = points[:, 0]
-    ys = points[:, 1]
-
-    # Convert screen coordinates to approximate isometric grid axes. Neighbors
-    # along a cardinal isometric direction change exactly one of these axes.
-    iso_u = 0.5 * ((ys / step_y) + (xs / step_x))
-    iso_v = 0.5 * ((ys / step_y) - (xs / step_x))
-    candidates = []
-
-    for primary_values, secondary_values in ((iso_u, iso_v), (iso_v, iso_u)):
-        groups = _numeric_axis_groups(primary_values, tolerance=0.55)
-
-        for reverse_groups in (False, True):
-            ordered_groups = list(reversed(groups)) if reverse_groups else groups
-
-            for reverse_first_group in (False, True):
-                order = []
-
-                for group_index, group in enumerate(ordered_groups):
-                    reverse = reverse_first_group != (group_index % 2 == 1)
-                    ordered = sorted(
-                        group,
-                        key=lambda i: secondary_values[i],
-                        reverse=reverse,
-                    )
-                    order.extend(ordered)
-
-                candidates.append(tuple(order))
-
-    return list(dict.fromkeys(candidates))
 
 
 def _plan_merge_trigger_for_group(label, group_slots, adjacency, max_group_size):
@@ -469,30 +413,55 @@ def custom_item_sort_key(label):
     return (coin_flag, name_part, level, suffix)
 
 
-def nearest_neighbor_path(comp, slots, adjacency):
-    start = min(comp, key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
-    path = [start]
-    unvisited = set(comp) - {start}
+def partition_into_connected_blocks(comp_slots, adjacency, slots, block_size=5):
+    remaining = set(comp_slots)
+    blocks = []
     
-    while unvisited:
-        curr = path[-1]
-        neighbors = adjacency[curr] & unvisited
-        if neighbors:
-            next_node = min(neighbors, key=lambda n: (slots[n].grid_anchor[1], slots[n].grid_anchor[0]))
+    while len(remaining) >= block_size:
+        start = min(remaining, key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
+        block = {start}
+        queue = [start]
+        head = 0
+        while head < len(queue) and len(block) < block_size:
+            curr = queue[head]
+            head += 1
+            neighbors = sorted(adjacency[curr] & remaining, key=lambda n: (slots[n].grid_anchor[1], slots[n].grid_anchor[0]))
+            for neighbor in neighbors:
+                if neighbor not in block:
+                    block.add(neighbor)
+                    queue.append(neighbor)
+                    if len(block) == block_size:
+                        break
+                        
+        if len(block) == block_size:
+            remaining.difference_update(block)
+            blocks.append(list(block))
         else:
-            next_node = min(unvisited, key=lambda n: (slots[n].grid_anchor[1], slots[n].grid_anchor[0]))
-        path.append(next_node)
-        unvisited.remove(next_node)
-        
-    return path
+            remaining.remove(start)
+            
+    leftovers = list(set(comp_slots) - set().union(*(set(b) for b in blocks)))
+    return blocks, leftovers
+
+
+def extract_groups_and_singles(sorted_labels):
+    groups = []
+    singles = []
+    i = 0
+    while i < len(sorted_labels):
+        if i + 5 <= len(sorted_labels) and len(set(sorted_labels[i:i+5])) == 1:
+            groups.append(sorted_labels[i:i+5])
+            i += 5
+        else:
+            singles.append(sorted_labels[i])
+            i += 1
+    return groups, singles
 
 
 def _optimize_isometric_plan_inner(slots, config):
     """Core planner logic, operates on whatever labels slots currently have.
     
-    It finds a snake scan order that maps sorted labels to slots such that
-    every group is cardinally connected, and coins are positioned at the bottom.
-    It is component-aware to handle boards partitioned by railway tracks.
+    It partitions slots of each connected component into connected blocks of size 5,
+    maps sorted 5-groups to these blocks, and maps singles to the leftovers.
     """
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
@@ -500,85 +469,50 @@ def _optimize_isometric_plan_inner(slots, config):
     
     # Partition slots into connected components (islands)
     components = [list(c) for c in connected_components(adjacency)]
-
     # Sort components top-to-bottom by average Y-coordinate
     components.sort(key=lambda comp: sum(slots[i].grid_anchor[1] for i in comp) / len(comp))
     
-    # Generate scan orders for each component and map them back to original indices
-    comp_scan_orders = []
+    # Partition slots of each component into blocks of size 5 and leftovers
+    all_blocks = []
+    all_leftovers = []
     for comp in components:
-        comp_slots = [slots[i] for i in comp]
-        sub_orders = orthogonal_scan_orders(comp_slots)
-        mapped_orders = []
-        for sub_order in sub_orders:
-            mapped_orders.append([comp[i] for i in sub_order])
-        comp_scan_orders.append(mapped_orders)
-        
-    # Combine component scan orders using Cartesian product
-    import itertools
-    scan_orders = []
-    for prod in itertools.product(*comp_scan_orders):
-        scan_orders.append(list(itertools.chain(*prod)))
+        comp_blocks, comp_leftovers = partition_into_connected_blocks(comp, adjacency, slots)
+        all_blocks.extend(comp_blocks)
+        all_leftovers.extend(comp_leftovers)
         
     sorted_labels = sorted(current_labels, key=custom_item_sort_key)
     unsplit_current = [label.partition("§")[0] for label in current_labels]
     
-    candidates = []
+    groups, singles = extract_groups_and_singles(sorted_labels)
     
-    for scan_order in scan_orders:
-        if len(scan_order) != len(slots):
-            continue
+    # Handle size mismatches between blocks and groups
+    if len(all_blocks) > len(groups):
+        extra_blocks = all_blocks[len(groups):]
+        all_blocks = all_blocks[:len(groups)]
+        for block in extra_blocks:
+            all_leftovers.extend(block)
+    elif len(all_blocks) < len(groups):
+        extra_groups = groups[len(all_blocks):]
+        groups = groups[:len(all_blocks)]
+        for group in extra_groups:
+            singles.extend(group)
             
-        target_labels = [None] * len(slots)
-        for i, slot_idx in enumerate(scan_order):
-            target_labels[slot_idx] = sorted_labels[i]
-            
-        # Verify that all item groups are cardinally connected
-        if not labels_are_cardinally_connected(target_labels, adjacency):
-            continue
-            
-        # Short-circuit if already in target layout
-        if target_labels == current_labels:
-            return target_labels, [], adjacency
-            
-        unsplit_target = [label.partition("§")[0] for label in target_labels]
-        swaps = plan_swaps(unsplit_current, unsplit_target, dist)
-        total_dist = sum(dist[swap["from_slot"], swap["to_slot"]] for swap in swaps)
-        
-        # Calculate coin positioning score (average Y of coins - average Y of non-coins)
-        coin_ys = [slots[i].grid_anchor[1] for i, label in enumerate(target_labels) if label.partition("§")[0].startswith("xu")]
-        non_coin_ys = [slots[i].grid_anchor[1] for i, label in enumerate(target_labels) if not label.partition("§")[0].startswith("xu")]
-        
-        if coin_ys and non_coin_ys:
-            coin_score = sum(coin_ys) / len(coin_ys) - sum(non_coin_ys) / len(non_coin_ys)
-        else:
-            coin_score = 0.0
-            
-        candidates.append((coin_score, len(swaps), total_dist, target_labels, swaps))
-        
-    if not candidates:
-        # Fallback to nearest-neighbor path layout if no connected layout can be found
-        fallback_order = []
-        for comp in components:
-            fallback_order.extend(nearest_neighbor_path(comp, slots, adjacency))
-            
-        target_labels = [None] * len(slots)
-        for i, slot_idx in enumerate(fallback_order):
-            target_labels[slot_idx] = sorted_labels[i]
-            
-        unsplit_target = [label.partition("§")[0] for label in target_labels]
-        swaps = plan_swaps(unsplit_current, unsplit_target, dist)
-        return target_labels, swaps, adjacency
-        
-    # Choose candidate prioritizing coin_score >= 0, then minimizing swaps, then distance
-    best_candidate = min(
-        candidates,
-        key=lambda c: (
-            1 if c[0] < 0 else 0, # coin_score >= 0 is preferred
-            c[1],                 # number of swaps
-            c[2]                  # total drag distance
-        )
-    )
+    # Sort blocks and leftovers top-to-bottom
+    all_blocks.sort(key=lambda b: sum(slots[i].grid_anchor[1] for i in b) / len(b))
+    all_leftovers.sort(key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
     
-    _, _, _, target_labels, swaps = best_candidate
+    # Map groups to blocks and singles to leftovers
+    target_labels = [None] * len(slots)
+    for b_idx, block in enumerate(all_blocks):
+        group = groups[b_idx]
+        for slot_idx, label in zip(block, group):
+            target_labels[slot_idx] = label
+            
+    for s_idx, slot_idx in enumerate(all_leftovers):
+        target_labels[slot_idx] = singles[s_idx]
+        
+    if target_labels == current_labels:
+        return target_labels, [], adjacency
+        
+    swaps = plan_swaps(unsplit_current, [label.partition("§")[0] for label in target_labels], dist)
     return target_labels, swaps, adjacency
