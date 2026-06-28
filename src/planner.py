@@ -629,17 +629,57 @@ def custom_item_sort_key(label):
     return (coin_flag, is_single, name_part, level, suffix)
 
 
+def get_adjacency_components(slots, adjacency):
+    unvisited = set(range(len(slots)))
+    components = []
+    while unvisited:
+        start = next(iter(unvisited))
+        component = []
+        pending = [start]
+        unvisited.remove(start)
+        while pending:
+            curr = pending.pop()
+            component.append(curr)
+            for neighbor in adjacency[curr]:
+                if neighbor in unvisited:
+                    unvisited.remove(neighbor)
+                    pending.append(neighbor)
+        components.append(component)
+    return components
+
+
 def _optimize_isometric_plan_inner(slots, config):
     """Core planner logic, operates on whatever labels slots currently have.
     
     It finds a snake scan order that maps sorted labels to slots such that
     every group is cardinally connected, and coins are positioned at the bottom.
+    It is component-aware to handle boards partitioned by railway tracks.
     """
     current_labels = [slot.label for slot in slots]
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots, config)
-    scan_orders = orthogonal_scan_orders(slots)
     
+    # Partition slots into connected components (islands)
+    components = get_adjacency_components(slots, adjacency)
+    # Sort components top-to-bottom by average Y-coordinate
+    components.sort(key=lambda comp: sum(slots[i].grid_anchor[1] for i in comp) / len(comp))
+    
+    # Generate scan orders for each component and map them back to original indices
+    comp_scan_orders = []
+    for comp in components:
+        comp_slots = [slots[i] for i in comp]
+        sub_orders = orthogonal_scan_orders(comp_slots)
+        mapped_orders = []
+        for sub_order in sub_orders:
+            mapped_orders.append([comp[i] for i in sub_order])
+        comp_scan_orders.append(mapped_orders)
+        
+    # Combine component scan orders using Cartesian product
+    import itertools
+    scan_orders = []
+    for prod in itertools.product(*comp_scan_orders):
+        scan_orders.append(list(itertools.chain(*prod)))
+        
     sorted_labels = sorted(current_labels, key=custom_item_sort_key)
     unsplit_current = [label.partition("§")[0] for label in current_labels]
     
