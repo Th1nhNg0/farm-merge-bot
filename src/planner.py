@@ -469,6 +469,24 @@ def custom_item_sort_key(label):
     return (coin_flag, name_part, level, suffix)
 
 
+def nearest_neighbor_path(comp, slots, adjacency):
+    start = min(comp, key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
+    path = [start]
+    unvisited = set(comp) - {start}
+    
+    while unvisited:
+        curr = path[-1]
+        neighbors = adjacency[curr] & unvisited
+        if neighbors:
+            next_node = min(neighbors, key=lambda n: (slots[n].grid_anchor[1], slots[n].grid_anchor[0]))
+        else:
+            next_node = min(unvisited, key=lambda n: (slots[n].grid_anchor[1], slots[n].grid_anchor[0]))
+        path.append(next_node)
+        unvisited.remove(next_node)
+        
+    return path
+
+
 def _optimize_isometric_plan_inner(slots, config):
     """Core planner logic, operates on whatever labels slots currently have.
     
@@ -539,17 +557,11 @@ def _optimize_isometric_plan_inner(slots, config):
         candidates.append((coin_score, len(swaps), total_dist, target_labels, swaps))
         
     if not candidates:
-        # Fallback to grid-sorted layout if no connected layout can be found
-        step_x, step_y, _ = estimate_isometric_step(slots)
-        points = layout_points(slots)
-        xs = points[:, 0]
-        ys = points[:, 1]
-        iso_u = 0.5 * ((ys / step_y) + (xs / step_x))
-        iso_v = 0.5 * ((ys / step_y) - (xs / step_x))
-        
-        # Sort slot indices diagonally: top-to-bottom, right-to-left
-        fallback_order = sorted(range(len(slots)), key=lambda idx: (iso_u[idx], iso_v[idx]))
-        
+        # Fallback to nearest-neighbor path layout if no connected layout can be found
+        fallback_order = []
+        for comp in components:
+            fallback_order.extend(nearest_neighbor_path(comp, slots, adjacency))
+            
         target_labels = [None] * len(slots)
         for i, slot_idx in enumerate(fallback_order):
             target_labels[slot_idx] = sorted_labels[i]
