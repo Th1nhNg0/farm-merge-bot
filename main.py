@@ -33,6 +33,31 @@ def clear_key_state(vk_code):
         ctypes.windll.user32.GetAsyncKeyState(vk_code)
 
 
+def play_sound(sound_type="info"):
+    """Plays auditory cues/notifications so the user knows status while focusing the game window."""
+    if sys.platform != "win32":
+        sys.stdout.write('\a')
+        sys.stdout.flush()
+        return
+    import winsound
+    try:
+        if sound_type == "start":
+            winsound.Beep(2000, 50)
+        elif sound_type == "success":
+            winsound.Beep(2000, 50)
+            time.sleep(0.05)
+            winsound.Beep(2500, 50)
+        elif sound_type == "error":
+            winsound.Beep(600, 250)
+        else:
+            winsound.Beep(1000, 100)
+    except Exception:
+        try:
+            winsound.MessageBeep()
+        except Exception:
+            pass
+
+
 def detect_slots(config, save_debug=True, suffix=""):
     """Captures the board and returns (screenshot_img, offset, slots)."""
     screenshot_img, offset = capture_game_bgr(config)
@@ -53,43 +78,58 @@ def detect_slots(config, save_debug=True, suffix=""):
 
 
 def run_cycle(config, suffix=""):
-    # ── Phase 1: detect → plan align swaps → execute ─────────────────────────
-    screenshot_img, offset, slots = detect_slots(config, suffix=suffix)
+    play_sound("start")
+    try:
+        # ── Phase 1: detect → plan align swaps → execute ─────────────────────────
+        screenshot_img, offset, slots = detect_slots(config, suffix=suffix)
 
-    if not slots:
-        print("No items detected. Check the game window or lower THRESHOLD.")
+        if not slots:
+            print("No items detected. Check the game window or lower THRESHOLD.")
+            play_sound("error")
+            return False
+
+        print("Planning...")
+        started = time.perf_counter()
+        _, phase1_swaps, _ = optimize_isometric_plan(slots, config)
+        print(f"Done in {time.perf_counter() - started:.2f}s: {len(phase1_swaps)} align swaps.")
+
+        focus_game_window(config)
+
+        if phase1_swaps:
+            print(f"\nPhase 1: aligning ({len(phase1_swaps)} swaps)...")
+            execute_swaps(slots, phase1_swaps, config)
+            time.sleep(config.after_swap_delay)
+
+        # ── Phase 2: fresh detect → plan merge triggers → execute ─────────────────
+        screenshot_img, offset, slots = detect_slots(config, save_debug=True, suffix=f"_after_phase1{suffix}")
+
+        if not slots:
+            print("Phase 2: no items detected after Phase 1.")
+            play_sound("error")
+            return True
+
+        adjacency = build_isometric_adjacency(slots, config)
+        current_labels = [slot.label for slot in slots]
+        merge_triggers = plan_merge_triggers(current_labels, adjacency, config.max_group_size)
+        merge_debug_path = save_merge_debug_image(
+            screenshot_img, slots, merge_triggers, config, image_offset=offset
+        )
+        print(f"Merge debug: {merge_debug_path} ({len(merge_triggers)} triggers)")
+        if merge_triggers:
+            print(f"\nPhase 2: merging ({len(merge_triggers)} triggers)...")
+            execute_merges(slots, merge_triggers, config)
+            
+        play_sound("success")
+        return True
+    except pyautogui.FailSafeException:
+        raise
+    except Exception as e:
+        print(f"\n[Error during run cycle] {e}")
+        import traceback
+        traceback.print_exc()
+        play_sound("error")
         return False
 
-    print("Planning...")
-    started = time.perf_counter()
-    _, phase1_swaps, _ = optimize_isometric_plan(slots, config)
-    print(f"Done in {time.perf_counter() - started:.2f}s: {len(phase1_swaps)} align swaps.")
-
-    focus_game_window(config)
-
-    if phase1_swaps:
-        print(f"\nPhase 1: aligning ({len(phase1_swaps)} swaps)...")
-        execute_swaps(slots, phase1_swaps, config)
-        time.sleep(config.after_swap_delay)
-
-    # ── Phase 2: fresh detect → plan merge triggers → execute ─────────────────
-    screenshot_img, offset, slots = detect_slots(config, save_debug=True, suffix=f"_after_phase1{suffix}")
-
-    if not slots:
-        print("Phase 2: no items detected after Phase 1.")
-        return True
-
-    adjacency = build_isometric_adjacency(slots, config)
-    current_labels = [slot.label for slot in slots]
-    merge_triggers = plan_merge_triggers(current_labels, adjacency, config.max_group_size)
-    merge_debug_path = save_merge_debug_image(
-        screenshot_img, slots, merge_triggers, config, image_offset=offset
-    )
-    print(f"Merge debug: {merge_debug_path} ({len(merge_triggers)} triggers)")
-    if merge_triggers:
-        print(f"\nPhase 2: merging ({len(merge_triggers)} triggers)...")
-        execute_merges(slots, merge_triggers, config)
-    return True
 
 
 def main(args=None):

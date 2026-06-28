@@ -2,10 +2,16 @@ import csv
 from collections import Counter
 from dataclasses import dataclass
 import time
+import json
+from pathlib import Path
 import cv2
 import numpy as np
 import mss
 import pygetwindow as gw
+
+
+_prepared_templates_cache = {}
+_scale_cache = {}
 
 
 def focus_game_window(config):
@@ -169,6 +175,10 @@ def configured_labels(config):
 
 def load_prepared_templates(config):
     """Reads and preprocesses templates."""
+    key = (str(config.template_dir), config.template_scales)
+    if key in _prepared_templates_cache:
+        return _prepared_templates_cache[key]
+
     labels = tuple(configured_labels(config))
     prepared = []
     missing = []
@@ -199,7 +209,9 @@ def load_prepared_templates(config):
                     )
                 )
 
-    return prepared, missing
+    result = prepared, missing
+    _prepared_templates_cache[key] = result
+    return result
 
 
 def _init_diagnostics(threshold):
@@ -248,12 +260,8 @@ def determine_best_scale(screenshot_img, config):
     gray_screenshot = cv2.GaussianBlur(gray_screenshot, (3, 3), 0)
     screen_h, screen_w = gray_screenshot.shape[:2]
 
-    # Coarse search range: 0.5 to 1.5 with 0.1 step
-    coarse_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
-    best_coarse_scale = 1.0
-    best_coarse_val = -1.0
-
-    for scale in coarse_scales:
+    # Helper function to evaluate score of a single scale
+    def evaluate_scale(scale):
         scores = []
         for template in templates:
             th, tw = template.shape[:2]
@@ -273,10 +281,49 @@ def determine_best_scale(screenshot_img, config):
         if scores:
             scores.sort(reverse=True)
             top_n = scores[:min(len(scores), 3)]
-            avg_score = sum(top_n) / len(top_n)
-            if avg_score > best_coarse_val:
-                best_coarse_val = avg_score
-                best_coarse_scale = scale
+            return sum(top_n) / len(top_n)
+        return 0.0
+
+    # Check cache first
+    cache_path = Path(__file__).parent.parent / "debug" / "scale_cache.json"
+    cached_scale = None
+    
+    # Try in-memory cache first
+    key_str = f"{screen_h}x{screen_w}"
+    global _scale_cache
+    if key_str in _scale_cache:
+        cached_scale = _scale_cache[key_str]
+    else:
+        # Try persistent file cache
+        if cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    file_cache = json.load(f)
+                    if isinstance(file_cache, dict) and key_str in file_cache:
+                        cached_scale = float(file_cache[key_str])
+                        _scale_cache[key_str] = cached_scale
+            except Exception as e:
+                print(f"Warning: Error reading scale cache: {e}")
+
+    # If we have a cached scale, verify it first!
+    if cached_scale is not None:
+        best_val = evaluate_scale(cached_scale)
+        if best_val >= 0.80:
+            print(f"Dynamically detected board scale (cached): {cached_scale:.2f} (score: {best_val:.3f})")
+            return cached_scale, best_val
+        else:
+            print(f"Cached scale {cached_scale:.2f} failed validation (score: {best_val:.3f}). Re-detecting...")
+
+    # Coarse search range: 0.5 to 1.5 with 0.1 step
+    coarse_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    best_coarse_scale = 1.0
+    best_coarse_val = -1.0
+
+    for scale in coarse_scales:
+        avg_score = evaluate_scale(scale)
+        if avg_score > best_coarse_val:
+            best_coarse_val = avg_score
+            best_coarse_scale = scale
 
     # Fine search around best_coarse_scale
     fine_scales = [
@@ -299,30 +346,29 @@ def determine_best_scale(screenshot_img, config):
     for scale in fine_scales:
         if scale == best_coarse_scale:
             continue
-        scores = []
-        for template in templates:
-            th, tw = template.shape[:2]
-            width = max(3, int(round(tw * scale)))
-            height = max(3, int(round(th * scale)))
+        avg_score = evaluate_scale(scale)
+        if avg_score > best_val:
+            best_val = avg_score
+            best_scale = scale
 
-            if height > screen_h or width > screen_w:
-                continue
+    # Save to caches
+    _scale_cache[key_str] = best_scale
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        file_cache = {}
+        if cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    file_cache = json.load(f)
+            except Exception:
+                pass
+        file_cache[key_str] = best_scale
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(file_cache, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Error writing scale cache: {e}")
 
-            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
-            resized = cv2.resize(template, (width, height), interpolation=interpolation)
-
-            res = cv2.matchTemplate(gray_screenshot, resized, cv2.TM_CCOEFF_NORMED)
-            if res.size > 0:
-                scores.append(float(np.max(res)))
-
-        if scores:
-            scores.sort(reverse=True)
-            top_n = scores[:min(len(scores), 3)]
-            avg_score = sum(top_n) / len(top_n)
-            if avg_score > best_val:
-                best_val = avg_score
-                best_scale = scale
-
+    print(f"Dynamically detected board scale: {best_scale:.2f} (score: {best_val:.3f})")
     return best_scale, best_val
 
 
@@ -339,7 +385,6 @@ def detect_all_items(
     try:
         if len(original_scales) == 1:
             detected_scale, best_val = determine_best_scale(screenshot_img, config)
-            print(f"Dynamically detected board scale: {detected_scale:.2f} (score: {best_val:.3f})")
             config.template_scales = (detected_scale,)
 
         screenshot_features = matching_features(screenshot_img)
