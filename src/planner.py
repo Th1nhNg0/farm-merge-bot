@@ -541,8 +541,21 @@ def _optimize_isometric_plan_inner(slots, config):
         candidates.append((coin_score, len(swaps), total_dist, target_labels, swaps))
         
     if not candidates:
-        # Fallback to simple sorted layout if no connected layout can be found
-        target_labels = sorted_labels
+        # Fallback to grid-sorted layout if no connected layout can be found
+        step_x, step_y, _ = estimate_isometric_step(slots)
+        points = layout_points(slots)
+        xs = points[:, 0]
+        ys = points[:, 1]
+        iso_u = 0.5 * ((ys / step_y) + (xs / step_x))
+        iso_v = 0.5 * ((ys / step_y) - (xs / step_x))
+        
+        # Sort slot indices diagonally: top-to-bottom, right-to-left
+        fallback_order = sorted(range(len(slots)), key=lambda idx: (iso_u[idx], iso_v[idx]))
+        
+        target_labels = [None] * len(slots)
+        for i, slot_idx in enumerate(fallback_order):
+            target_labels[slot_idx] = sorted_labels[i]
+            
         unsplit_target = [label.partition("§")[0] for label in target_labels]
         swaps = plan_swaps(unsplit_current, unsplit_target, dist)
         return target_labels, swaps, adjacency
