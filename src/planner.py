@@ -8,12 +8,8 @@ from src.geometry import (
     layout_points,
     pairwise_distance_matrix,
     build_isometric_adjacency,
+    connected_components,
 )
-
-
-@functools.lru_cache(maxsize=256)
-def _label_counts(labels):
-    return Counter(labels)
 
 
 def _shortest_label_cycles(edge_slots):
@@ -180,15 +176,13 @@ def plan_swaps(current_labels, target_labels, dist):
     independent k-cycle takes only k-1 swaps; reciprocal mismatches therefore
     become one swap instead of being missed by slot-order greedy planning.
     """
-    current_key = tuple(current_labels)
-    target_key = tuple(target_labels)
-    if len(current_key) != len(target_key) or dist.shape != (
-        len(current_key),
-        len(current_key),
+    if len(current_labels) != len(target_labels) or dist.shape != (
+        len(current_labels),
+        len(current_labels),
     ):
         raise ValueError("slot labels and distance matrix must have matching sizes")
 
-    if _label_counts(current_key) != _label_counts(target_key):
+    if Counter(current_labels) != Counter(target_labels):
         raise ValueError("current and target labels must contain the same items")
 
     return _plan_swaps(current_labels, target_labels, dist)
@@ -216,20 +210,6 @@ def labels_are_cardinally_connected(target_labels, adjacency):
     return True
 
 
-
-
-
-def label_sort_key(label):
-    """Returns a sort key for a sub-label.
-
-    1. Places 5-groups (e.g. 'bo_1§0') before singles (e.g. 'bo_1§single5').
-    2. Sorts alphabetically by the base label (e.g. 'bo_1', 'ga_1').
-    3. Sorts by the suffix part (e.g. group index or item index) as a tie-breaker.
-    """
-    base = label.partition("§")[0]
-    suffix = label.partition("§")[2]
-    is_single = 1 if "§single" in label else 0
-    return (is_single, base, suffix)
 
 
 
@@ -290,18 +270,6 @@ def _numeric_axis_groups(values, tolerance):
 
     return groups
 
-
-def _screen_snake_orders(slots):
-    points = layout_points(slots)
-    orders = [
-        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 1], points[i, 0]))),
-        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 1], -points[i, 0]))),
-        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 0], points[i, 1]))),
-        tuple(sorted(range(len(slots)), key=lambda i: (points[i, 0], -points[i, 1]))),
-    ]
-    return orders + [tuple(reversed(order)) for order in orders]
-
-
 def orthogonal_scan_orders(slots):
     """Returns isometric row/column snake orders for target generation."""
     if not slots:
@@ -339,63 +307,6 @@ def orthogonal_scan_orders(slots):
                 candidates.append(tuple(order))
 
     return list(dict.fromkeys(candidates))
-
-
-
-
-def grow_connected_target(current_labels, adjacency, rng):
-    """Grows one cardinally connected region per label from current-label seeds."""
-    counts = Counter(current_labels)
-    label_order = sorted(counts)
-    rng.shuffle(label_order)
-    target = [None] * len(current_labels)
-    regions = {}
-    remaining = {}
-
-    for label in label_order:
-        seed_options = [
-            index
-            for index, current_label in enumerate(current_labels)
-            if current_label == label and target[index] is None
-        ]
-        seed = rng.choice(seed_options)
-        target[seed] = label
-        regions[label] = {seed}
-        remaining[label] = counts[label] - 1
-
-    while any(value is None for value in target):
-        candidates = []
-
-        for label in label_order:
-            if remaining[label] <= 0:
-                continue
-
-            frontier = set().union(*(adjacency[index] for index in regions[label]))
-
-            for index in frontier:
-                if target[index] is not None:
-                    continue
-
-                matching_neighbors = len(adjacency[index] & regions[label])
-                candidates.append(
-                    (
-                        current_labels[index] == label,
-                        matching_neighbors,
-                        rng.random(),
-                        label,
-                        index,
-                    )
-                )
-
-        if not candidates:
-            return None
-
-        _, _, _, label, index = max(candidates)
-        target[index] = label
-        regions[label].add(index)
-        remaining[label] -= 1
-
-    return target
 
 
 def _plan_merge_trigger_for_group(label, group_slots, adjacency, max_group_size):
@@ -538,75 +449,6 @@ def optimize_isometric_plan(slots, config):
 
     return phase1_target, phase1_swaps, adjacency
 
-
-def partition_scan_order(scan_order, label_counts, adjacency):
-    """Finds a partition of scan_order into connected segments matching label counts.
-    
-    Returns a list of sizes, or None.
-    """
-    remaining_sizes = Counter(label_counts.values())
-    failed_states = set()
-    result = []
-
-    def search(offset, sizes, current_path):
-        state = (offset, tuple(sorted(sizes.items())))
-        if state in failed_states:
-            return False
-        if not sizes:
-            result.append(current_path)
-            return True
-
-        options = sorted(sizes, reverse=True)
-
-        for size in options:
-            segment = scan_order[offset : offset + size]
-            if not all(
-                right in adjacency[left] for left, right in zip(segment, segment[1:])
-            ):
-                continue
-
-            next_sizes = sizes.copy()
-            next_sizes[size] -= 1
-            if next_sizes[size] == 0:
-                del next_sizes[size]
-
-            if search(offset + size, next_sizes, current_path + (size,)):
-                return True
-
-        failed_states.add(state)
-        return False
-
-    if search(0, remaining_sizes, ()):
-        return result[0]
-    return None
-
-
-def target_labels_from_size_order(scan_order, size_order, current_labels):
-    """Constructs target labels by placing sorted sub-labels in the partitioned scan order."""
-    label_counts = Counter(current_labels)
-    
-    # Group label names by count
-    labels_by_size = {}
-    for label, count in label_counts.items():
-        labels_by_size.setdefault(count, []).append(label)
-        
-    # Sort them using label_sort_key
-    for size in labels_by_size:
-        labels_by_size[size].sort(key=label_sort_key)
-        
-    labels_iter = {size: iter(labels_by_size[size]) for size in labels_by_size}
-    
-    target_labels = [None] * len(current_labels)
-    offset = 0
-    for size in size_order:
-        label = next(labels_iter[size])
-        for slot_idx in scan_order[offset : offset + size]:
-            target_labels[slot_idx] = label
-        offset += size
-        
-    return target_labels
-
-
 def custom_item_sort_key(label):
     base_with_level = label.partition("§")[0]
     is_coin = base_with_level.startswith("xu")
@@ -629,25 +471,6 @@ def custom_item_sort_key(label):
     return (coin_flag, is_single, name_part, level, suffix)
 
 
-def get_adjacency_components(slots, adjacency):
-    unvisited = set(range(len(slots)))
-    components = []
-    while unvisited:
-        start = next(iter(unvisited))
-        component = []
-        pending = [start]
-        unvisited.remove(start)
-        while pending:
-            curr = pending.pop()
-            component.append(curr)
-            for neighbor in adjacency[curr]:
-                if neighbor in unvisited:
-                    unvisited.remove(neighbor)
-                    pending.append(neighbor)
-        components.append(component)
-    return components
-
-
 def _optimize_isometric_plan_inner(slots, config):
     """Core planner logic, operates on whatever labels slots currently have.
     
@@ -660,7 +483,8 @@ def _optimize_isometric_plan_inner(slots, config):
     adjacency = build_isometric_adjacency(slots, config)
     
     # Partition slots into connected components (islands)
-    components = get_adjacency_components(slots, adjacency)
+    components = [list(c) for c in connected_components(adjacency)]
+
     # Sort components top-to-bottom by average Y-coordinate
     components.sort(key=lambda comp: sum(slots[i].grid_anchor[1] for i in comp) / len(comp))
     
