@@ -21,6 +21,7 @@ class Config:
             "congcu",
             "cuu",
             "xu",
+            "caphe",
         ]
     )
     levels: list[int] = field(default_factory=lambda: [1, 2, 3])
