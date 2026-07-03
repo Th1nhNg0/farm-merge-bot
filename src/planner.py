@@ -668,66 +668,21 @@ def get_assignment_cost(S, L, target_labels, current_labels, adjacency):
 
 
 def assign_singles_optimal(leftover_slots, singles_labels, current_labels, target_labels, adjacency):
-    N = len(leftover_slots)
-    if N == 0:
-        return
-        
-    if N <= 10:
-        best_assignment = None
-        best_cost = float("inf")
-        
-        current_assign = [None] * N
-        assigned_indices = [False] * N
-        
-        def dfs(idx, current_cost):
-            nonlocal best_cost, best_assignment
-            if current_cost >= best_cost:
-                return
-                
-            if idx == N:
-                best_cost = current_cost
-                best_assignment = list(current_assign)
-                return
-                
-            L = singles_labels[idx]
-            for i in range(N):
-                if not assigned_indices[i]:
-                    S = leftover_slots[i]
-                    
-                    target_labels[S] = L
-                    cost = get_assignment_cost(S, L, target_labels, current_labels, adjacency)
-                    
-                    assigned_indices[i] = True
-                    current_assign[i] = L
-                    
-                    dfs(idx + 1, current_cost + cost)
-                    
-                    current_assign[i] = None
-                    assigned_indices[i] = False
-                    target_labels[S] = None
-                    
-        dfs(0, 0)
-        
-        if best_assignment is not None:
-            for i, L in enumerate(best_assignment):
-                S = leftover_slots[i]
+    assigned_slots = set()
+    for L in singles_labels:
+        best_slot = None
+        min_cost = float("inf")
+        for S in leftover_slots:
+            if S not in assigned_slots:
                 target_labels[S] = L
-    else:
-        assigned_slots = set()
-        for L in singles_labels:
-            best_slot = None
-            min_cost = float("inf")
-            for S in leftover_slots:
-                if S not in assigned_slots:
-                    target_labels[S] = L
-                    cost = get_assignment_cost(S, L, target_labels, current_labels, adjacency)
-                    target_labels[S] = None
-                    if cost < min_cost:
-                        min_cost = cost
-                        best_slot = S
-            if best_slot is not None:
-                target_labels[best_slot] = L
-                assigned_slots.add(best_slot)
+                cost = get_assignment_cost(S, L, target_labels, current_labels, adjacency)
+                target_labels[S] = None
+                if cost < min_cost:
+                    min_cost = cost
+                    best_slot = S
+        if best_slot is not None:
+            target_labels[best_slot] = L
+            assigned_slots.add(best_slot)
 
 
 def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
