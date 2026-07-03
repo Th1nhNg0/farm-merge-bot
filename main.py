@@ -188,8 +188,87 @@ def run_sort_cycle(config, suffix=""):
         return False
 
 
+def find_box_btn(screenshot_img, config):
+    import cv2
+    import numpy as np
+    from src.detection import matching_features, scaled_templates, combined_match_score
+
+    template_path = config.template_dir / "box_btn.png"
+    if not template_path.exists():
+        print(f"Error: {template_path} does not exist.")
+        return None
+
+    template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+    if template is None:
+        print(f"Error: Could not read {template_path}")
+        return None
+
+    screenshot_features = matching_features(screenshot_img)
+    screenshot_h, screenshot_w = screenshot_img.shape[:2]
+
+    best_score = -1.0
+    best_loc = None
+
+    for scaled_template in scaled_templates(template, config):
+        th, tw = scaled_template.shape[:2]
+        if th > screenshot_h or tw > screenshot_w:
+            continue
+        template_features = matching_features(scaled_template)
+        
+        result = combined_match_score(screenshot_features, template_features, config)
+        
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > best_score:
+            best_score = max_val
+            center_x = max_loc[0] + tw // 2
+            center_y = max_loc[1] + th // 2
+            best_loc = (center_x, center_y)
+
+    print(f"Best match score for box_btn: {best_score:.4f}")
+    if best_score >= config.threshold:
+        return best_loc
+    return None
 
 
+def run_box_btn_cycle(config):
+    from src.detection import determine_best_scale
+    play_sound("start")
+    try:
+        screenshot_img, offset = capture_game_bgr(config)
+        if screenshot_img is None:
+            print("No screen captured.")
+            play_sound("error")
+            return False
+
+        if len(config.template_scales) == 1:
+            detected_scale, _ = determine_best_scale(screenshot_img, config)
+            config.template_scales = (detected_scale,)
+
+        best_loc = find_box_btn(screenshot_img, config)
+        if best_loc is None:
+            print("Could not find box_btn template in the viewport.")
+            play_sound("error")
+            return False
+
+        focus_game_window(config)
+        
+        click_x, click_y = best_loc[0] + offset[0], best_loc[1] + offset[1]
+        print(f"Clicking box_btn 10 times at screen coordinates ({click_x}, {click_y})...")
+        
+        for i in range(10):
+            pyautogui.click(click_x, click_y)
+            time.sleep(0.01)
+            
+        play_sound("success")
+        return True
+    except pyautogui.FailSafeException:
+        raise
+    except Exception as e:
+        print(f"\n[Error during box_btn cycle] {e}")
+        import traceback
+        traceback.print_exc()
+        play_sound("error")
+        return False
 
 
 def main(args=None):
@@ -251,7 +330,8 @@ def main(args=None):
     print("  2. Focus the Discord/game window.")
     print("  3. Press the 'X' key to start autorunning.")
     print("  4. Press the 'C' key to strictly sort all items.")
-    print("  5. To stop: press Ctrl+C in this terminal, or")
+    print("  5. Press the 'Z' key to find and click the box button 10 times.")
+    print("  6. To stop: press Ctrl+C in this terminal, or")
     print("     move your mouse cursor to any corner of the screen (FailSafe).")
     print("==================================================")
 
@@ -325,6 +405,22 @@ def main(args=None):
                         config.detection_debug_dir = orig_debug_dir
                     print("Sorting completed. Focus Discord and press 'X' to run, or 'C' to sort.")
                     time.sleep(1.0)
+                
+                # VK_Z = 0x5A
+                elif is_key_pressed(0x5A):
+                    print("\n[Triggered] 'Z' pressed while Discord is active. Starting box click cycle...")
+                    clear_key_state(0x5A)
+                    
+                    cleanup_old_runs(config.detection_debug_dir, keep_limit=10)
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    orig_debug_dir = config.detection_debug_dir
+                    config.detection_debug_dir = config.detection_debug_dir / f"run_box_{timestamp}"
+                    try:
+                        run_box_btn_cycle(config)
+                    finally:
+                        config.detection_debug_dir = orig_debug_dir
+                    print("Box click completed. Focus Discord and press 'X' to run, 'C' to sort, or 'Z' to click box.")
+                    time.sleep(1.0)
             
             time.sleep(0.1)
             
@@ -334,7 +430,7 @@ def main(args=None):
         except pyautogui.FailSafeException:
             print("\n[FailSafe] Mouse moved to corner. Aborting run/loop.")
             time.sleep(1.0)
-            print("Listening again. Focus Discord and press 'X' to run, or 'C' to sort.")
+            print("Listening again. Focus Discord and press 'X' to run, 'C' to sort, or 'Z' to click box.")
 
 
 if __name__ == "__main__":

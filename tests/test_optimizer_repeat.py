@@ -159,6 +159,42 @@ class OptimizerRepeatTests(unittest.TestCase):
         self.assertEqual(current, target)
         self.assertEqual([], swaps)
 
+    def test_find_box_btn(self):
+        import cv2
+        import numpy as np
+        from main import find_box_btn
+        
+        config = Config()
+        
+        # Load the actual box_btn template
+        template_path = config.template_dir / "box_btn.png"
+        if not template_path.exists():
+            self.skipTest("box_btn.png not present in images directory")
+            
+        template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+        if template is None:
+            self.skipTest("Could not read box_btn.png template")
+            
+        # Create a blank screenshot (larger than template)
+        screenshot_h = template.shape[0] + 100
+        screenshot_w = template.shape[1] + 100
+        screenshot = np.zeros((screenshot_h, screenshot_w, 3), dtype=np.uint8)
+        
+        # Paste template at a known location, say (50, 50)
+        paste_y, paste_x = 50, 50
+        screenshot[paste_y:paste_y+template.shape[0], paste_x:paste_x+template.shape[1]] = template
+        
+        # Find the box button
+        loc = find_box_btn(screenshot, config)
+        self.assertIsNotNone(loc)
+        
+        # Click location should match the center of the pasted template
+        expected_x = paste_x + template.shape[1] // 2
+        expected_y = paste_y + template.shape[0] // 2
+        
+        self.assertAlmostEqual(loc[0], expected_x, delta=2)
+        self.assertAlmostEqual(loc[1], expected_y, delta=2)
+
 
 if __name__ == "__main__":
     unittest.main()
