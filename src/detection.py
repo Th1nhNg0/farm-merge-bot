@@ -308,7 +308,7 @@ def determine_best_scale(screenshot_img, config):
     # If we have a cached scale, verify it first!
     if cached_scale is not None:
         best_val = evaluate_scale(cached_scale)
-        if best_val >= 0.80:
+        if best_val >= 0.50:
             print(f"Dynamically detected board scale (cached): {cached_scale:.2f} (score: {best_val:.3f})")
             return cached_scale, best_val
         else:

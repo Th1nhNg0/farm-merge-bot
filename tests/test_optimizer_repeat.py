@@ -30,7 +30,7 @@ def make_slots(labels, points):
 
 
 class OptimizerRepeatTests(unittest.TestCase):
-    def test_levels_of_the_same_item_prefer_adjacent_groups(self):
+    def test_levels_of_the_same_item_minimize_swaps_for_singles(self):
         config = Config()
         current = ["b", "a", "c", "a"]
         points = [(0, 0), (40, 20), (80, 40), (120, 60)]
@@ -39,12 +39,13 @@ class OptimizerRepeatTests(unittest.TestCase):
         target, swaps, _ = planner.optimize_isometric_plan(slots, config)
         
         self.assertEqual(Counter(current), Counter(target))
-        self.assertIn(target, (['a', 'a', 'b', 'c'], ['c', 'b', 'a', 'a']))
+        self.assertEqual(current, target)
+        self.assertEqual([], swaps)
 
     def test_optimizer_converges_then_repeats_with_zero_swaps(self):
         config = Config()
-        current = ["b", "a", "c", "a"]
-        points = [(0, 0), (40, 20), (80, 40), (120, 60)]
+        current = ["a", "a", "a", "b", "a", "a"]
+        points = [(i * 40, i * 20) for i in range(6)]
         slots = make_slots(current, points)
         
         target1, swaps1, _ = planner.optimize_isometric_plan(slots, config)
@@ -101,6 +102,43 @@ class OptimizerRepeatTests(unittest.TestCase):
         target, swaps, _ = planner.optimize_isometric_plan(slots, config)
         self.assertEqual(current, target)
         self.assertEqual([], swaps)
+
+    def test_group_assignment_minimizes_swaps(self):
+        config = Config()
+        current = ["bo_1"] * 4 + ["ga_1"] + ["ga_1"] * 4 + ["bo_1"] + ["bo_1"]
+        points = [(i * 40, i * 20) for i in range(11)]
+        slots = make_slots(current, points)
+        
+        target, swaps, _ = planner.optimize_isometric_plan(slots, config)
+        self.assertEqual(len(swaps), 1)
+
+    def test_custom_item_sort_key_type_based(self):
+        # custom_item_sort_key should sort: plants/materials (0), animals (1), coins (2)
+        labels = ["xu_1", "bo_1", "carot_1", "ga_1", "mia_1"]
+        sorted_labels = sorted(labels, key=planner.custom_item_sort_key)
+        expected = ["carot_1", "mia_1", "bo_1", "ga_1", "xu_1"]
+        self.assertEqual(expected, sorted_labels)
+
+    def test_strict_sort_layout(self):
+        config = Config()
+        current = ["xu_1", "bo_1", "carot_1"]
+        points = [(0, 0), (40, 20), (80, 40)]
+        slots = make_slots(current, points)
+        
+        target, swaps, _ = planner.optimize_isometric_plan(slots, config, strict_sort=True)
+        expected = ["carot_1", "bo_1", "xu_1"]
+        self.assertEqual(expected, target)
+        self.assertGreater(len(swaps), 0)
+
+    def test_strict_sort_ignores_groups(self):
+        config = Config()
+        current = ["ga_1"] * 5 + ["carot_1"]
+        points = [(i * 40, i * 20) for i in range(6)]
+        slots = make_slots(current, points)
+        
+        target, swaps, _ = planner.optimize_isometric_plan(slots, config, strict_sort=True)
+        expected = ["carot_1"] + ["ga_1"] * 5
+        self.assertEqual(expected, target)
 
 
 if __name__ == "__main__":

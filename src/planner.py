@@ -348,7 +348,7 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
 
 
 
-def optimize_isometric_plan(slots, config):
+def optimize_isometric_plan(slots, config, strict_sort=False):
     """Plans phase 1 alignment swaps.
 
     Oversized labels are temporarily split into max_group_size chunks so the
@@ -356,6 +356,12 @@ def optimize_isometric_plan(slots, config):
 
     Returns (target_labels, phase1_swaps, adjacency).
     """
+    if strict_sort:
+        target_labels, phase1_swaps, adjacency = _optimize_isometric_plan_inner(
+            slots, config, strict_sort=True
+        )
+        return target_labels, phase1_swaps, adjacency
+
     original_labels = [slot.label for slot in slots]
     max_size = getattr(config, "max_group_size", 5)
     needs_split = max_size > 0 and any(
@@ -364,7 +370,7 @@ def optimize_isometric_plan(slots, config):
 
     if not needs_split:
         target_labels, phase1_swaps, adjacency = _optimize_isometric_plan_inner(
-            slots, config
+            slots, config, strict_sort=strict_sort
         )
         return target_labels, phase1_swaps, adjacency
 
@@ -375,7 +381,7 @@ def optimize_isometric_plan(slots, config):
 
     try:
         phase1_target_split, phase1_swaps, adjacency = _optimize_isometric_plan_inner(
-            slots, config
+            slots, config, strict_sort=strict_sort
         )
     finally:
         for slot, orig in zip(slots, original_labels):
@@ -395,8 +401,6 @@ def optimize_isometric_plan(slots, config):
 
 def custom_item_sort_key(label):
     base_with_level = label.partition("§")[0]
-    is_coin = base_with_level.startswith("xu")
-    coin_flag = 1 if is_coin else 0
     
     if "_" in base_with_level:
         name_part, _, level_part = base_with_level.rpartition("_")
@@ -409,8 +413,16 @@ def custom_item_sort_key(label):
         name_part = base_with_level
         level = 0
         
+    ANIMALS = {"bo", "ga", "heo", "de", "cuu"}
+    if name_part.startswith("xu"):
+        type_flag = 2  # coin at bottom
+    elif name_part in ANIMALS:
+        type_flag = 1  # animal in middle
+    else:
+        type_flag = 0  # plant/materials at top
+        
     suffix = label.partition("§")[2]
-    return (coin_flag, name_part, level, suffix)
+    return (type_flag, name_part, level, suffix)
 
 
 def partition_into_connected_blocks(comp_slots, adjacency, slots, block_size=5):
@@ -457,7 +469,95 @@ def extract_groups_and_singles(sorted_labels):
     return groups, singles
 
 
-def _optimize_isometric_plan_inner(slots, config):
+def optimize_groups_assignment(blocks, group_labels, current_labels, slots):
+    """Assigns group_labels to blocks to minimize mismatches (and break ties by centroid distance)."""
+    n = len(blocks)
+    if n == 0:
+        return []
+
+    # Precompute centroids of slots currently holding each label
+    from collections import defaultdict
+    label_slots = defaultdict(list)
+    for idx, label in enumerate(current_labels):
+        label_slots[label].append(idx)
+        
+    centroids = {}
+    for label, indices in label_slots.items():
+        if indices:
+            xs = [slots[idx].grid_anchor[0] for idx in indices]
+            ys = [slots[idx].grid_anchor[1] for idx in indices]
+            centroids[label] = (sum(xs) / len(xs), sum(ys) / len(ys))
+
+    # cost_matrix[block_idx][group_idx]
+    cost_matrix = []
+    for block in blocks:
+        # Centroid of this block
+        b_xs = [slots[idx].grid_anchor[0] for idx in block]
+        b_ys = [slots[idx].grid_anchor[1] for idx in block]
+        b_centroid = (sum(b_xs) / len(b_xs), sum(b_ys) / len(b_ys))
+        
+        row = []
+        for label in group_labels:
+            mismatches = sum(1 for slot_idx in block if current_labels[slot_idx] != label)
+            
+            # Distance penalty to break ties
+            l_centroid = centroids.get(label, b_centroid)
+            dx = b_centroid[0] - l_centroid[0]
+            dy = b_centroid[1] - l_centroid[1]
+            dist = (dx*dx + dy*dy) ** 0.5
+            
+            # Combine mismatch with a tiny distance penalty (1e-5)
+            cost = mismatches + dist * 1e-5
+            row.append(cost)
+        cost_matrix.append(row)
+
+    best_assignment = list(range(n))
+    best_cost = sum(cost_matrix[i][i] for i in range(n))
+
+    # Branch-and-bound optimization (DFS) if n is small
+    if n <= 10:
+        assigned_groups = [False] * n
+
+        def search(block_idx, current_cost, path):
+            nonlocal best_cost, best_assignment
+            if current_cost >= best_cost:
+                return
+
+            if block_idx == n:
+                best_cost = current_cost
+                best_assignment = list(path)
+                return
+
+            for group_idx in range(n):
+                if not assigned_groups[group_idx]:
+                    cost = cost_matrix[block_idx][group_idx]
+                    assigned_groups[group_idx] = True
+                    path.append(group_idx)
+                    search(block_idx + 1, current_cost + cost, path)
+                    path.pop()
+                    assigned_groups[group_idx] = False
+
+        search(0, 0, [])
+    else:
+        # Greedy fallback if n > 10 (extremely rare / physically impossible on standard board sizes)
+        assigned_groups = [False] * n
+        best_assignment = []
+        for block_idx in range(n):
+            best_g = -1
+            min_c = 999999.0
+            for group_idx in range(n):
+                if not assigned_groups[group_idx]:
+                    c = cost_matrix[block_idx][group_idx]
+                    if c < min_c:
+                        min_c = c
+                        best_g = group_idx
+            assigned_groups[best_g] = True
+            best_assignment.append(best_g)
+
+    return best_assignment
+
+
+def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
     """Core planner logic, operates on whatever labels slots currently have.
     
     It partitions slots of each connected component into connected blocks of size 5,
@@ -467,6 +567,22 @@ def _optimize_isometric_plan_inner(slots, config):
     dist = pairwise_distance_matrix(slots)
     adjacency = build_isometric_adjacency(slots, config)
     
+    if strict_sort:
+        # Simple linear sort of all items on the map
+        sorted_slots_indices = sorted(range(len(slots)), key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
+        sorted_labels = sorted(current_labels, key=custom_item_sort_key)
+        
+        target_labels = [None] * len(slots)
+        for slot_idx, label in zip(sorted_slots_indices, sorted_labels):
+            target_labels[slot_idx] = label
+            
+        if target_labels == current_labels:
+            return target_labels, [], adjacency
+            
+        unsplit_current = [label.partition("§")[0] for label in current_labels]
+        swaps = plan_swaps(unsplit_current, [label.partition("§")[0] for label in target_labels], dist)
+        return target_labels, swaps, adjacency
+
     # Partition slots into connected components (islands)
     components = [list(c) for c in connected_components(adjacency)]
     # Sort components top-to-bottom by average Y-coordinate
@@ -503,13 +619,33 @@ def _optimize_isometric_plan_inner(slots, config):
     
     # Map groups to blocks and singles to leftovers
     target_labels = [None] * len(slots)
+    
+    # Optimize groups assignment to blocks
+    group_labels = [g[0] for g in groups]
+    best_group_indices = optimize_groups_assignment(all_blocks, group_labels, current_labels, slots)
     for b_idx, block in enumerate(all_blocks):
-        group = groups[b_idx]
+        group_idx = best_group_indices[b_idx]
+        group = groups[group_idx]
         for slot_idx, label in zip(block, group):
             target_labels[slot_idx] = label
             
-    for s_idx, slot_idx in enumerate(all_leftovers):
-        target_labels[slot_idx] = singles[s_idx]
+    # Optimize singles assignment to leftovers (preserving existing items to minimize swaps)
+    remaining_singles = Counter(singles)
+    unassigned_leftovers = []
+    for slot_idx in all_leftovers:
+        curr_label = current_labels[slot_idx]
+        if remaining_singles[curr_label] > 0:
+            target_labels[slot_idx] = curr_label
+            remaining_singles[curr_label] -= 1
+        else:
+            unassigned_leftovers.append(slot_idx)
+            
+    flat_remaining = []
+    for label, count in remaining_singles.items():
+        flat_remaining.extend([label] * count)
+        
+    for slot_idx, label in zip(unassigned_leftovers, flat_remaining):
+        target_labels[slot_idx] = label
         
     if target_labels == current_labels:
         return target_labels, [], adjacency

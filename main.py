@@ -58,6 +58,27 @@ def play_sound(sound_type="info"):
             pass
 
 
+def cleanup_old_runs(debug_dir, keep_limit=10):
+    """Deletes oldest run directories if count exceeds keep_limit to prevent disk bloat."""
+    try:
+        if not debug_dir.exists():
+            return
+        run_dirs = sorted(
+            [d for d in debug_dir.iterdir() if d.is_dir() and d.name.startswith("run_")],
+            key=lambda d: d.stat().st_mtime
+        )
+        if len(run_dirs) > keep_limit:
+            import shutil
+            for d in run_dirs[:-keep_limit]:
+                try:
+                    shutil.rmtree(d)
+                    print(f"Cleaned up old debug run directory: {d}")
+                except Exception as e:
+                    print(f"Warning: Failed to clean up old run directory {d}: {e}")
+    except Exception as e:
+        print(f"Warning: Failed during old runs cleanup: {e}")
+
+
 def detect_slots(config, save_debug=True, suffix=""):
     """Captures the board and returns (screenshot_img, offset, slots)."""
     screenshot_img, offset = capture_game_bgr(config)
@@ -131,6 +152,45 @@ def run_cycle(config, suffix=""):
         return False
 
 
+def run_sort_cycle(config, suffix=""):
+    play_sound("start")
+    try:
+        screenshot_img, offset, slots = detect_slots(config, suffix=suffix)
+
+        if not slots:
+            print("No items detected. Check the game window or lower THRESHOLD.")
+            play_sound("error")
+            return False
+
+        print("Planning strict sort...")
+        started = time.perf_counter()
+        _, phase1_swaps, _ = optimize_isometric_plan(slots, config, strict_sort=True)
+        print(f"Done in {time.perf_counter() - started:.2f}s: {len(phase1_swaps)} sorting swaps.")
+
+        focus_game_window(config)
+
+        if phase1_swaps:
+            print(f"\nSorting ({len(phase1_swaps)} swaps)...")
+            execute_swaps(slots, phase1_swaps, config)
+            time.sleep(config.after_swap_delay)
+        else:
+            print("Board is already perfectly sorted!")
+            
+        play_sound("success")
+        return True
+    except pyautogui.FailSafeException:
+        raise
+    except Exception as e:
+        print(f"\n[Error during sort cycle] {e}")
+        import traceback
+        traceback.print_exc()
+        play_sound("error")
+        return False
+
+
+
+
+
 
 def main(args=None):
     if args is None:
@@ -169,15 +229,16 @@ def main(args=None):
 
     # Archive debug logs in unique run subdirectories to enable future analysis
     if is_testing:
+        cleanup_old_runs(config.detection_debug_dir, keep_limit=10)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         config.detection_debug_dir = config.detection_debug_dir / f"run_{timestamp}"
         pyautogui.FAILSAFE = True
-        pyautogui.PAUSE = config.swap_settle_delay
+        pyautogui.PAUSE = 0.0
         run_cycle(config)
         return
 
     pyautogui.FAILSAFE = True
-    pyautogui.PAUSE = config.swap_settle_delay
+    pyautogui.PAUSE = 0.0
 
     print("==================================================")
     print("Auto-Farm Controller Initialized")
@@ -189,7 +250,8 @@ def main(args=None):
     print("  1. Make sure your Discord/game window is visible.")
     print("  2. Focus the Discord/game window.")
     print("  3. Press the 'X' key to start autorunning.")
-    print("  4. To stop: press Ctrl+C in this terminal, or")
+    print("  4. Press the 'C' key to strictly sort all items.")
+    print("  5. To stop: press Ctrl+C in this terminal, or")
     print("     move your mouse cursor to any corner of the screen (FailSafe).")
     print("==================================================")
 
@@ -211,6 +273,7 @@ def main(args=None):
                                 time.sleep(1.0)
                                 break
                             
+                            cleanup_old_runs(config.detection_debug_dir, keep_limit=10)
                             timestamp = time.strftime("%Y%m%d_%H%M%S")
                             run_debug_dir = config.detection_debug_dir / f"run_{timestamp}"
                             orig_debug_dir = config.detection_debug_dir
@@ -236,6 +299,7 @@ def main(args=None):
                                 time.sleep(1.0)
                                 break
                     else:
+                        cleanup_old_runs(config.detection_debug_dir, keep_limit=10)
                         timestamp = time.strftime("%Y%m%d_%H%M%S")
                         orig_debug_dir = config.detection_debug_dir
                         config.detection_debug_dir = config.detection_debug_dir / f"run_{timestamp}"
@@ -245,6 +309,22 @@ def main(args=None):
                             config.detection_debug_dir = orig_debug_dir
                         print("Run completed. Focus Discord and press 'X' to run again.")
                         time.sleep(1.0)
+                
+                # VK_C = 0x43
+                elif is_key_pressed(0x43):
+                    print("\n[Triggered] 'C' pressed while Discord is active. Starting board sorting...")
+                    clear_key_state(0x43)
+                    
+                    cleanup_old_runs(config.detection_debug_dir, keep_limit=10)
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    orig_debug_dir = config.detection_debug_dir
+                    config.detection_debug_dir = config.detection_debug_dir / f"run_sort_{timestamp}"
+                    try:
+                        run_sort_cycle(config)
+                    finally:
+                        config.detection_debug_dir = orig_debug_dir
+                    print("Sorting completed. Focus Discord and press 'X' to run, or 'C' to sort.")
+                    time.sleep(1.0)
             
             time.sleep(0.1)
             
@@ -254,7 +334,7 @@ def main(args=None):
         except pyautogui.FailSafeException:
             print("\n[FailSafe] Mouse moved to corner. Aborting run/loop.")
             time.sleep(1.0)
-            print("Listening again. Focus Discord and press 'X' to run.")
+            print("Listening again. Focus Discord and press 'X' to run, or 'C' to sort.")
 
 
 if __name__ == "__main__":
