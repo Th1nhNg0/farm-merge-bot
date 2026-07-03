@@ -253,9 +253,9 @@ def run_box_btn_cycle(config):
         focus_game_window(config)
         
         click_x, click_y = best_loc[0] + offset[0], best_loc[1] + offset[1]
-        print(f"Clicking box_btn 10 times at screen coordinates ({click_x}, {click_y})...")
+        print(f"Clicking box_btn 40 times at screen coordinates ({click_x}, {click_y})...")
         
-        for i in range(10):
+        for i in range(40):
             pyautogui.click(click_x, click_y)
             time.sleep(0.01)
             
@@ -330,7 +330,7 @@ def main(args=None):
     print("  2. Focus the Discord/game window.")
     print("  3. Press the 'X' key to start autorunning.")
     print("  4. Press the 'C' key to strictly sort all items.")
-    print("  5. Press the 'Z' key to find and click the box button 10 times.")
+    print("  5. Press the 'Z' key to find and click the box button 40 times.")
     print("  6. To stop: press Ctrl+C in this terminal, or")
     print("     move your mouse cursor to any corner of the screen (FailSafe).")
     print("==================================================")
