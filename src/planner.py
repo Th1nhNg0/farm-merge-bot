@@ -317,43 +317,32 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
             components.append(component)
 
         for component_slots in components:
-            if len(component_slots) < max_group_size:
+            if (
+                len(component_slots) < max_group_size
+                or len(component_slots) % max_group_size != 0
+            ):
                 continue
 
-            remaining = set(component_slots)
-            blocks = []
-            while len(remaining) >= max_group_size:
-                start = min(remaining)
-                block = {start}
-                queue = [start]
-                head = 0
-                while head < len(queue) and len(block) < max_group_size:
-                    curr = queue[head]
-                    head += 1
-                    neighbors = sorted(adjacency[curr] & remaining)
-                    for neighbor in neighbors:
-                        if neighbor not in block:
-                            block.add(neighbor)
-                            queue.append(neighbor)
-                            if len(block) == max_group_size:
-                                break
-                if len(block) == max_group_size:
-                    remaining.difference_update(block)
-                    blocks.append(list(block))
-                else:
-                    remaining.remove(start)
+            found = False
+            for offset in range(0, len(component_slots), max_group_size):
+                group_slots = sorted(component_slots)[offset : offset + max_group_size]
+                if len(group_slots) < max_group_size:
+                    continue
 
-            for block in blocks:
                 trigger = _plan_merge_trigger_for_group(
-                    label, block, adjacency, max_group_size
+                    label, group_slots, adjacency, max_group_size
                 )
-                if trigger is not None:
-                    triggers.append(trigger)
-                else:
-                    print(
-                        f"[merge] WARNING: block {block} of '{label}' "
-                        f"has no connected {max_group_size - 1}-item target group — skipping merge."
-                    )
+                if trigger is None:
+                    continue
+
+                triggers.append(trigger)
+                found = True
+
+            if not found:
+                print(
+                    f"[merge] WARNING: component of '{label}' (slots {component_slots}) "
+                    f"has no connected {max_group_size - 1}-item target group — skipping merge."
+                )
 
     return triggers
 
@@ -661,6 +650,85 @@ def extract_pre_grouped_blocks(slots, current_labels, adjacency, block_size):
     return pre_grouped_blocks
 
 
+def get_assignment_cost(S, L, target_labels, current_labels, adjacency):
+    B = L.partition("§")[0]
+    connected = False
+    for nb in adjacency[S]:
+        val = target_labels[nb]
+        if val is not None and val.partition("§")[0] == B:
+            connected = True
+            break
+    
+    cost = 0
+    if current_labels[S].partition("§")[0] != B:
+        cost += 1
+    if connected:
+        cost += 1000
+    return cost
+
+
+def assign_singles_optimal(leftover_slots, singles_labels, current_labels, target_labels, adjacency):
+    N = len(leftover_slots)
+    if N == 0:
+        return
+        
+    if N <= 10:
+        best_assignment = None
+        best_cost = float("inf")
+        
+        current_assign = [None] * N
+        assigned_indices = [False] * N
+        
+        def dfs(idx, current_cost):
+            nonlocal best_cost, best_assignment
+            if current_cost >= best_cost:
+                return
+                
+            if idx == N:
+                best_cost = current_cost
+                best_assignment = list(current_assign)
+                return
+                
+            L = singles_labels[idx]
+            for i in range(N):
+                if not assigned_indices[i]:
+                    S = leftover_slots[i]
+                    
+                    target_labels[S] = L
+                    cost = get_assignment_cost(S, L, target_labels, current_labels, adjacency)
+                    
+                    assigned_indices[i] = True
+                    current_assign[i] = L
+                    
+                    dfs(idx + 1, current_cost + cost)
+                    
+                    current_assign[i] = None
+                    assigned_indices[i] = False
+                    target_labels[S] = None
+                    
+        dfs(0, 0)
+        
+        if best_assignment is not None:
+            for i, L in enumerate(best_assignment):
+                S = leftover_slots[i]
+                target_labels[S] = L
+    else:
+        assigned_slots = set()
+        for L in singles_labels:
+            best_slot = None
+            min_cost = float("inf")
+            for S in leftover_slots:
+                if S not in assigned_slots:
+                    target_labels[S] = L
+                    cost = get_assignment_cost(S, L, target_labels, current_labels, adjacency)
+                    target_labels[S] = None
+                    if cost < min_cost:
+                        min_cost = cost
+                        best_slot = S
+            if best_slot is not None:
+                target_labels[best_slot] = L
+                assigned_slots.add(best_slot)
+
 
 def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
     """Core planner logic, operates on whatever labels slots currently have.
@@ -758,23 +826,39 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
         else:
             all_leftovers.extend(block)
             
-    # Optimize singles assignment to leftovers (preserving existing items to minimize swaps)
+    # Assign singles to leftovers in a way that prevents placing them adjacent to blocks of the same type.
+    # Any leftovers not assigned via direct preservation are assigned optimally.
     remaining_singles = Counter(singles)
+    
+    # First: preserve existing items if they are safe (i.e. not adjacent to blocks of same type)
     unassigned_leftovers = []
     for slot_idx in all_leftovers:
         curr_label = current_labels[slot_idx]
         if remaining_singles[curr_label] > 0:
-            target_labels[slot_idx] = curr_label
-            remaining_singles[curr_label] -= 1
+            # Check if this placement would create a connection
+            base = curr_label.partition("§")[0]
+            has_connection = False
+            for nb in adjacency[slot_idx]:
+                val = target_labels[nb]
+                if val is not None and val.partition("§")[0] == base:
+                    has_connection = True
+                    break
+            
+            if not has_connection:
+                target_labels[slot_idx] = curr_label
+                remaining_singles[curr_label] -= 1
+            else:
+                unassigned_leftovers.append(slot_idx)
         else:
             unassigned_leftovers.append(slot_idx)
             
+    # Second: assign remaining singles optimally to the remaining unassigned leftovers
     flat_remaining = []
     for label, count in remaining_singles.items():
         flat_remaining.extend([label] * count)
         
-    for slot_idx, label in zip(unassigned_leftovers, flat_remaining):
-        target_labels[slot_idx] = label
+    if flat_remaining:
+        assign_singles_optimal(unassigned_leftovers, flat_remaining, current_labels, target_labels, adjacency)
         
     if target_labels == current_labels:
         return target_labels, [], adjacency

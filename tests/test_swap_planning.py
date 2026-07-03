@@ -422,7 +422,7 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertIsNone(planner._plan_swaps(current, target, dist, max_swaps=1))
 
-    def test_merge_triggers_allows_non_multiple_components(self):
+    def test_merge_triggers_skip_non_multiple_components(self):
         labels = ["a"] * 6
         adjacency = {
             index: {
@@ -435,8 +435,7 @@ class SwapPlanningTests(unittest.TestCase):
 
         triggers = planner.plan_merge_triggers(labels, adjacency, 5)
 
-        self.assertEqual(1, len(triggers))
-        self.assertEqual("a", triggers[0]["label"])
+        self.assertEqual([], triggers)
 
     def test_merge_triggers_use_all_five_slot_groups_from_multiple_components(self):
         labels = ["a"] * 10
@@ -454,7 +453,7 @@ class SwapPlanningTests(unittest.TestCase):
         self.assertEqual(2, len(triggers))
         self.assertEqual(["a", "a"], [trigger["label"] for trigger in triggers])
 
-    def test_merge_triggers_allows_non_multiple_components_fully_connected(self):
+    def test_merge_triggers_skip_when_no_exact_four_item_target_group(self):
         labels = ["a"] * 6
         adjacency = {
             index: set(range(len(labels))) - {index}
@@ -462,9 +461,7 @@ class SwapPlanningTests(unittest.TestCase):
         }
 
         with mock.patch("builtins.print"):
-            triggers = planner.plan_merge_triggers(labels, adjacency, 5)
-            self.assertEqual(1, len(triggers))
-            self.assertEqual("a", triggers[0]["label"])
+            self.assertEqual([], planner.plan_merge_triggers(labels, adjacency, 5))
 
     def test_duplicate_reciprocal_pairs_choose_lowest_total_distance(self):
         current = ["a", "a", "b", "b"]
@@ -695,8 +692,8 @@ class SwapPlanningTests(unittest.TestCase):
             "height": 300,
         })
 
-    def test_merge_triggers_plans_merges_for_groups_not_divisible_by_five(self):
-        # A component of size 7 should result in 1 merge trigger planned (leaving 2 items unmoved)
+    def test_merge_triggers_skips_groups_not_divisible_by_five(self):
+        # A component of size 7 should result in 0 merge triggers planned because it is not a multiple of 5
         target_labels = ["a"] * 7
         adjacency = {
             0: {1},
@@ -708,11 +705,30 @@ class SwapPlanningTests(unittest.TestCase):
             6: {5},
         }
         triggers = planner.plan_merge_triggers(target_labels, adjacency, max_group_size=5)
-        self.assertEqual(1, len(triggers))
-        trigger = triggers[0]
-        self.assertEqual("a", trigger["label"])
-        self.assertIn(trigger["from_slot"], range(5))
-        self.assertIn(trigger["to_slot"], range(5))
+        self.assertEqual([], triggers)
+
+    def test_single_item_isolation_from_blocks(self):
+        # Slot 5 is adjacent to Slot 4 (connected to the block)
+        # Slot 6 is isolated
+        # Leftovers are slots 5 and 6
+        # Singles to assign: "a" (single) and "b" (single)
+        # "a" should be placed on slot 6 (isolated) rather than slot 5 to avoid connection to the block of "a"s.
+        current_labels = ["a", "a", "a", "a", "a", "b", "a"]
+        target_labels = ["a§0", "a§0", "a§0", "a§0", "a§0", None, None]
+        adjacency = {
+            0: {1}, 1: {0, 2}, 2: {1, 3}, 3: {2, 4}, 4: {3, 5},
+            5: {4}, 6: set()
+        }
+        
+        flat_remaining = ["a§single5", "b§single6"]
+        unassigned_leftovers = [5, 6]
+        
+        planner.assign_singles_optimal(
+            unassigned_leftovers, flat_remaining, current_labels, target_labels, adjacency
+        )
+        
+        self.assertEqual("a§single5", target_labels[6])
+        self.assertEqual("b§single6", target_labels[5])
 
 
 if __name__ == "__main__":
