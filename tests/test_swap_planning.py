@@ -422,7 +422,7 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertIsNone(planner._plan_swaps(current, target, dist, max_swaps=1))
 
-    def test_merge_triggers_skip_non_multiple_components(self):
+    def test_merge_triggers_allows_non_multiple_components(self):
         labels = ["a"] * 6
         adjacency = {
             index: {
@@ -435,7 +435,8 @@ class SwapPlanningTests(unittest.TestCase):
 
         triggers = planner.plan_merge_triggers(labels, adjacency, 5)
 
-        self.assertEqual([], triggers)
+        self.assertEqual(1, len(triggers))
+        self.assertEqual("a", triggers[0]["label"])
 
     def test_merge_triggers_use_all_five_slot_groups_from_multiple_components(self):
         labels = ["a"] * 10
@@ -453,7 +454,7 @@ class SwapPlanningTests(unittest.TestCase):
         self.assertEqual(2, len(triggers))
         self.assertEqual(["a", "a"], [trigger["label"] for trigger in triggers])
 
-    def test_merge_triggers_skip_when_no_exact_four_item_target_group(self):
+    def test_merge_triggers_allows_non_multiple_components_fully_connected(self):
         labels = ["a"] * 6
         adjacency = {
             index: set(range(len(labels))) - {index}
@@ -461,7 +462,9 @@ class SwapPlanningTests(unittest.TestCase):
         }
 
         with mock.patch("builtins.print"):
-            self.assertEqual([], planner.plan_merge_triggers(labels, adjacency, 5))
+            triggers = planner.plan_merge_triggers(labels, adjacency, 5)
+            self.assertEqual(1, len(triggers))
+            self.assertEqual("a", triggers[0]["label"])
 
     def test_duplicate_reciprocal_pairs_choose_lowest_total_distance(self):
         current = ["a", "a", "b", "b"]
@@ -691,6 +694,25 @@ class SwapPlanningTests(unittest.TestCase):
             "width": 400,
             "height": 300,
         })
+
+    def test_merge_triggers_plans_merges_for_groups_not_divisible_by_five(self):
+        # A component of size 7 should result in 1 merge trigger planned (leaving 2 items unmoved)
+        target_labels = ["a"] * 7
+        adjacency = {
+            0: {1},
+            1: {0, 2},
+            2: {1, 3},
+            3: {2, 4},
+            4: {3, 5},
+            5: {4, 6},
+            6: {5},
+        }
+        triggers = planner.plan_merge_triggers(target_labels, adjacency, max_group_size=5)
+        self.assertEqual(1, len(triggers))
+        trigger = triggers[0]
+        self.assertEqual("a", trigger["label"])
+        self.assertIn(trigger["from_slot"], range(5))
+        self.assertIn(trigger["to_slot"], range(5))
 
 
 if __name__ == "__main__":

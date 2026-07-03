@@ -317,32 +317,43 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
             components.append(component)
 
         for component_slots in components:
-            if (
-                len(component_slots) < max_group_size
-                or len(component_slots) % max_group_size != 0
-            ):
+            if len(component_slots) < max_group_size:
                 continue
 
-            found = False
-            for offset in range(0, len(component_slots), max_group_size):
-                group_slots = sorted(component_slots)[offset : offset + max_group_size]
-                if len(group_slots) < max_group_size:
-                    continue
+            remaining = set(component_slots)
+            blocks = []
+            while len(remaining) >= max_group_size:
+                start = min(remaining)
+                block = {start}
+                queue = [start]
+                head = 0
+                while head < len(queue) and len(block) < max_group_size:
+                    curr = queue[head]
+                    head += 1
+                    neighbors = sorted(adjacency[curr] & remaining)
+                    for neighbor in neighbors:
+                        if neighbor not in block:
+                            block.add(neighbor)
+                            queue.append(neighbor)
+                            if len(block) == max_group_size:
+                                break
+                if len(block) == max_group_size:
+                    remaining.difference_update(block)
+                    blocks.append(list(block))
+                else:
+                    remaining.remove(start)
 
+            for block in blocks:
                 trigger = _plan_merge_trigger_for_group(
-                    label, group_slots, adjacency, max_group_size
+                    label, block, adjacency, max_group_size
                 )
-                if trigger is None:
-                    continue
-
-                triggers.append(trigger)
-                found = True
-
-            if not found:
-                print(
-                    f"[merge] WARNING: component of '{label}' (slots {component_slots}) "
-                    f"has no connected {max_group_size - 1}-item target group — skipping merge."
-                )
+                if trigger is not None:
+                    triggers.append(trigger)
+                else:
+                    print(
+                        f"[merge] WARNING: block {block} of '{label}' "
+                        f"has no connected {max_group_size - 1}-item target group — skipping merge."
+                    )
 
     return triggers
 
