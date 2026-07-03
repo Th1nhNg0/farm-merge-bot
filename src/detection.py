@@ -285,7 +285,6 @@ def determine_best_scale(screenshot_img, config):
         return 0.0
 
     # Check cache first
-    cache_path = Path(__file__).parent.parent / "debug" / "scale_cache.json"
     cached_scale = None
     
     # Try in-memory cache first
@@ -293,17 +292,6 @@ def determine_best_scale(screenshot_img, config):
     global _scale_cache
     if key_str in _scale_cache:
         cached_scale = _scale_cache[key_str]
-    else:
-        # Try persistent file cache
-        if cache_path.exists():
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    file_cache = json.load(f)
-                    if isinstance(file_cache, dict) and key_str in file_cache:
-                        cached_scale = float(file_cache[key_str])
-                        _scale_cache[key_str] = cached_scale
-            except Exception as e:
-                print(f"Warning: Error reading scale cache: {e}")
 
     # If we have a cached scale, verify it first!
     if cached_scale is not None:
@@ -353,20 +341,6 @@ def determine_best_scale(screenshot_img, config):
 
     # Save to caches
     _scale_cache[key_str] = best_scale
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        file_cache = {}
-        if cache_path.exists():
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    file_cache = json.load(f)
-            except Exception:
-                pass
-        file_cache[key_str] = best_scale
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(file_cache, f, indent=2)
-    except Exception as e:
-        print(f"Warning: Error writing scale cache: {e}")
 
     print(f"Dynamically detected board scale: {best_scale:.2f} (score: {best_val:.3f})")
     return best_scale, best_val

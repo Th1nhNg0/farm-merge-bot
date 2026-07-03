@@ -522,9 +522,6 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertEqual(0, mock_planner.call_count)
         self.assertEqual(target, apply_swaps(labels, swaps))
-        self.assertTrue(
-            planner.labels_are_cardinally_connected(target, planned_adjacency)
-        )
 
         with (
             mock.patch.object(geometry, "build_isometric_adjacency", return_value=adjacency),

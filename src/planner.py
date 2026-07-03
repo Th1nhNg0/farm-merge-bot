@@ -1,14 +1,11 @@
 import functools
-import random
 from collections import Counter
 import numpy as np
 
 from src.geometry import (
     estimate_isometric_step,
-    layout_points,
     pairwise_distance_matrix,
     build_isometric_adjacency,
-    connected_components,
 )
 
 
@@ -188,28 +185,6 @@ def plan_swaps(current_labels, target_labels, dist):
     return _plan_swaps(current_labels, target_labels, dist)
 
 
-def labels_are_cardinally_connected(target_labels, adjacency):
-    """Checks that every repeated label is connected through four directions."""
-    for label in sorted(set(target_labels)):
-        indices = {i for i, value in enumerate(target_labels) if value == label}
-        pending = [next(iter(indices))]
-        visited = set()
-
-        while pending:
-            index = pending.pop()
-
-            if index in visited:
-                continue
-
-            visited.add(index)
-            pending.extend((adjacency[index] & indices) - visited)
-
-        if visited != indices:
-            return False
-
-    return True
-
-
 
 
 
@@ -241,6 +216,31 @@ def split_oversized_labels(current_labels, max_group_size):
         sub_label_map[sub] = label
     return rewritten, sub_label_map
 
+
+def get_snake_key(slots):
+    """Returns a key function to snake-sort slots (col u, row v snaked)."""
+    step_x, step_y, _ = estimate_isometric_step(slots)
+    grid_coords = []
+    for slot in slots:
+        x, y = slot.grid_anchor
+        u = 0.5 * (x / step_x + y / step_y)
+        v = 0.5 * (y / step_y - x / step_x)
+        grid_coords.append((round(u), round(v)))
+    return lambda idx: (grid_coords[idx][0], grid_coords[idx][1] if grid_coords[idx][0] % 2 == 0 else -grid_coords[idx][1])
+
+
+def split_oversized_labels_along_snake(slots, config):
+    snake_key = get_snake_key(slots)
+    sorted_indices = sorted(range(len(slots)), key=snake_key)
+    sorted_labels = [slots[idx].label for idx in sorted_indices]
+    
+    split_sorted_labels, sub_label_map = split_oversized_labels(sorted_labels, config.max_group_size)
+    
+    split_labels = [None] * len(slots)
+    for sorted_idx, idx in enumerate(sorted_indices):
+        split_labels[idx] = split_sorted_labels[sorted_idx]
+        
+    return split_labels, sub_label_map
 
 
 def unsplit_labels(labels, sub_label_map):
@@ -375,7 +375,7 @@ def optimize_isometric_plan(slots, config, strict_sort=False):
         return target_labels, phase1_swaps, adjacency
 
     # ── Phase 1: align sub-groups of at most max_size ────────────────────────
-    split_labels, sub_label_map = split_oversized_labels(original_labels, max_size)
+    split_labels, sub_label_map = split_oversized_labels_along_snake(slots, config)
     for slot, new_label in zip(slots, split_labels):
         slot.label = new_label
 
@@ -473,10 +473,11 @@ def extract_groups_and_singles(sorted_labels):
 
 
 def optimize_groups_assignment(blocks, group_labels, current_labels, slots):
-    """Assigns group_labels to blocks to minimize mismatches (and break ties by centroid distance)."""
-    n = len(blocks)
-    if n == 0:
-        return []
+    """Assigns group_labels to a subset of blocks to minimize mismatches (and break ties by centroid distance)."""
+    M = len(blocks)
+    G = len(group_labels)
+    if M == 0 or G == 0:
+        return [None] * M
 
     # Precompute centroids of slots currently holding each label
     from collections import defaultdict
@@ -514,48 +515,52 @@ def optimize_groups_assignment(blocks, group_labels, current_labels, slots):
             row.append(cost)
         cost_matrix.append(row)
 
-    best_assignment = list(range(n))
-    best_cost = sum(cost_matrix[i][i] for i in range(n))
+    if M <= 10:
+        # DFS search to assign G groups to unique blocks out of M blocks
+        best_assignment = [None] * M
+        best_cost = float("inf")
 
-    # Branch-and-bound optimization (DFS) if n is small
-    if n <= 10:
-        assigned_groups = [False] * n
+        assigned_blocks = [False] * M
+        current_assignment = [None] * M
 
-        def search(block_idx, current_cost, path):
+        def search(group_idx, current_cost):
             nonlocal best_cost, best_assignment
             if current_cost >= best_cost:
                 return
 
-            if block_idx == n:
+            if group_idx == G:
                 best_cost = current_cost
-                best_assignment = list(path)
+                best_assignment = list(current_assignment)
                 return
 
-            for group_idx in range(n):
-                if not assigned_groups[group_idx]:
+            for block_idx in range(M):
+                if not assigned_blocks[block_idx]:
                     cost = cost_matrix[block_idx][group_idx]
-                    assigned_groups[group_idx] = True
-                    path.append(group_idx)
-                    search(block_idx + 1, current_cost + cost, path)
-                    path.pop()
-                    assigned_groups[group_idx] = False
+                    assigned_blocks[block_idx] = True
+                    current_assignment[block_idx] = group_idx
+                    search(group_idx + 1, current_cost + cost)
+                    current_assignment[block_idx] = None
+                    assigned_blocks[block_idx] = False
 
-        search(0, 0, [])
+        search(0, 0)
+        return best_assignment
     else:
-        # Greedy fallback if n > 10 (extremely rare / physically impossible on standard board sizes)
-        assigned_groups = [False] * n
-        best_assignment = []
-        for block_idx in range(n):
-            best_g = -1
-            min_c = 999999.0
-            for group_idx in range(n):
-                if not assigned_groups[group_idx]:
-                    c = cost_matrix[block_idx][group_idx]
-                    if c < min_c:
-                        min_c = c
-                        best_g = group_idx
-            assigned_groups[best_g] = True
-    return best_assignment
+        # Greedy fallback if M > 10
+        assigned_blocks = [False] * M
+        best_assignment = [None] * M
+        for group_idx in range(G):
+            best_block_idx = -1
+            min_cost = float("inf")
+            for block_idx in range(M):
+                if not assigned_blocks[block_idx]:
+                    cost = cost_matrix[block_idx][group_idx]
+                    if cost < min_cost:
+                        min_cost = cost
+                        best_block_idx = block_idx
+            if best_block_idx != -1:
+                assigned_blocks[best_block_idx] = True
+                best_assignment[best_block_idx] = group_idx
+        return best_assignment
 
 
 def connected_components_subset(nodes, adjacency):
@@ -657,8 +662,8 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
     adjacency = build_isometric_adjacency(slots, config)
     
     if strict_sort:
-        # Simple linear sort of all items on the map
-        sorted_slots_indices = sorted(range(len(slots)), key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
+        snake_key = get_snake_key(slots)
+        sorted_slots_indices = sorted(range(len(slots)), key=snake_key)
         sorted_labels = sorted(current_labels, key=custom_item_sort_key)
         
         target_labels = [None] * len(slots)
@@ -715,13 +720,8 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
         else:
             remaining_groups.append(g)
             
-    # Handle size mismatches between blocks and remaining_groups
-    if len(all_blocks) > len(remaining_groups):
-        extra_blocks = all_blocks[len(remaining_groups):]
-        all_blocks = all_blocks[:len(remaining_groups)]
-        for block in extra_blocks:
-            all_leftovers.extend(block)
-    elif len(all_blocks) < len(remaining_groups):
+    # Handle size mismatches: if we have more groups than blocks, some groups must be split into singles
+    if len(all_blocks) < len(remaining_groups):
         extra_groups = remaining_groups[len(all_blocks):]
         remaining_groups = remaining_groups[:len(all_blocks)]
         for group in extra_groups:
@@ -735,14 +735,17 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
         for slot_idx in block:
             target_labels[slot_idx] = label
             
-    # Optimize groups assignment to blocks
+    # Optimize groups assignment to a subset of blocks
     group_labels = [g[0] for g in remaining_groups]
-    best_group_indices = optimize_groups_assignment(all_blocks, group_labels, current_labels, slots)
+    best_group_assignments = optimize_groups_assignment(all_blocks, group_labels, current_labels, slots)
     for b_idx, block in enumerate(all_blocks):
-        group_idx = best_group_indices[b_idx]
-        group = remaining_groups[group_idx]
-        for slot_idx, label in zip(block, group):
-            target_labels[slot_idx] = label
+        group_idx = best_group_assignments[b_idx]
+        if group_idx is not None:
+            group = remaining_groups[group_idx]
+            for slot_idx, label in zip(block, group):
+                target_labels[slot_idx] = label
+        else:
+            all_leftovers.extend(block)
             
     # Optimize singles assignment to leftovers (preserving existing items to minimize swaps)
     remaining_singles = Counter(singles)

@@ -137,20 +137,3 @@ def build_isometric_adjacency(slots, config):
     return adjacency
 
 
-def connected_components(adjacency):
-    """Returns connected slot-index sets, largest first."""
-    remaining = set(adjacency)
-    components = []
-
-    while remaining:
-        component = set()
-        pending = {remaining.pop()}
-        while pending:
-            curr = pending.pop()
-            component.add(curr)
-            pending.update(adjacency[curr] & remaining)
-            remaining.difference_update(pending)
-        components.append(component)
-
-    return sorted(components, key=lambda component: (-len(component), min(component)))
-
