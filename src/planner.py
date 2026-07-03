@@ -120,7 +120,7 @@ def _lowest_cost_cycle_slots(cycle_edges, edge_slots, dist):
     return best_cost, best_path
 
 
-def _plan_swaps(current_labels, target_labels, dist, max_swaps=None):
+def _plan_swaps(current_labels, target_labels, dist):
     target = list(target_labels)
     current = list(current_labels)
     swaps = []
@@ -159,8 +159,6 @@ def _plan_swaps(current_labels, target_labels, dist, max_swaps=None):
                 current[from_slot],
                 current[to_slot],
             )
-            if max_swaps is not None and len(swaps) > max_swaps:
-                return None
 
     return swaps
 
@@ -299,22 +297,7 @@ def plan_merge_triggers(target_labels, adjacency, max_group_size):
     triggers = []
 
     for label, slot_indices in label_slots.items():
-        # Find connected components of this label
-        components = []
-        unvisited = set(slot_indices)
-        while unvisited:
-            start = next(iter(unvisited))
-            component = []
-            pending = [start]
-            unvisited.remove(start)
-            while pending:
-                curr = pending.pop()
-                component.append(curr)
-                for neighbor in adjacency[curr]:
-                    if neighbor in unvisited:
-                        unvisited.remove(neighbor)
-                        pending.append(neighbor)
-            components.append(component)
+        components = connected_components_subset(slot_indices, adjacency)
 
         for component_slots in components:
             if (
@@ -599,27 +582,11 @@ def extract_pre_grouped_blocks(slots, current_labels, adjacency, block_size):
             
         remaining_indices = set(indices)
         while len(remaining_indices) >= block_size:
-            # Find connected components of remaining_indices restricted to this label
-            visited = set()
-            sub_components = []
-            for node in remaining_indices:
-                if node not in visited:
-                    comp = set()
-                    queue = [node]
-                    visited.add(node)
-                    head = 0
-                    while head < len(queue):
-                        curr = queue[head]
-                        head += 1
-                        comp.add(curr)
-                        for neighbor in adjacency[curr]:
-                            if neighbor in remaining_indices and neighbor not in visited:
-                                visited.add(neighbor)
-                                queue.append(neighbor)
-                    sub_components.append(comp)
+            sub_components = connected_components_subset(remaining_indices, adjacency)
             
             found_any = False
             for comp in sub_components:
+                comp = set(comp)
                 if len(comp) >= block_size:
                     # Extract a connected block of block_size from this component
                     # Start BFS from the node in comp with minimum coordinates

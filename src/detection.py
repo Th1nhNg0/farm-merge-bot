@@ -2,8 +2,6 @@ import csv
 from collections import Counter
 from dataclasses import dataclass
 import time
-import json
-from pathlib import Path
 import cv2
 import numpy as np
 import mss
@@ -316,17 +314,7 @@ def determine_best_scale(screenshot_img, config):
             best_coarse_scale = scale
 
     # Fine search around best_coarse_scale
-    fine_scales = [
-        best_coarse_scale - 0.08,
-        best_coarse_scale - 0.06,
-        best_coarse_scale - 0.04,
-        best_coarse_scale - 0.02,
-        best_coarse_scale,
-        best_coarse_scale + 0.02,
-        best_coarse_scale + 0.04,
-        best_coarse_scale + 0.06,
-        best_coarse_scale + 0.08,
-    ]
+    fine_scales = [best_coarse_scale + i * 0.02 for i in range(-4, 5)]
     # Filter to valid ranges
     fine_scales = [s for s in fine_scales if 0.4 <= s <= 1.6]
 

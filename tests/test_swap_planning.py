@@ -415,13 +415,6 @@ class SwapPlanningTests(unittest.TestCase):
 
         self.assertEqual(list(target), apply_swaps(current, swaps))
 
-    def test_bounded_swap_planning_aborts_after_limit(self):
-        current = ["a", "b", "c"]
-        target = ["b", "c", "a"]
-        dist = np.ones((3, 3))
-
-        self.assertIsNone(planner._plan_swaps(current, target, dist, max_swaps=1))
-
     def test_merge_triggers_skip_non_multiple_components(self):
         labels = ["a"] * 6
         adjacency = {
