@@ -27,10 +27,10 @@ class Config:
     levels: list[int] = field(default_factory=lambda: [1, 2, 3])
     item_levels: dict[str, list[int]] = field(
         default_factory=lambda: {
-            "go": [1, 2, 3, 4, 5],
-            "da": [1, 2, 3, 4, 5],
+            "go": [1, 2, 3, 4, 5, 6, 7],
+            "da": [1, 2, 3, 4, 5, 6],
             "congcu": [1, 2, 3, 4, 5],
-            "xu": [1, 2, 3, 4, 5, 6],
+            "xu": [1, 2, 3, 4, 5, 6, 7],
         }
     )
     window_title: str | None = None
