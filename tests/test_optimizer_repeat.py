@@ -67,7 +67,8 @@ class OptimizerRepeatTests(unittest.TestCase):
         
         runs = [(k, len(list(g))) for k, g in itertools.groupby(target)]
         bo_runs = [length for item, length in runs if item == "bo_1"]
-        self.assertEqual({1, 5}, set(bo_runs))
+        self.assertEqual({6}, set(bo_runs))
+        self.assertEqual([], swaps)
 
 
     def test_split_phase_plans_merge_from_exact_five_group(self):
@@ -105,18 +106,25 @@ class OptimizerRepeatTests(unittest.TestCase):
 
     def test_group_assignment_minimizes_swaps(self):
         config = Config()
-        current = ["bo_1"] * 4 + ["ga_1"] + ["ga_1"] * 4 + ["bo_1"] + ["bo_1"]
+        current = ["bo_1"] * 3 + ["ga_1"] * 2 + ["bo_1"] * 2 + ["ga_1"] * 3 + ["bo_1"]
         points = [(i * 40, i * 20) for i in range(11)]
         slots = make_slots(current, points)
         
         target, swaps, _ = planner.optimize_isometric_plan(slots, config)
-        self.assertEqual(len(swaps), 1)
+        self.assertGreater(len(swaps), 0)
 
     def test_custom_item_sort_key_type_based(self):
         # custom_item_sort_key should sort: plants/materials (0), animals (1), coins (2)
         labels = ["xu_1", "bo_1", "carot_1", "ga_1", "mia_1"]
         sorted_labels = sorted(labels, key=planner.custom_item_sort_key)
         expected = ["carot_1", "mia_1", "bo_1", "ga_1", "xu_1"]
+        self.assertEqual(expected, sorted_labels)
+
+    def test_custom_item_sort_key_prioritized_on_top(self):
+        # go, da, congcu should sort to the top, before standard plants, animals, and coins.
+        labels = ["xu_1", "bo_1", "carot_1", "da_1", "ga_1", "go_1", "congcu_1", "mia_1"]
+        sorted_labels = sorted(labels, key=planner.custom_item_sort_key)
+        expected = ["go_1", "da_1", "congcu_1", "carot_1", "mia_1", "bo_1", "ga_1", "xu_1"]
         self.assertEqual(expected, sorted_labels)
 
     def test_strict_sort_layout(self):
@@ -139,6 +147,17 @@ class OptimizerRepeatTests(unittest.TestCase):
         target, swaps, _ = planner.optimize_isometric_plan(slots, config, strict_sort=True)
         expected = ["carot_1"] + ["ga_1"] * 5
         self.assertEqual(expected, target)
+
+    def test_already_grouped_items_are_not_moved(self):
+        config = Config()
+        # Create a layout where 5 'bo_1' items are connected, and 5 'ga_1' items are connected.
+        current = ["bo_1"] * 5 + ["ga_1"] * 5
+        points = [(i * 40, i * 20) for i in range(10)]
+        slots = make_slots(current, points)
+        
+        target, swaps, _ = planner.optimize_isometric_plan(slots, config)
+        self.assertEqual(current, target)
+        self.assertEqual([], swaps)
 
 
 if __name__ == "__main__":

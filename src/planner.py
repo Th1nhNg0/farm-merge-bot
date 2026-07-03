@@ -413,8 +413,11 @@ def custom_item_sort_key(label):
         name_part = base_with_level
         level = 0
         
+    PRIORITIZED = {"go": -3, "da": -2, "congcu": -1}
     ANIMALS = {"bo", "ga", "heo", "de", "cuu"}
-    if name_part.startswith("xu"):
+    if name_part in PRIORITIZED:
+        type_flag = PRIORITIZED[name_part]
+    elif name_part.startswith("xu"):
         type_flag = 2  # coin at bottom
     elif name_part in ANIMALS:
         type_flag = 1  # animal in middle
@@ -552,9 +555,95 @@ def optimize_groups_assignment(blocks, group_labels, current_labels, slots):
                         min_c = c
                         best_g = group_idx
             assigned_groups[best_g] = True
-            best_assignment.append(best_g)
-
     return best_assignment
+
+
+def connected_components_subset(nodes, adjacency):
+    remaining = set(nodes)
+    components = []
+    while remaining:
+        start = next(iter(remaining))
+        comp = set()
+        queue = [start]
+        visited = {start}
+        head = 0
+        while head < len(queue):
+            curr = queue[head]
+            head += 1
+            comp.add(curr)
+            for neighbor in adjacency[curr]:
+                if neighbor in remaining and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        remaining.difference_update(comp)
+        components.append(list(comp))
+    return components
+
+
+def extract_pre_grouped_blocks(slots, current_labels, adjacency, block_size):
+    from collections import defaultdict
+    label_slots = defaultdict(list)
+    for idx, label in enumerate(current_labels):
+        label_slots[label].append(idx)
+        
+    pre_grouped_blocks = []
+    
+    for label, indices in label_slots.items():
+        if len(indices) < block_size:
+            continue
+            
+        remaining_indices = set(indices)
+        while len(remaining_indices) >= block_size:
+            # Find connected components of remaining_indices restricted to this label
+            visited = set()
+            sub_components = []
+            for node in remaining_indices:
+                if node not in visited:
+                    comp = set()
+                    queue = [node]
+                    visited.add(node)
+                    head = 0
+                    while head < len(queue):
+                        curr = queue[head]
+                        head += 1
+                        comp.add(curr)
+                        for neighbor in adjacency[curr]:
+                            if neighbor in remaining_indices and neighbor not in visited:
+                                visited.add(neighbor)
+                                queue.append(neighbor)
+                    sub_components.append(comp)
+            
+            found_any = False
+            for comp in sub_components:
+                if len(comp) >= block_size:
+                    # Extract a connected block of block_size from this component
+                    # Start BFS from the node in comp with minimum coordinates
+                    start = min(comp, key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
+                    block = {start}
+                    queue = [start]
+                    head = 0
+                    while head < len(queue) and len(block) < block_size:
+                        curr = queue[head]
+                        head += 1
+                        neighbors = sorted(adjacency[curr] & comp, key=lambda n: (slots[n].grid_anchor[1], slots[n].grid_anchor[0]))
+                        for neighbor in neighbors:
+                            if neighbor not in block:
+                                block.add(neighbor)
+                                queue.append(neighbor)
+                                if len(block) == block_size:
+                                    break
+                                    
+                    if len(block) == block_size:
+                        pre_grouped_blocks.append((list(block), label))
+                        remaining_indices.difference_update(block)
+                        found_any = True
+                        break # break sub_components to re-find components of remaining_indices
+            
+            if not found_any:
+                break
+                
+    return pre_grouped_blocks
+
 
 
 def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
@@ -583,16 +672,31 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
         swaps = plan_swaps(unsplit_current, [label.partition("§")[0] for label in target_labels], dist)
         return target_labels, swaps, adjacency
 
-    # Partition slots into connected components (islands)
-    components = [list(c) for c in connected_components(adjacency)]
+    # ── Pre-grouped block extraction to preserve already-compact groups ──────
+    max_size = getattr(config, "max_group_size", 5)
+    
+    pre_grouped_blocks = []
+    pre_grouped_slots = set()
+    pre_grouped_labels_count = Counter()
+    
+    if max_size > 0:
+        pre_grouped = extract_pre_grouped_blocks(slots, current_labels, adjacency, max_size)
+        for block, label in pre_grouped:
+            pre_grouped_blocks.append((block, label))
+            pre_grouped_slots.update(block)
+            pre_grouped_labels_count[label] += 1
+
+    # Find remaining slots and their connected components
+    remaining_slots_indices = [i for i in range(len(slots)) if i not in pre_grouped_slots]
+    components = connected_components_subset(remaining_slots_indices, adjacency)
     # Sort components top-to-bottom by average Y-coordinate
     components.sort(key=lambda comp: sum(slots[i].grid_anchor[1] for i in comp) / len(comp))
     
-    # Partition slots of each component into blocks of size 5 and leftovers
+    # Partition remaining slots of each component into blocks of size max_size and leftovers
     all_blocks = []
     all_leftovers = []
     for comp in components:
-        comp_blocks, comp_leftovers = partition_into_connected_blocks(comp, adjacency, slots)
+        comp_blocks, comp_leftovers = partition_into_connected_blocks(comp, adjacency, slots, block_size=max_size)
         all_blocks.extend(comp_blocks)
         all_leftovers.extend(comp_leftovers)
         
@@ -601,15 +705,25 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
     
     groups, singles = extract_groups_and_singles(sorted_labels)
     
-    # Handle size mismatches between blocks and groups
-    if len(all_blocks) > len(groups):
-        extra_blocks = all_blocks[len(groups):]
-        all_blocks = all_blocks[:len(groups)]
+    # Exclude pre-grouped groups from remaining groups to be assigned
+    remaining_groups = []
+    temp_pre_grouped_counts = Counter(pre_grouped_labels_count)
+    for g in groups:
+        label = g[0]
+        if temp_pre_grouped_counts[label] > 0:
+            temp_pre_grouped_counts[label] -= 1
+        else:
+            remaining_groups.append(g)
+            
+    # Handle size mismatches between blocks and remaining_groups
+    if len(all_blocks) > len(remaining_groups):
+        extra_blocks = all_blocks[len(remaining_groups):]
+        all_blocks = all_blocks[:len(remaining_groups)]
         for block in extra_blocks:
             all_leftovers.extend(block)
-    elif len(all_blocks) < len(groups):
-        extra_groups = groups[len(all_blocks):]
-        groups = groups[:len(all_blocks)]
+    elif len(all_blocks) < len(remaining_groups):
+        extra_groups = remaining_groups[len(all_blocks):]
+        remaining_groups = remaining_groups[:len(all_blocks)]
         for group in extra_groups:
             singles.extend(group)
             
@@ -620,12 +734,17 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
     # Map groups to blocks and singles to leftovers
     target_labels = [None] * len(slots)
     
+    # Assign pre-grouped blocks
+    for block, label in pre_grouped_blocks:
+        for slot_idx in block:
+            target_labels[slot_idx] = label
+            
     # Optimize groups assignment to blocks
-    group_labels = [g[0] for g in groups]
+    group_labels = [g[0] for g in remaining_groups]
     best_group_indices = optimize_groups_assignment(all_blocks, group_labels, current_labels, slots)
     for b_idx, block in enumerate(all_blocks):
         group_idx = best_group_indices[b_idx]
-        group = groups[group_idx]
+        group = remaining_groups[group_idx]
         for slot_idx, label in zip(block, group):
             target_labels[slot_idx] = label
             
