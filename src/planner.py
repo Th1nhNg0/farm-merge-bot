@@ -727,10 +727,6 @@ def _optimize_isometric_plan_inner(slots, config, strict_sort=False):
         for group in extra_groups:
             singles.extend(group)
             
-    # Sort blocks and leftovers top-to-bottom
-    all_blocks.sort(key=lambda b: sum(slots[i].grid_anchor[1] for i in b) / len(b))
-    all_leftovers.sort(key=lambda idx: (slots[idx].grid_anchor[1], slots[idx].grid_anchor[0]))
-    
     # Map groups to blocks and singles to leftovers
     target_labels = [None] * len(slots)
     
