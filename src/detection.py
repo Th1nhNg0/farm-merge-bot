@@ -243,6 +243,8 @@ def determine_best_scale(screenshot_img, config):
         paths = template_paths(item, 1, config)
         if paths:
             representative_paths.append(paths[0])
+            if len(representative_paths) >= 3:
+                break
 
     if not representative_paths:
         return 1.0, 0.0
