@@ -127,6 +127,14 @@ class OptimizerRepeatTests(unittest.TestCase):
         expected = ["go_1", "da_1", "congcu_1", "carot_1", "mia_1", "bo_1", "ga_1", "xu_1"]
         self.assertEqual(expected, sorted_labels)
 
+    def test_custom_item_sort_key_level_sorting(self):
+        # For non-xu items, larger level should sort first (e.g. carot_2 before carot_1).
+        # For xu items, lower level should sort first (e.g. xu_1 before xu_2).
+        labels = ["carot_1", "carot_3", "carot_2", "xu_2", "xu_1"]
+        sorted_labels = sorted(labels, key=planner.custom_item_sort_key)
+        expected = ["carot_3", "carot_2", "carot_1", "xu_1", "xu_2"]
+        self.assertEqual(expected, sorted_labels)
+
     def test_strict_sort_layout(self):
         config = Config()
         current = ["xu_1", "bo_1", "carot_1"]
