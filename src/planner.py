@@ -408,7 +408,9 @@ def custom_item_sort_key(label):
         type_flag = 0  # plant/materials at top
         
     suffix = label.partition("§")[2]
-    return (type_flag, name_part, level, suffix)
+    # For non-xu items, higher levels should sort first. For xu items, lower levels sort first.
+    level_key = -level if not name_part.startswith("xu") else level
+    return (type_flag, name_part, level_key, suffix)
 
 
 def partition_into_connected_blocks(comp_slots, adjacency, slots, block_size=5):
