@@ -328,6 +328,27 @@ class SwapPlanningTests(unittest.TestCase):
             self.assertTrue((debug_dir / "detections_after_phase1.png").is_file())
             self.assertTrue((debug_dir / "scores_after_phase1.csv").is_file())
 
+    def test_run_cycle_reuses_detection_when_no_swaps_are_needed(self):
+        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
+        config = Config()
+        slots = self.make_isometric_slots(["a"], [(20, 20)])
+
+        with (
+            mock.patch.object(
+                main, "detect_slots", return_value=(screenshot, (0, 0), slots)
+            ) as detect_slots,
+            mock.patch.object(
+                main, "optimize_isometric_plan", return_value=(["a"], [], {0: set()})
+            ),
+            mock.patch.object(main, "focus_game_window"),
+            mock.patch.object(main, "save_merge_debug_image", return_value="merge.png"),
+            mock.patch.object(main, "play_sound"),
+            mock.patch("builtins.print"),
+        ):
+            self.assertTrue(main.run_cycle(config))
+
+        detect_slots.assert_called_once_with(config, suffix="")
+
     def test_optimizer_never_swaps_identical_base_labels(self):
         config = Config()
         current = ["bo_1", "ga_1", "bo_1", "ga_1"]

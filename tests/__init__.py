@@ -1,0 +1,1 @@
+"""Auto-farm tests."""

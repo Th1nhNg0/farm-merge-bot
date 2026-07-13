@@ -121,9 +121,12 @@ def run_cycle(config, suffix=""):
             execute_swaps(slots, phase1_swaps, config)
             time.sleep(config.after_swap_delay)
 
-        # ── Phase 2: fresh detect → plan merge triggers → execute ─────────────────
-        screenshot_img, offset, slots = detect_slots(config, save_debug=True, suffix=f"_after_phase1{suffix}")
+            # Swaps changed the board, so merge planning needs fresh positions.
+            screenshot_img, offset, slots = detect_slots(
+                config, save_debug=True, suffix=f"_after_phase1{suffix}"
+            )
 
+        # ── Phase 2: plan merge triggers → execute ───────────────────────────────
         if not slots:
             print("Phase 2: no items detected after Phase 1.")
             play_sound("error")
