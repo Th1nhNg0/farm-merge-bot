@@ -12,9 +12,9 @@ matching. It retains the crop offset, so mouse actions still use correct
 full-screen coordinates. This avoids matching Discord, terminals, and other
 windows around the game.
 
-Every run writes the cropped screenshot to `debug/board.png`, its annotated
-detections to `debug/detections.png`, and matching details to
-`debug/scores.csv` before executing swaps.
+Focus Discord, then press X to farm once, C to strictly sort, or Z to click the
+box button 40 times. Press Ctrl+C to exit; moving the mouse to a screen corner
+stops the current action.
 
 ## Detection
 

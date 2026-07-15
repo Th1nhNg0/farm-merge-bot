@@ -179,25 +179,14 @@ class SwapPlanningTests(unittest.TestCase):
             config.levels = [1]
             config.item_levels = {}
 
-            diagnostics = {}
-            detections = detection.detect_all_items(
-                screenshot,
-                config=config,
-                diagnostics=diagnostics,
-            )
+            detections = detection.detect_all_items(screenshot, config=config)
 
         best = max(detections, key=lambda d: d.score)
         self.assertEqual("test_1", best.label)
         self.assertEqual((53, 41), best.center)
-        self.assertGreater(diagnostics["test_1"]["best_score"], 0.75)
-        self.assertEqual(1, diagnostics["test_1"]["detected_count"])
-        self.assertEqual(
-            (26, 22),
-            (
-                diagnostics["test_1"]["best_width"],
-                diagnostics["test_1"]["best_height"],
-            ),
-        )
+        self.assertGreater(best.score, 0.75)
+        self.assertEqual(1, len(detections))
+        self.assertEqual((26, 22), (best.w, best.h))
 
     def test_detection_screen_click_position_is_rectangle_center(self):
         d = detection.Detection("bo_1", 10, 20, 30, 40, 0.9)
@@ -223,25 +212,14 @@ class SwapPlanningTests(unittest.TestCase):
             config.levels = [1]
             config.item_levels = {}
 
-            diagnostics = {}
-            detections = detection.detect_all_items(
-                screenshot,
-                config=config,
-                diagnostics=diagnostics,
-            )
+            detections = detection.detect_all_items(screenshot, config=config)
 
         best = max(detections, key=lambda d: d.score)
         self.assertEqual("test_1", best.label)
         self.assertEqual((52, 42), best.center)
-        self.assertGreater(diagnostics["test_1"]["best_score"], 0.70)
-        self.assertEqual(1, diagnostics["test_1"]["detected_count"])
-        self.assertEqual(
-            (24, 24),
-            (
-                diagnostics["test_1"]["best_width"],
-                diagnostics["test_1"]["best_height"],
-            ),
-        )
+        self.assertGreater(best.score, 0.70)
+        self.assertEqual(1, len(detections))
+        self.assertEqual((24, 24), (best.w, best.h))
 
     def test_find_game_region_ignores_surrounding_desktop_panels(self):
         config = Config()
@@ -282,72 +260,54 @@ class SwapPlanningTests(unittest.TestCase):
         best = max(detections, key=lambda d: d.score)
         self.assertEqual((251, 109), best.center)
 
-    def test_main_always_writes_debug_output(self):
-        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            debug_dir = Path(temp_dir)
-            config = Config()
-            config.detection_debug_dir = debug_dir
-
-            with (
-                mock.patch.object(
-                    main,
-                    "capture_game_bgr",
-                    return_value=(screenshot, (0, 0)),
-                ),
-                mock.patch.object(main, "detect_all_items", return_value=[]),
-                mock.patch("main.Config", return_value=config),
-                mock.patch("builtins.print"),
-            ):
-                main.main()
-
-            # Find the run directory created inside debug_dir
-            run_dirs = list(debug_dir.glob("run_*"))
-            self.assertEqual(1, len(run_dirs))
-            actual_debug_dir = run_dirs[0]
-            self.assertTrue((actual_debug_dir / "board.png").is_file())
-            self.assertTrue((actual_debug_dir / "detections.png").is_file())
-            self.assertTrue((actual_debug_dir / "scores.csv").is_file())
-
-    def test_detect_slots_saves_with_custom_suffix(self):
-        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
-        config = Config()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            debug_dir = Path(temp_dir)
-            config.detection_debug_dir = debug_dir
-
-            with (
-                mock.patch.object(main, "capture_game_bgr", return_value=(screenshot, (0, 0))),
-                mock.patch.object(main, "detect_all_items", return_value=[]),
-            ):
-                main.detect_slots(config, save_debug=True, suffix="_after_phase1")
-
-            self.assertTrue((debug_dir / "board_after_phase1.png").is_file())
-            self.assertTrue((debug_dir / "detections_after_phase1.png").is_file())
-            self.assertTrue((debug_dir / "scores_after_phase1.csv").is_file())
-
     def test_run_cycle_reuses_detection_when_no_swaps_are_needed(self):
-        screenshot = np.zeros((80, 100, 3), dtype=np.uint8)
         config = Config()
         slots = self.make_isometric_slots(["a"], [(20, 20)])
 
         with (
             mock.patch.object(
-                main, "detect_slots", return_value=(screenshot, (0, 0), slots)
+                main, "detect_slots", return_value=slots
             ) as detect_slots,
             mock.patch.object(
                 main, "optimize_isometric_plan", return_value=(["a"], [], {0: set()})
             ),
             mock.patch.object(main, "focus_game_window"),
-            mock.patch.object(main, "save_merge_debug_image", return_value="merge.png"),
-            mock.patch.object(main, "play_sound"),
             mock.patch("builtins.print"),
         ):
             self.assertTrue(main.run_cycle(config))
 
-        detect_slots.assert_called_once_with(config, suffix="")
+        detect_slots.assert_called_once_with(config)
+
+    def test_run_cycle_redetects_after_swaps(self):
+        config = Config()
+        initial_slots = self.make_isometric_slots(["a", "b"], [(20, 20), (40, 30)])
+        refreshed_slots = self.make_isometric_slots(["a", "b"], [(20, 20), (40, 30)])
+        swaps = [
+            {
+                "from_slot": 0,
+                "to_slot": 1,
+                "moving_label": "a",
+                "replaced_label": "b",
+            }
+        ]
+
+        with (
+            mock.patch.object(
+                main, "detect_slots", side_effect=[initial_slots, refreshed_slots]
+            ) as detect_slots,
+            mock.patch.object(
+                main, "optimize_isometric_plan", return_value=(["b", "a"], swaps, {})
+            ),
+            mock.patch.object(main, "focus_game_window"),
+            mock.patch.object(main, "execute_swaps"),
+            mock.patch.object(main, "build_isometric_adjacency", return_value={}),
+            mock.patch.object(main, "plan_merge_triggers", return_value=[]),
+            mock.patch.object(main.time, "sleep"),
+            mock.patch("builtins.print"),
+        ):
+            self.assertTrue(main.run_cycle(config))
+
+        self.assertEqual([mock.call(config), mock.call(config)], detect_slots.call_args_list)
 
     def test_optimizer_never_swaps_identical_base_labels(self):
         config = Config()
@@ -377,35 +337,33 @@ class SwapPlanningTests(unittest.TestCase):
 
         with (
             mock.patch.object(main, "capture_game_bgr", return_value=(screenshot, (0, 0))),
-            mock.patch.object(main, "detect_all_items", return_value=slots + [noise]),
+            mock.patch.object(
+                main, "detect_all_items", return_value=slots + [noise]
+            ) as detect_all_items,
             mock.patch("builtins.print"),
         ):
-            _, _, detected_slots = main.detect_slots(config, save_debug=False)
+            detected_slots = main.detect_slots(config)
 
+        detect_all_items.assert_called_once_with(screenshot, config, offset=(0, 0))
         self.assertEqual(5, len(detected_slots))
         self.assertIn(noise, detected_slots)
 
-    def test_detection_debug_marks_excluded_slots(self):
-        screenshot = np.zeros((40, 60, 3), dtype=np.uint8)
+    def test_hotkeys_dispatch_their_actions(self):
+        config = Config()
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            debug_dir = Path(temp_dir)
-            config = Config()
-            config.detection_debug_dir = debug_dir
-            kept = detection.Detection("a_1", 5, 5, 10, 10, 0.9)
-            excluded = detection.Detection("b_1", 30, 5, 10, 10, 0.8)
+        for key, name, action in main.HOTKEY_ACTIONS:
+            with (
+                self.subTest(key=key),
+                mock.patch.object(
+                    main, "is_key_pressed", side_effect=lambda value: value == key
+                ),
+                mock.patch.object(main, "run_action") as run_action,
+                mock.patch.object(main.time, "sleep"),
+                mock.patch("builtins.print"),
+            ):
+                self.assertTrue(main.run_hotkey_action(config))
 
-            detection.save_detection_debug_images(
-                screenshot,
-                [kept],
-                config=config,
-                excluded_detections=[excluded],
-            )
-
-            annotated = cv2.imread(str(debug_dir / "detections.png"))
-
-        self.assertEqual([0, 255, 0], annotated[5, 5].tolist())
-        self.assertEqual([0, 165, 255], annotated[5, 30].tolist())
+            run_action.assert_called_once_with(name, action, config)
 
     def test_three_cycle_uses_two_swaps(self):
         current = ["a", "b", "c"]

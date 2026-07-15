@@ -1,5 +1,3 @@
-import csv
-from collections import Counter
 from dataclasses import dataclass
 import time
 import cv2
@@ -16,12 +14,10 @@ def focus_game_window(config):
     """Finds the configured or Discord window, restores and activates it."""
     title = config.window_title
     if not title:
-        # ponytail: auto-detect Discord by default if no window title is configured
         titles = [t for t in gw.getAllTitles() if "discord" in t.lower()]
         if titles:
             title = titles[0]
             config.window_title = title
-            print(f"Auto-detected Discord window: '{title}'")
         else:
             print("Warning: Could not auto-detect Discord window.")
 
@@ -36,7 +32,7 @@ def focus_game_window(config):
                     win.activate()
                 except Exception:
                     pass
-                time.sleep(0.5)  # ponytail: sleep to allow window activation and rendering
+                time.sleep(0.5)
                 return win
     return None
 
@@ -67,7 +63,6 @@ class PreparedTemplate:
     """Template variant cached in all expensive preprocessing forms."""
 
     label: str
-    template_name: str
     w: int
     h: int
     features: tuple
@@ -200,7 +195,6 @@ def load_prepared_templates(config):
                 prepared.append(
                     PreparedTemplate(
                         label=label,
-                        template_name=template_path.name,
                         w=int(tw),
                         h=int(th),
                         features=matching_features(scaled_template),
@@ -212,26 +206,13 @@ def load_prepared_templates(config):
     return result
 
 
-def _init_diagnostics(threshold):
-    return {
-        "best_score": float("-inf"),
-        "best_template": "",
-        "best_width": 0,
-        "best_height": 0,
-        "best_x": 0,
-        "best_y": 0,
-        "threshold": threshold,
-        "detected_count": 0,
-    }
-
-
 def _match_template_worker(template, screenshot_features, screenshot_h, screenshot_w, config):
     if template.h > screenshot_h or template.w > screenshot_w:
         return None
     label = template.label
     threshold = config.template_thresholds.get(label, config.threshold)
     result = combined_match_score(screenshot_features, template.features, config)
-    return label, threshold, result, template.w, template.h, template.template_name
+    return label, threshold, result, template.w, template.h
 
 
 def determine_best_scale(screenshot_img, config):
@@ -284,23 +265,13 @@ def determine_best_scale(screenshot_img, config):
             return sum(top_n) / len(top_n)
         return 0.0
 
-    # Check cache first
-    cached_scale = None
-    
-    # Try in-memory cache first
     key_str = f"{screen_h}x{screen_w}"
-    global _scale_cache
-    if key_str in _scale_cache:
-        cached_scale = _scale_cache[key_str]
+    cached_scale = _scale_cache.get(key_str)
 
-    # If we have a cached scale, verify it first!
     if cached_scale is not None:
         best_val = evaluate_scale(cached_scale)
         if best_val >= 0.50:
-            print(f"Dynamically detected board scale (cached): {cached_scale:.2f} (score: {best_val:.3f})")
             return cached_scale, best_val
-        else:
-            print(f"Cached scale {cached_scale:.2f} failed validation (score: {best_val:.3f}). Re-detecting...")
 
     # Coarse search range: 0.5 to 1.5 with 0.1 step
     coarse_scales = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
@@ -329,17 +300,14 @@ def determine_best_scale(screenshot_img, config):
             best_val = avg_score
             best_scale = scale
 
-    # Save to caches
     _scale_cache[key_str] = best_scale
 
-    print(f"Dynamically detected board scale: {best_scale:.2f} (score: {best_val:.3f})")
     return best_scale, best_val
 
 
 def detect_all_items(
     screenshot_img,
     config,
-    diagnostics=None,
     offset=(0, 0),
 ):
     from concurrent.futures import ThreadPoolExecutor
@@ -348,7 +316,7 @@ def detect_all_items(
     original_scales = config.template_scales
     try:
         if len(original_scales) == 1:
-            detected_scale, best_val = determine_best_scale(screenshot_img, config)
+            detected_scale, _ = determine_best_scale(screenshot_img, config)
             config.template_scales = (detected_scale,)
 
         screenshot_features = matching_features(screenshot_img)
@@ -364,12 +332,6 @@ def detect_all_items(
                 f"{config.template_dir / f'{item}{level}_<variant>.png'}"
             )
 
-        if diagnostics is not None:
-            for _, _, label in configured_labels(config):
-                diagnostics[label] = _init_diagnostics(
-                    config.template_thresholds.get(label, config.threshold)
-                )
-
         num_workers = min(8, os.cpu_count() or 4)
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [
@@ -382,26 +344,7 @@ def detect_all_items(
                 if res_one is None:
                     continue
 
-                label, threshold, result, tw, th, template_name = res_one
-
-                if diagnostics is not None:
-                    best_score = float(np.max(result))
-
-                    if best_score > diagnostics[label]["best_score"]:
-                        best_y, best_x = np.unravel_index(
-                            int(np.argmax(result)),
-                            result.shape,
-                        )
-                        diagnostics[label].update(
-                            {
-                                "best_score": best_score,
-                                "best_template": template_name,
-                                "best_width": tw,
-                                "best_height": th,
-                                "best_x": int(best_x + offset_x),
-                                "best_y": int(best_y + offset_y),
-                            }
-                        )
+                label, threshold, result, tw, th = res_one
 
                 local_max = result == cv2.dilate(
                     result,
@@ -424,132 +367,9 @@ def detect_all_items(
 
         detections = deduplicate_detections(detections, config)
 
-        if diagnostics is not None:
-            detected_counts = Counter(detection.label for detection in detections)
-
-            for label, values in diagnostics.items():
-                values["detected_count"] = detected_counts[label]
-
         return detections
     finally:
         config.template_scales = original_scales
-
-
-def save_detection_debug_images(
-    screenshot_img,
-    detections,
-    config,
-    diagnostics=None,
-    image_offset=(0, 0),
-    excluded_detections=None,
-    suffix="",
-):
-    """Saves the captured board and an annotated copy for calibration."""
-    config.detection_debug_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = config.detection_debug_dir / f"board{suffix}.png"
-    annotated_path = config.detection_debug_dir / f"detections{suffix}.png"
-    scores_path = config.detection_debug_dir / f"scores{suffix}.csv"
-    annotated = screenshot_img.copy()
-    offset_x, offset_y = image_offset
-    for detection in detections:
-        draw_x = detection.x - offset_x
-        draw_y = detection.y - offset_y
-        top_left = (draw_x, draw_y)
-        bottom_right = (draw_x + detection.w, draw_y + detection.h)
-        cv2.rectangle(annotated, top_left, bottom_right, (0, 255, 0), 1)
-        cv2.putText(
-            annotated,
-            f"{detection.label} {detection.score:.2f}",
-            (draw_x, max(10, draw_y - 3)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.32,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-    for detection in excluded_detections or []:
-        draw_x = detection.x - offset_x
-        draw_y = detection.y - offset_y
-        top_left = (draw_x, draw_y)
-        bottom_right = (draw_x + detection.w, draw_y + detection.h)
-        cv2.rectangle(annotated, top_left, bottom_right, (0, 165, 255), 2)
-        cv2.putText(
-            annotated,
-            f"EXCLUDED {detection.label}",
-            (draw_x, max(10, draw_y - 3)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.32,
-            (0, 165, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-    cv2.imwrite(str(raw_path), screenshot_img)
-    cv2.imwrite(str(annotated_path), annotated)
-
-    if diagnostics is not None:
-        fieldnames = [
-            "label",
-            "best_score",
-            "threshold",
-            "detected_count",
-            "best_template",
-            "best_width",
-            "best_height",
-            "best_x",
-            "best_y",
-        ]
-
-        with scores_path.open("w", newline="", encoding="utf-8") as output:
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-
-            for label in sorted(diagnostics):
-                values = diagnostics[label]
-                writer.writerow(
-                    {
-                        "label": label,
-                        "best_score": f"{values['best_score']:.4f}",
-                        "threshold": f"{values['threshold']:.4f}",
-                        "detected_count": values["detected_count"],
-                        "best_template": values["best_template"],
-                        "best_width": values["best_width"],
-                        "best_height": values["best_height"],
-                        "best_x": values["best_x"],
-                        "best_y": values["best_y"],
-                    }
-                )
-
-    return raw_path, annotated_path, scores_path
-
-
-def save_merge_debug_image(screenshot_img, slots, merge_triggers, config, image_offset=(0, 0)):
-    """Saves a debug image showing merge drags."""
-    config.detection_debug_dir.mkdir(parents=True, exist_ok=True)
-    out_path = config.detection_debug_dir / "merges.png"
-    canvas = screenshot_img.copy()
-    offset_x, offset_y = image_offset
-
-    for slot in slots:
-        draw_x = slot.x - offset_x
-        draw_y = slot.y - offset_y
-        cv2.rectangle(canvas, (draw_x, draw_y), (draw_x + slot.w, draw_y + slot.h), (255, 0, 0), 1)
-        cv2.putText(
-            canvas, slot.label,
-            (draw_x + 2, draw_y + 12),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA,
-        )
-
-    for trigger in merge_triggers:
-        src = slots[trigger["from_slot"]]
-        dst = slots[trigger["to_slot"]]
-        src_pt = (src.center[0] - offset_x, src.center[1] - offset_y)
-        dst_pt = (dst.center[0] - offset_x, dst.center[1] - offset_y)
-        cv2.arrowedLine(canvas, src_pt, dst_pt, (0, 255, 0), 2, tipLength=0.3, line_type=cv2.LINE_AA)
-
-    cv2.imwrite(str(out_path), canvas)
-    return out_path
 
 
 def find_game_region(screenshot_img, config):

@@ -60,7 +60,7 @@ def execute_swaps(slots, swaps, config):
     """
     click_offsets = label_click_offsets(slots)
 
-    for k, swap in enumerate(swaps, start=1):
+    for swap in swaps:
         src_slot = swap["from_slot"]
         dst_slot = swap["to_slot"]
 
@@ -70,12 +70,6 @@ def execute_swaps(slots, swaps, config):
         src_xy = slot_click_point(slots[src_slot], swap["moving_label"], click_offsets)
         dst_xy = slot_click_point(
             slots[dst_slot], swap["replaced_label"], click_offsets
-        )
-
-        print(
-            f"Swap {k}: "
-            f"{swap['moving_label']} from slot {src_slot} "
-            f"to slot {dst_slot}, replacing {swap['replaced_label']}"
         )
 
         drag_swap(src_xy, dst_xy, config)
@@ -91,17 +85,13 @@ def execute_merges(slots, merge_triggers, config):
     """
     click_offsets = label_click_offsets(slots)
 
-    for k, trigger in enumerate(merge_triggers, start=1):
+    for trigger in merge_triggers:
         src_slot = trigger["from_slot"]
         dst_slot = trigger["to_slot"]
         label = trigger["label"]
 
         src_xy = slot_click_point(slots[src_slot], label, click_offsets)
         dst_xy = slot_click_point(slots[dst_slot], label, click_offsets)
-
-        print(
-            f"Merge {k}: drag {label} from slot {src_slot} onto slot {dst_slot}"
-        )
 
         drag_swap(src_xy, dst_xy, config)
         time.sleep(config.after_swap_delay)

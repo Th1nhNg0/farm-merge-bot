@@ -49,8 +49,6 @@ class Config:
     local_max_kernel: int = 5
     duplicate_center_factor: float = 0.35
     min_duplicate_center_distance: float = 6.0
-    detection_debug_dir: Path = Path("debug")
-
     # Viewport detection settings
     game_min_saturation: int = 30
     game_min_brightness: int = 30
