@@ -13,6 +13,7 @@
 //           poller installed (install_poller.mjs) + FMV installed (install_fmv.mjs).
 
 import { CDP, attach, evalIn, findGameTarget, WS_URL } from "./cdp_lib.mjs";
+import plan from "./plan.js";
 
 const SPAWN_WAIT_MS = 4000;   // crate auto-open takes ~1-2 s
 const MERGE_WAIT_MS = 1200;   // merge executor + animations (batched, so per-round)
@@ -83,63 +84,7 @@ async function waitBoard() {
   throw new Error("board not loaded after 2 min — is the farm visible?");
 }
 
-function summarize(items) {
-  const counts = {};
-  for (const i of items) {
-    if (!i.mergeable || !i.id) continue;
-    const k = i.id + "_" + i.tier;
-    counts[k] = (counts[k] || 0) + 1;
-  }
-  return counts;
-}
-
-// ── never-move rule (family-based) ─────────────────────────────────────────
-// Items are skipped by sort/plan+merge when they have no item id (buildings)
-// or their family has no mergeable level (tree/rock/area/premium land,
-// traintrack, delivery, decorative, blocker, toolbox). Families WITH mergeable
-// levels are fully movable, including their non-mergeable MAX level items.
-const KNOWN_STATIC = new Set(['tree', 'rock', 'area', 'premium', 'traintrack',
-  'delivery', 'decorative', 'decorative_timelimitedevent', 'blocker', 'toolbox']);
-function computeNeverMove(board) {
-  const chainIds = new Set();
-  for (const it of board.items) {
-    if (it.mergeable && it.id) chainIds.add(it.id);
-    if (it.target) {
-      const i = String(it.target).lastIndexOf("_");
-      chainIds.add(i > 0 ? String(it.target).slice(0, i) : String(it.target));
-    }
-  }
-  return (it) => {
-    if (!it || !it.id) return true;
-    if (KNOWN_STATIC.has(it.id)) return true;
-    if (chainIds.has(it.id)) return false;
-    return !it.mergeable;
-  };
-}
-
-function connectedComponents(cells, key) {
-  const keyCells = cells.filter((c) => c.id === key.id && c.tier === key.tier);
-  const byKey = new Map(keyCells.map((c) => [c.col + ":" + c.row, c]));
-  const seen = new Set();
-  const comps = [];
-  for (const start of keyCells) {
-    const sk = start.col + ":" + start.row;
-    if (seen.has(sk)) continue;
-    const comp = [];
-    const queue = [start];
-    seen.add(sk);
-    while (queue.length) {
-      const c = queue.shift();
-      comp.push(c);
-      for (const nk of c.neighbors) {
-        const n = byKey.get(nk);
-        if (n && !seen.has(nk)) { seen.add(nk); queue.push(n); }
-      }
-    }
-    comps.push(comp);
-  }
-  return comps;
-}
+// ── planning: shared logic from plan.js ────────────────────────────────────
 
 // ── Phase 1: FILL — spawn crates until no empty cells ──────────────────────
 async function phaseFill() {
@@ -169,111 +114,6 @@ async function phaseFill() {
   }
   console.log("Fill hit round cap.");
   return { filled: false, spawned: spawnedTotal };
-}
-
-// ── grouping plan: find a connected group of `size` cells for a key ────────
-// Cells are steppable when empty, already same-key, or occupied by anything
-// (swap target). Same-key/empty cells are preferred as BFS neighbors.
-// `usedCells`/`usedItems` exclude cells claimed by other plans (multi-group
-// planning on a single snapshot).
-// Returns { group, needsMove, needsSwap, sources } or null.
-function planGroup(board, key, size, usedCells, usedItems, neverMove) {
-  const keyCells = board.items.filter((c) => c.id === key.id && c.tier === key.tier &&
-    !neverMove(c) &&
-    !usedCells.has(c.col + ":" + c.row) && !usedItems.has(c.col + ":" + c.row));
-  if (keyCells.length < size) return null;
-  const byPos = board.cells;
-  const isTarget = (c) => c.empty || (c.id === key.id && c.tier === key.tier);
-
-  let bestAnchor = null;
-  let bestScore = -1;
-  for (const c of keyCells) {
-    let score = 0;
-    for (const nk of c.neighbors) {
-      const n = byPos[nk];
-      if (n && !usedCells.has(nk) && isTarget(n)) score++;
-    }
-    if (score > bestScore) { bestScore = score; bestAnchor = c; }
-  }
-  if (!bestAnchor) return null;
-
-  const group = [];
-  const visited = new Set([bestAnchor.col + ":" + bestAnchor.row]);
-  const queue = [bestAnchor];
-  while (queue.length && group.length < size) {
-    const c = queue.shift();
-    group.push(c);
-      const neighbors = c.neighbors
-        .map((nk) => byPos[nk])
-        .filter((n) => n && !visited.has(n.col + ":" + n.row) && !usedCells.has(n.col + ":" + n.row) &&
-          !neverMove(n));
-    // prefer empty/same-key cells first, then any occupied cell (swap target)
-    neighbors.sort((a, b) => (isTarget(b) ? 1 : 0) - (isTarget(a) ? 1 : 0));
-    for (const n of neighbors) {
-      if (group.length >= size) break;
-      visited.add(n.col + ":" + n.row);
-      queue.push(n);
-    }
-  }
-  if (group.length < size) return null;
-
-  const groupKeys = new Set(group.map((c) => c.col + ":" + c.row));
-  const needsMove = group.filter((c) => c.empty);
-  const needsSwap = group.filter((c) => !c.empty && !(c.id === key.id && c.tier === key.tier));
-  const need = needsMove.length + needsSwap.length;
-  if (!need) return null;
-  // sources: same-key items outside the group, unclaimed
-  const sources = board.items.filter((c) => c.id === key.id && c.tier === key.tier &&
-    !neverMove(c) &&
-    !groupKeys.has(c.col + ":" + c.row) &&
-    !usedCells.has(c.col + ":" + c.row) && !usedItems.has(c.col + ":" + c.row));
-  if (sources.length < need) return null;
-  return { group, needsMove, needsSwap, sources: sources.slice(0, need) };
-}
-
-// ── plan ALL merges + groups from one board snapshot ───────────────────────
-// Returns { naturals: [...], groups: [...] } with disjoint cells/items.
-function planAll(board) {
-  const neverMove = computeNeverMove(board);
-  const items = board.items.filter((i) => i.mergeable && i.id);
-  const counts = summarize(items);
-  const naturals = [];
-  const usedCells = new Set();
-  const usedItems = new Set();
-
-  // 1) natural connected components that are multiples of 5 (no moves needed)
-  for (const k of Object.keys(counts)) {
-    if (counts[k] < 5) continue;
-    const [id, tier] = k.split("_");
-    for (const comp of connectedComponents(items, { id, tier })) {
-      if (comp.length >= 5 && comp.length % 5 === 0) {
-        naturals.push({ key: k, cells: comp });
-        for (const c of comp) usedCells.add(c.col + ":" + c.row);
-      }
-    }
-  }
-
-  // 2) grouped plans: biggest groups first (15 > 10 > 5), many per key
-  const groups = [];
-  const keys = Object.entries(counts)
-    .filter(([, n]) => n >= 5)
-    .sort((a, b) => b[1] - a[1]);
-  for (const [k] of keys) {
-    const [id, tier] = k.split("_");
-    const avail = () => items.filter((c) => c.id === id && c.tier === tier &&
-      !usedCells.has(c.col + ":" + c.row) && !usedItems.has(c.col + ":" + c.row));
-    let n = avail().length;
-    while (n >= 5) {
-      const size = n >= 15 ? 15 : n >= 10 ? 10 : 5;
-        const g = planGroup(board, { id, tier }, size, usedCells, usedItems, neverMove);
-      if (!g) break;
-      groups.push({ key: k, size, ...g });
-      for (const c of g.group) usedCells.add(c.col + ":" + c.row);
-      for (const s of g.sources) usedItems.add(s.col + ":" + s.row);
-      n = avail().length;
-    }
-  }
-  return { naturals, groups };
 }
 
 // ── execute all moves/swaps + merges in ONE page evaluation (fast path) ────
@@ -326,7 +166,7 @@ async function phasePlanMerge() {
   while (round < MAX_PLAN_ROUNDS) {
     round++;
     const board = await readBoard();
-    const { naturals, groups } = planAll(board);
+    const { naturals, groups } = plan.planAll(board);
     if (!naturals.length && !groups.length) {
       console.log("No 5/10/15 group possible this round — done.");
       return false;
@@ -351,7 +191,7 @@ async function phasePlanMerge() {
 
 // ── Main loop: FILL -> PLAN+MERGE -> repeat ────────────────────────────────
 const before = await waitBoard();
-console.log("board before:", JSON.stringify(summarize(before.items)));
+console.log("board before:", JSON.stringify(plan.summarize(before.items)));
 console.log("empty cells:", before.empties.length);
 
 for (let cycle = 1; cycle <= MAX_CYCLE_ROUNDS; cycle++) {
@@ -365,7 +205,7 @@ for (let cycle = 1; cycle <= MAX_CYCLE_ROUNDS; cycle++) {
 }
 
 const after = await readBoard();
-console.log("\nboard after:", JSON.stringify(summarize(after.items)));
+console.log("\nboard after:", JSON.stringify(plan.summarize(after.items)));
 console.log("empty cells:", after.empties.length);
 const cratesLeft = await evalIn(
   cdp, sid, "window.FMV.rootServices().inventory.getAmount('crates')"

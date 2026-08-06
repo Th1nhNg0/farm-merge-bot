@@ -10,7 +10,11 @@
 // Options: crate auto-open wait (ms) and post-merge animation wait (ms).
 // Exposes window.FMV.menu = { orders, fill, planMerge, autoFarm, stop, status, running }.
 
-export const MENU_SOURCE = `(function(){
+// Shared planner (plan.js) is prepended to the injected source, so the menu
+// IIFE below can use window.FMVPlan (same logic as auto_farm.mjs / bench.mjs).
+import { readFileSync } from "node:fs";
+
+export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "utf8") + "\n" + `(function(){
   if (window.FMV && window.FMV.menu && window.FMV.menu.running && window.FMV.menu.running()) {
     return { ok: false, reason: 'menu running' };
   }
@@ -80,160 +84,7 @@ export const MENU_SOURCE = `(function(){
     return out;
   }
 
-  // ── planning (same logic as auto_farm.mjs) ───────────────────────────────
-  function summarize(items) {
-    const counts = {};
-    for (const i of items) {
-      if (!i.mergeable || !i.id) continue;
-      const k = i.id + '_' + i.tier;
-      counts[k] = (counts[k] || 0) + 1;
-    }
-    return counts;
-  }
-
-  function connectedComponents(cells, key) {
-    const keyCells = cells.filter((c) => c.id === key.id && c.tier === key.tier);
-    const byKey = new Map(keyCells.map((c) => [c.col + ':' + c.row, c]));
-    const seen = new Set();
-    const comps = [];
-    for (const start of keyCells) {
-      const sk = start.col + ':' + start.row;
-      if (seen.has(sk)) continue;
-      const comp = [];
-      const queue = [start];
-      seen.add(sk);
-      while (queue.length) {
-        const c = queue.shift();
-        comp.push(c);
-        for (const nk of c.neighbors) {
-          const n = byKey.get(nk);
-          if (n && !seen.has(nk)) { seen.add(nk); queue.push(n); }
-        }
-      }
-      comps.push(comp);
-    }
-    return comps;
-  }
-
-  // ── never-move rule (family-based) ────────────────────────────────────────
-  // An item must never be moved (sort/plan+merge) when:
-  //   - it has no item id (buildings: train station, dairy, bbq, bakery, ...), or
-  //   - its FAMILY has no mergeable level at all (tree/rock/area/premium land,
-  //     traintrack, delivery, decorative, blocker, toolbox, ...).
-  // Families WITH mergeable levels (coin, gem, energy, corn, wood, tool, gazebo,
-  // greenhouse, ...) are fully movable — including their non-mergeable MAX level
-  // items (e.g. corn_4): "if level 1..N can merge, the last level can move too".
-  const KNOWN_STATIC = new Set(['tree', 'rock', 'area', 'premium', 'traintrack',
-    'delivery', 'decorative', 'decorative_timelimitedevent', 'blocker', 'toolbox']);
-  function computeNeverMove(board) {
-    const chainIds = new Set();
-    for (const it of board.items) {
-      if (it.mergeable && it.id) chainIds.add(it.id);
-      if (it.target) {
-        const i = String(it.target).lastIndexOf('_');
-        chainIds.add(i > 0 ? String(it.target).slice(0, i) : String(it.target));
-      }
-    }
-    return (it) => {
-      if (!it || !it.id) return true;
-      if (KNOWN_STATIC.has(it.id)) return true;
-      if (chainIds.has(it.id)) return false;
-      return !it.mergeable;
-    };
-  }
-
-  function planGroup(board, key, size, usedCells, usedItems, neverMove) {
-    const keyCells = board.items.filter((c) => c.id === key.id && c.tier === key.tier &&
-      !neverMove(c) &&
-      !usedCells.has(c.col + ':' + c.row) && !usedItems.has(c.col + ':' + c.row));
-    if (keyCells.length < size) return null;
-    const byPos = board.cells;
-    const isTarget = (c) => c.empty || (c.id === key.id && c.tier === key.tier);
-
-    let bestAnchor = null;
-    let bestScore = -1;
-    for (const c of keyCells) {
-      let score = 0;
-      for (const nk of c.neighbors) {
-        const n = byPos[nk];
-        if (n && !usedCells.has(nk) && isTarget(n)) score++;
-      }
-      if (score > bestScore) { bestScore = score; bestAnchor = c; }
-    }
-    if (!bestAnchor) return null;
-
-    const group = [];
-    const visited = new Set([bestAnchor.col + ':' + bestAnchor.row]);
-    const queue = [bestAnchor];
-    while (queue.length && group.length < size) {
-      const c = queue.shift();
-      group.push(c);
-      const neighbors = c.neighbors
-        .map((nk) => byPos[nk])
-        .filter((n) => n && !visited.has(n.col + ':' + n.row) && !usedCells.has(n.col + ':' + n.row) &&
-          !neverMove(n));
-      neighbors.sort((a, b) => (isTarget(b) ? 1 : 0) - (isTarget(a) ? 1 : 0));
-      for (const n of neighbors) {
-        if (group.length >= size) break;
-        visited.add(n.col + ':' + n.row);
-        queue.push(n);
-      }
-    }
-    if (group.length < size) return null;
-
-    const groupKeys = new Set(group.map((c) => c.col + ':' + c.row));
-    const needsMove = group.filter((c) => c.empty);
-    const needsSwap = group.filter((c) => !c.empty && !(c.id === key.id && c.tier === key.tier));
-    const need = needsMove.length + needsSwap.length;
-    if (!need) return null;
-    const sources = board.items.filter((c) => c.id === key.id && c.tier === key.tier &&
-      !neverMove(c) &&
-      !groupKeys.has(c.col + ':' + c.row) &&
-      !usedCells.has(c.col + ':' + c.row) && !usedItems.has(c.col + ':' + c.row));
-    if (sources.length < need) return null;
-    return { group, needsMove, needsSwap, sources: sources.slice(0, need) };
-  }
-
-  function planAll(board) {
-    const neverMove = computeNeverMove(board);
-    const items = board.items.filter((i) => i.mergeable && i.id);
-    const counts = summarize(items);
-    const naturals = [];
-    const usedCells = new Set();
-    const usedItems = new Set();
-
-    for (const k of Object.keys(counts)) {
-      if (counts[k] < 5) continue;
-      const [id, tier] = k.split('_');
-      for (const comp of connectedComponents(items, { id, tier })) {
-        if (comp.length >= 5 && comp.length % 5 === 0) {
-          naturals.push({ key: k, cells: comp });
-          for (const c of comp) usedCells.add(c.col + ':' + c.row);
-        }
-      }
-    }
-
-    const groups = [];
-    const keys = Object.entries(counts)
-      .filter(([, n]) => n >= 5)
-      .sort((a, b) => b[1] - a[1]);
-    for (const [k] of keys) {
-      const [id, tier] = k.split('_');
-      const avail = () => items.filter((c) => c.id === id && c.tier === tier &&
-        !usedCells.has(c.col + ':' + c.row) && !usedItems.has(c.col + ':' + c.row));
-      let n = avail().length;
-      while (n >= 5) {
-        const size = n >= 15 ? 15 : n >= 10 ? 10 : 5;
-        const g = planGroup(board, { id, tier }, size, usedCells, usedItems, neverMove);
-        if (!g) break;
-        groups.push({ key: k, size: size, group: g.group, needsMove: g.needsMove, needsSwap: g.needsSwap, sources: g.sources });
-        for (const c of g.group) usedCells.add(c.col + ':' + c.row);
-        for (const s of g.sources) usedItems.add(s.col + ':' + s.row);
-        n = avail().length;
-      }
-    }
-    return { naturals, groups };
-  }
+  // ── planner: shared logic from plan.js (window.FMVPlan) ────────────────────
 
   // ── execute all moves/swaps + merges in one batched pass (breathing) ────
   async function executeBatch(naturals, groups) {
@@ -311,7 +162,7 @@ export const MENU_SOURCE = `(function(){
       round++;
       assertFMV();
       const board = readBoard();
-      const { naturals, groups } = planAll(board);
+      const { naturals, groups } = window.FMVPlan.planAll(board);
       if (!naturals.length && !groups.length) {
         log('no 5/10/15 group possible this round — done');
         return false;
@@ -338,7 +189,7 @@ export const MENU_SOURCE = `(function(){
     const board = readBoard();
     if (board.error) throw new Error(board.error);
 
-    const neverMove = computeNeverMove(board);
+    const neverMove = window.FMVPlan.computeNeverMove(board);
     const fixedCells = new Set();
     const groups = new Map();
     for (const it of board.items) {
