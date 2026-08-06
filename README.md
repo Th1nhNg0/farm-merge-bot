@@ -64,7 +64,7 @@ out manually (the game gets it free because the cell is already empty mid-drag).
 | `poller.js` | Generic poller injected into the game frame; captures all webpack runtime requires into `window.__FMV_rt` |
 | `hunter.js` | In-frame module hunter: picks the main runtime, re-discovers root container / farm services / component map / MergeTrigger ctor for the current build |
 | `fmv_helper.js` | `window.FMV` v4 (board / merge / move / swap / spawnCrate / services / req / I / root / rootServices) |
-| `menu.js` | In-game bot menu (FMV Bot overlay, top-right of the game window): draggable panel with Sort / Fill / Harvest / Plan+Merge / Auto Farm / Refresh + status + log + wait-time options. All bot logic runs in-frame; exposes `window.FMV.menu` |
+| `menu.js` | In-game bot menu (FMV Bot overlay, top-right of the game window): draggable panel with Sort / Fill / Harvest / Plan+Merge / Orders / Auto Farm / Refresh + status + log + wait-time options. All bot logic runs in-frame; exposes `window.FMV.menu` |
 | `install.mjs` | One-shot installer — poller (if missing) → hunter (if missing) → FMV helper → menu overlay |
 | `auto_farm.mjs` | Same bot logic as the menu, driven from the CLI over CDP (fill → plan+merge → repeat) |
 | `eval.mjs` | One-off `Runtime.evaluate` of a JS expression in the game frame |
@@ -96,6 +96,7 @@ node install.mjs
 | `Harvest` | Taps every READY harvestable item (animals + max-level crops) via the game's own click simulator (`tapRouter._simulateClick`), so loot, cooldowns, animations and saves are handled by the game. Skips items on cooldown (read via the tile save model's `cooldown` field) and depleted ones. Loot goes straight to the inventory. Trees/rocks (sources, cost energy) not yet included |
 | `Fill` | Spawns a crate on every empty cell until the map is full (crate contents ignored) |
 | `Plan+Merge` | Plans ALL groups from one snapshot (natural 5/10/15 components + move/swap grouping), then executes them in one batched pass; repeats until no groups possible |
+| `Orders` | Claims completed orders, then starts every affordable available order through the game's own `ordersService`; ingredients are deducted and the normal order timer/save path is used |
 | `Auto Farm` | Toggle: fill → plan+merge → repeat until out of crates or no groups; click again (label becomes `STOP`) to stop after the current op |
 | `Refresh` | Updates the `items · empty · crates` status line |
 

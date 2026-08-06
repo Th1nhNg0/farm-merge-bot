@@ -3,11 +3,12 @@
 //   [Fill]         spawn crates on every empty cell until the map is full
 //   [Plan+Merge]   plan ALL groups (natural 5/10/15 + move/swap grouping)
 //                  from one snapshot, then execute them in one batched pass
+//   [Orders]       claim completed orders, then start every affordable order
 //   [Auto Farm]    toggle: fill -> plan+merge -> repeat until out of crates
 //                  or no groups; click again to stop after the current op
 //   [Refresh]      update the items/empty/crates status line
 // Options: crate auto-open wait (ms) and post-merge animation wait (ms).
-// Exposes window.FMV.menu = { fill, planMerge, autoFarm, stop, status, running }.
+// Exposes window.FMV.menu = { orders, fill, planMerge, autoFarm, stop, status, running }.
 
 export const MENU_SOURCE = `(function(){
   if (window.FMV && window.FMV.menu && window.FMV.menu.running && window.FMV.menu.running()) {
@@ -536,6 +537,56 @@ export const MENU_SOURCE = `(function(){
       (depleted ? ', ' + depleted + ' depleted' : '') + (blocked ? ', ' + blocked + ' blocked by UI' : ''));
   }
 
+  // ── ORDERS: claim finished orders, then start affordable orders ────────────
+  // The live service uses numeric states: 1 = startable, 3 = complete.
+  // startOrder/rewardOrder retain the game's inventory, timer, camera and save paths.
+  async function orders() {
+    assertFMV();
+    const S = window.FMV.services();
+    const O = S && S.ordersService;
+    if (!O || typeof O.getCurrentOrders !== 'function' ||
+        typeof O.startOrder !== 'function' || typeof O.rewardOrder !== 'function') {
+      throw new Error('orders service not found — game version changed?');
+    }
+
+    const STARTABLE = 1;
+    const COMPLETE = 3;
+    let claimed = 0;
+    let started = 0;
+    let skipped = 0;
+    const label = (o) => o.buildingID + '/' + o.recipe;
+    const claiming = () => typeof O.isClaiming === 'function' ? O.isClaiming() : !!O.isClaiming;
+    const waitForClaim = async () => {
+      const deadline = Date.now() + 8000;
+      while (claiming() && Date.now() < deadline) await sleep(100);
+    };
+
+    // Claim first so the reward animation can free the building and refresh its order.
+    for (const order of (O.getCurrentOrders() || []).slice()) {
+      if (!order || order.state !== COMPLETE) continue;
+      O.rewardOrder(order.buildingID);
+      await waitForClaim();
+      claimed++;
+      log('claimed ' + label(order), 'ok');
+    }
+
+    // Re-read after claims because the service may replace a claimed order.
+    for (const order of (O.getCurrentOrders() || []).slice()) {
+      if (!order || order.state !== STARTABLE) continue;
+      const affordable = typeof O._canAffordOrder === 'function' && O._canAffordOrder(order);
+      if (!affordable) {
+        skipped++;
+        log('skipped ' + label(order) + ' — missing ingredients', 'warn');
+        continue;
+      }
+      O.startOrder(order.buildingID);
+      started++;
+      log('started ' + label(order), 'ok');
+    }
+    log('orders: claimed ' + claimed + ', started ' + started +
+      (skipped ? ', skipped ' + skipped : ''));
+  }
+
   // ── Auto-farm loop: FILL -> PLAN+MERGE -> repeat ─────────────────────────
   async function autoFarm() {
     if (state.running) { state.stop = true; log('stop requested — finishing current op...'); return; }
@@ -578,7 +629,7 @@ export const MENU_SOURCE = `(function(){
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, refreshBtn;
+  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, refreshBtn;
   function opt(id, dflt) {
     const el = document.getElementById(id);
     if (!el) return dflt;
@@ -610,6 +661,7 @@ export const MENU_SOURCE = `(function(){
     fillBtn.disabled = dis;
     harvestBtn.disabled = dis;
     planBtn.disabled = dis;
+    orderBtn.disabled = dis;
     refreshBtn.disabled = dis;
   }
 
@@ -662,6 +714,9 @@ export const MENU_SOURCE = `(function(){
       + '<div class="btns">'
       + '<button id="fmv-plan">Plan+Merge</button>'
       + '<button id="fmv-auto">Auto Farm</button>'
+      + '<button id="fmv-orders">Orders</button>'
+      + '</div>'
+      + '<div class="btns">'
       + '<button id="fmv-refresh">Refresh</button>'
       + '</div>'
       + '<div class="opts">'
@@ -678,6 +733,7 @@ export const MENU_SOURCE = `(function(){
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
     planBtn = el.querySelector('#fmv-plan');
+    orderBtn = el.querySelector('#fmv-orders');
     refreshBtn = el.querySelector('#fmv-refresh');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
@@ -720,6 +776,7 @@ export const MENU_SOURCE = `(function(){
     fillBtn.addEventListener('click', () => runOp(phaseFill));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
+    orderBtn.addEventListener('click', () => runOp(orders));
     refreshBtn.addEventListener('click', refreshStatus);
 
     const hiddenInput = document.getElementById('input-field');
@@ -729,6 +786,7 @@ export const MENU_SOURCE = `(function(){
   // ── install ──────────────────────────────────────────────────────────────
   buildUI();
   window.FMV.menu = {
+    orders: () => runOp(orders),
     sort: () => runOp(sortBoard),
     harvest: () => runOp(harvestAll),
     fill: () => runOp(phaseFill),
@@ -737,7 +795,7 @@ export const MENU_SOURCE = `(function(){
     stop: () => { state.stop = true; log('stop requested'); },
     status: refreshStatus,
     running: () => state.running,
-    version: '1.0'
+    version: '1.1'
   };
   setUI();
   log('menu installed — FMV ' + window.FMV.version, 'ok');
