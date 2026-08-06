@@ -7,7 +7,6 @@
 //   [Auto Farm]    toggle: fill -> plan+merge -> repeat until out of crates
 //                  or no groups; click again to stop after the current op
 //   [Refresh]      update the items/empty/crates status line
-// Options: crate auto-open wait (ms) and post-merge animation wait (ms).
 // Exposes window.FMV.menu = { orders, fill, planMerge, autoFarm, stop, status, running }.
 
 // Shared planner (plan.js) is prepended to the injected source, so the menu
@@ -30,6 +29,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const d = new Date(), p = (n) => (n < 10 ? '0' : '') + n;
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
+  function updateLogView() {
+    const open = logEl.current.classList.contains('open');
+    const kids = logEl.current.childNodes;
+    for (let i = 0; i < kids.length; i++) kids[i].style.display = open || i === kids.length - 1 ? '' : 'none';
+    logEl.current.scrollTop = logEl.current.scrollHeight;
+  }
   function log(msg, level) {
     const line = '[' + ts() + '] ' + msg;
     if (typeof console !== 'undefined') console.log('FMV-BOT ' + line);
@@ -39,7 +44,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       div.textContent = line;
       logEl.current.appendChild(div);
       while (logEl.current.childNodes.length > 300) logEl.current.removeChild(logEl.current.firstChild);
-      logEl.current.scrollTop = logEl.current.scrollHeight;
+      updateLogView();
     }
   }
   const logEl = { current: null };
@@ -124,7 +129,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── Phase 1: FILL ────────────────────────────────────────────────────────
   async function phaseFill() {
-    const spawnWait = opt('spawnWait', 4000);
+    const spawnWait = opt('spawnWait', 1000);
     let round = 0;
     let spawnedTotal = 0;
     while (round < MAX_FILL_ROUNDS) {
@@ -156,7 +161,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── Phase 2+3: PLAN + MERGE ──────────────────────────────────────────────
   async function phasePlanMerge() {
-    const mergeWait = opt('mergeWait', 1200);
+    const mergeWait = opt('mergeWait', 300);
     let round = 0;
     while (round < MAX_PLAN_ROUNDS) {
       round++;
@@ -199,14 +204,36 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       if (!groups.has(key)) groups.set(key, { key: key, id: it.id, tier: it.tier, vault: VAULT_IDS.has(it.id), items: [] });
       groups.get(key).items.push(it);
     }
-    // block order: ALPHABETICAL by id, then tier low → high (vault last)
+    // sort priority: TOP of the board → BOTTOM (money sits at the very bottom).
+    // ids match by prefix or suffix so families like reward_crate_key hit 'key'.
+    // Unknown ids land between animals and the vault block; within an id, tier low → high.
+    const SORT_PRIORITY = [
+      ['key', 'chest', 'reward_crate'],
+      ['wood', 'log'],
+      ['stone'],
+      ['shovel', 'saw', 'axe', 'hammer', 'pickaxe', 'rake', 'scythe', 'shears',
+       'watering', 'bucket', 'net', 'spade'],
+      ['wheat', 'corn', 'carrot', 'tomato', 'pumpkin', 'potato',
+       'strawberry', 'blueberry', 'grape', 'melon'],
+      ['pig', 'chicken', 'cow', 'sheep', 'goat', 'duck', 'egg', 'bee'],
+      ['greenhouse', 'gazebo'],
+      ['energy'],
+      ['gem', 'crystal'],
+      ['coin'],
+    ];
+    const prioOf = (id) => {
+      for (let i = 0; i < SORT_PRIORITY.length; i++)
+        for (const p of SORT_PRIORITY[i])
+          if (id.startsWith(p) || id.endsWith(p)) return i;
+      return 6; // unknown → between animals and the vault block
+    };
     const tierCmp = (x, y) => {
       const nx = Number(x), ny = Number(y);
       if (!isNaN(nx) && !isNaN(ny)) return nx - ny;
       if (isNaN(nx) && isNaN(ny)) return String(x).localeCompare(String(y));
       return isNaN(nx) ? 1 : -1;
     };
-    const byKey = (a, b) => a.id.localeCompare(b.id) || tierCmp(a.tier, b.tier);
+    const byKey = (a, b) => prioOf(a.id) - prioOf(b.id) || a.id.localeCompare(b.id) || tierCmp(a.tier, b.tier);
     const normal = [...groups.values()].filter((g) => !g.vault).sort(byKey);
     const vault = [...groups.values()].filter((g) => g.vault).sort(byKey);
     const vaultN = vault.reduce((s, g) => s + g.items.length, 0);
@@ -215,37 +242,10 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       .filter((c) => !fixedCells.has(c.col + ':' + c.row))
       .sort((a, b) => a.row - b.row || a.col - b.col);
 
-    // far-end zone: connected components of free cells, taken from the corner
-    // with the highest (row+col) reach — the vault block sits there as a solid
-    // "456" block instead of being scattered through the crop area
-    const freeMap = new Map(free.map((c) => [c.col + ':' + c.row, c]));
-    const seenCells = new Set();
-    const comps = [];
-    for (const c of free) {
-      const ck = c.col + ':' + c.row;
-      if (seenCells.has(ck)) continue;
-      const comp = [];
-      const queue = [c];
-      seenCells.add(ck);
-      while (queue.length) {
-        const cur = queue.shift();
-        comp.push(cur);
-        for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const nk = (cur.col + d[0]) + ':' + (cur.row + d[1]);
-          const n = freeMap.get(nk);
-          if (n && !seenCells.has(nk)) { seenCells.add(nk); queue.push(n); }
-        }
-      }
-      comps.push(comp);
-    }
-    const maxRC = (comp) => comp.reduce((m, c) => Math.max(m, c.row + c.col), -1);
-    const farRC = Math.max(...comps.map(maxRC));
-    const zone = [];
-    for (const comp of [...comps].sort((a, b) => maxRC(b) - maxRC(a))) {
-      if (zone.length >= vaultN) break;
-      if (maxRC(comp) < farRC - 8) break; // never swallow the main farm area
-      zone.push(...comp);
-    }
+    // bottom strip: the vaultN free cells with the highest rows (bottom-most),
+    // so money/energy/diamond always sit at the very bottom of the board —
+    // not just at some far corner. Coins take the deepest cells.
+    const zone = free.slice().sort((a, b) => b.row - a.row || a.col - b.col).slice(0, vaultN);
     const zoneSet = new Set(zone.map((c) => c.col + ':' + c.row));
     const zoneCells = zone.slice().sort((a, b) => a.row - b.row || a.col - b.col);
     const cropFree = free.filter((c) => !zoneSet.has(c.col + ':' + c.row));
@@ -276,7 +276,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const total = plan.reduce((s, p) => s + p.cells.length, 0);
     log('sort: ' + plan.length + ' groups, ' + total + ' items to place' +
       ' (' + fixedCells.size + ' cells fixed — no merge chain/static families stay in place' +
-      (vaultN ? '; ' + vaultN + ' to vault zone: ' + zone.length + ' cells at the far corner' : '') + ')', 'ok');
+      (vaultN ? '; ' + vaultN + ' to bottom strip: ' + zone.length + ' cells' : '') + ')', 'ok');
 
     const FMV = window.FMV;
     const mirror = new Map();
@@ -480,7 +480,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, refreshBtn;
+  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn;
   function opt(id, dflt) {
     const el = document.getElementById(id);
     if (!el) return dflt;
@@ -513,7 +513,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvestBtn.disabled = dis;
     planBtn.disabled = dis;
     orderBtn.disabled = dis;
-    refreshBtn.disabled = dis;
   }
 
   function buildUI() {
@@ -523,29 +522,40 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (oldStyle) oldStyle.remove();
     const style = document.createElement('style');
     style.id = 'fmv-menu-style';
-    style.textContent = '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:330px;'
-      + 'background:rgba(14,14,20,.93);color:#d7d7e0;font:11px/1.45 ui-monospace,Consolas,monospace;'
-      + 'border:1px solid #3a3a4a;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);user-select:none;}'
-      + '#fmv-menu .head{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:move;touch-action:none;}'
-      + '#fmv-menu .title{font-weight:700;font-size:12px;color:#9ad0ff;flex:1;}'
-      + '#fmv-menu .fold{color:#7a7a88;font-size:11px;}'
-      + '#fmv-menu .dot{width:8px;height:8px;border-radius:50%;background:#3d3;}'
+    style.textContent = '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:260px;'
+      + 'background:rgba(13,14,22,.82);color:#d7d7e0;font:10.5px/1.4 ui-monospace,Consolas,monospace;'
+      + 'border:1px solid rgba(130,150,255,.18);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.55);'
+      + 'user-select:none;overflow:hidden;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}'
+      + '#fmv-menu .head{display:flex;align-items:center;gap:6px;padding:5px 9px;cursor:move;touch-action:none;'
+      + 'background:linear-gradient(180deg,rgba(255,255,255,.05),transparent);}'
+      + '#fmv-menu .title{font-weight:700;font-size:11px;color:#9ad0ff;flex:1;letter-spacing:.4px;}'
+      + '#fmv-menu .fold{color:#7a7a88;font-size:10px;}'
+      + '#fmv-menu .dot{width:7px;height:7px;border-radius:50%;background:#3d3;box-shadow:0 0 6px #3d3;}'
       + '#fmv-menu .dot.busy{background:#fa0;animation:pulse 1s infinite;}'
       + '@keyframes pulse{50%{opacity:.35}}'
-      + '#fmv-menu .body{padding:8px 10px 10px;border-top:1px solid #2c2c38;}'
-      + '#fmv-menu .status{padding:4px 6px;background:#101018;border-radius:4px;margin-bottom:8px;}'
+      + '#fmv-menu .body{padding:6px 7px 8px;}'
+      + '#fmv-menu .status{padding:3px 6px;background:rgba(255,255,255,.04);border-radius:6px;'
+      + 'margin-bottom:6px;color:#9a9aa8;}'
       + '#fmv-menu .status.err{color:#ff9a9a;}'
-      + '#fmv-menu .btns{display:flex;gap:4px;margin-bottom:8px;}'
-      + '#fmv-menu button{flex:1;font:inherit;padding:5px 1px;border:1px solid #3a3a4a;border-radius:4px;'
-      + 'background:#1e1e2a;color:#e8e8f0;cursor:pointer;}'
-      + '#fmv-menu button:hover:not(:disabled){background:#2c2c3c;}'
-      + '#fmv-menu button:disabled{opacity:.45;cursor:default;}'
-      + '#fmv-menu .opts{display:flex;gap:10px;margin-bottom:8px;color:#9a9aa8;}'
-      + '#fmv-menu .opts label{display:flex;align-items:center;gap:4px;}'
-      + '#fmv-menu .opts input{width:50px;font:inherit;background:#101018;color:#e8e8f0;'
-      + 'border:1px solid #3a3a4a;border-radius:3px;padding:2px 4px;}'
-      + '#fmv-menu .log{height:130px;overflow:auto;background:#0b0b12;border:1px solid #2c2c38;'
-      + 'border-radius:4px;padding:4px 6px;white-space:pre-wrap;word-break:break-word;}'
+      + '#fmv-menu .btns{display:flex;gap:3px;margin-bottom:6px;}'
+      + '#fmv-menu button{flex:1;font:inherit;padding:4px 0;border:1px solid rgba(130,150,255,.14);'
+      + 'border-radius:6px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
+      + 'transition:background .15s,transform .05s;}'
+      + '#fmv-menu button:hover:not(:disabled){background:rgba(130,150,255,.16);}'
+      + '#fmv-menu button:active:not(:disabled){transform:translateY(1px);}'
+      + '#fmv-menu button:disabled{opacity:.4;cursor:default;}'
+      + '#fmv-menu .logwrap{position:relative;}'
+      + '#fmv-menu .log{height:19px;overflow:hidden;scrollbar-width:thin;background:rgba(0,0,0,.32);'
+      + 'border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:2px 22px 2px 6px;'
+      + 'font-size:9px;line-height:1.35;white-space:pre-wrap;word-break:break-word;}'
+      + '#fmv-menu .log.open{height:100px;overflow:auto;padding:3px 22px 3px 6px;}'
+      + '#fmv-menu .log::-webkit-scrollbar{width:6px;}'
+      + '#fmv-menu .log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px;}'
+      + '#fmv-menu #fmv-log-toggle{position:absolute;top:2px;right:2px;width:16px;height:14px;padding:0;'
+      + 'font-size:9px;line-height:1;border-radius:4px;background:rgba(255,255,255,.06);'
+      + 'border:1px solid rgba(130,150,255,.15);color:#8a8a99;cursor:pointer;z-index:2;}'
+      + '#fmv-menu .log.open + #fmv-log-toggle{right:10px;}'
+      + '#fmv-menu #fmv-log-toggle:hover{background:rgba(130,150,255,.22);color:#e8e8f0;}'
       + '#fmv-menu .l{color:#b8b8c8;}#fmv-menu .l.warn{color:#ffd479;}'
       + '#fmv-menu .l.ok{color:#7ed67e;}#fmv-menu .l.err{color:#ff8f8f;}'
       + '#input-field{display:none !important;}';
@@ -553,7 +563,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
     const el = document.createElement('div');
     el.id = 'fmv-menu';
-    el.innerHTML = '<div class="head"><span class="dot"></span><span class="title">FMV Bot</span>'
+    el.innerHTML = '<div class="head"><span class="dot"></span><span class="title">FMV Bot · weepingangel89</span>'
       + '<span class="fold">-</span></div>'
       + '<div class="body">'
       + '<div class="status" id="fmv-status">installing...</div>'
@@ -567,14 +577,10 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '<button id="fmv-auto">Auto Farm</button>'
       + '<button id="fmv-orders">Orders</button>'
       + '</div>'
-      + '<div class="btns">'
-      + '<button id="fmv-refresh">Refresh</button>'
-      + '</div>'
-      + '<div class="opts">'
-      + '<label>spawn wait <input id="fmv-spawnWait" type="number" value="4000"></label>'
-      + '<label>merge wait <input id="fmv-mergeWait" type="number" value="1200"></label>'
-      + '</div>'
+      + '<div class="logwrap">'
       + '<div class="log"></div>'
+      + '<button id="fmv-log-toggle" title="expand log">▾</button>'
+      + '</div>'
       + '</div>';
     document.body.appendChild(el);
 
@@ -585,7 +591,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvestBtn = el.querySelector('#fmv-harvest');
     planBtn = el.querySelector('#fmv-plan');
     orderBtn = el.querySelector('#fmv-orders');
-    refreshBtn = el.querySelector('#fmv-refresh');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -628,7 +633,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
     orderBtn.addEventListener('click', () => runOp(orders));
-    refreshBtn.addEventListener('click', refreshStatus);
+    const logToggle = el.querySelector('#fmv-log-toggle');
+    logToggle.addEventListener('click', () => {
+      const open = logEl.current.classList.toggle('open');
+      logToggle.textContent = open ? '▴' : '▾';
+      logToggle.title = open ? 'collapse log' : 'expand log';
+      updateLogView();
+    });
 
     const hiddenInput = document.getElementById('input-field');
     if (hiddenInput) hiddenInput.style.display = 'none';
