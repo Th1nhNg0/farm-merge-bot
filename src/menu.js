@@ -535,6 +535,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (!dot) return;
     dot.className = 'dot' + (state.running || state.busy ? ' busy' : '');
     autoBtn.textContent = state.running ? 'STOP' : 'Auto Orders';
+    autoBtn.disabled = false;
     const dis = state.busy || state.running;
     sortBtn.disabled = dis;
     fillBtn.disabled = dis;
