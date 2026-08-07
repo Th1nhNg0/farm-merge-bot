@@ -445,18 +445,15 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       throw new Error('tap router not found — game version changed?');
     }
     const hasHarvestTrigger = findLootReceivedCtor();
-    let tiles = null;
-    try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
-    const tileAt = (col, row) => {
-      if (!tiles) return null;
-      try {
-        const m = tiles['TilesStateModel_' + col + ':' + row];
-        return m && m.data && m.data.state ? m.data.state.data : null;
-      } catch (e) { return null; }
-    };
 
-    // phase 1: harvest every READY harvestable (no cooldown, not lootable)
-    let harvested = 0, cooling = 0, depleted = 0;
+    // phase 1: harvest every READY harvestable (not lootable, hp remaining).
+    // NOTE: the game does NOT enforce the tile cooldown on the direct
+    // LootReceived path (verified live: harvesting a cooled-down item works,
+    // hp -1, loot produced) — the cooldown entry in the tile save model only
+    // gates the normal tap path. So no cooldown check here: the button always
+    // harvests, skipping the wait (previously you could only skip it via
+    // sort, which moved items to cells without a cooldown entry).
+    let harvested = 0, depleted = 0;
     if (hasHarvestTrigger) {
       for (const cell of S.mapGrid._cells.values()) {
         if (state.stop) break;
@@ -466,7 +463,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         if (e.hasBehavior(I.Lootable)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
-        if (tileAt(cell.column, cell.row) && tileAt(cell.column, cell.row).cooldown) { cooling++; continue; }
         if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
         try { e.addBehavior(new lootReceivedCtor({})); harvested++; } catch (e2) {
           log('harvest fail ' + cell.column + ':' + cell.row, 'warn');
@@ -478,7 +474,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     // phase 2: collect — keep tapping lootable harvestables (the harvest
     // results, plus leftovers) and GROUND COLLECTABLES (the produced items
     // that land on empty cells as bubbles) until none remain; each round
-    // waits for the game to process the previous round's actions
+    // waits for the game to process the previous round's actions. The settle
+    // time adapts to the game's measured tick rate (~66ms when visible,
+    // ~1000ms when throttled in a background tab) so visible runs are fast.
     let collected = 0;
     let ground = 0;
     let failed = 0;
@@ -493,8 +491,22 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
       } catch (err) { return false; }
     };
+    const settle = await (async () => {
+      const ms = await new Promise((res) => {
+        let n = 0, first = null;
+        const tick = (t) => {
+          if (first === null) first = t;
+          else if (t - first >= 300) { res((t - first) / n); return; }
+          n++;
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+        setTimeout(() => res(n ? 300 / n : 1000), 400);
+      });
+      return Math.max(150, Math.min(1500, ms * 4));
+    })();
+    if (harvested > 0) await sleep(settle);
     for (let round = 0; round < 6 && !state.stop; round++) {
-      await sleep(1500);
       const lootables = [];
       const collectables = [];
       for (const cell of S.mapGrid._cells.values()) {
@@ -528,9 +540,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         try { tapRouter._simulateClick(r.e); ground++; } catch (e2) { failed++; }
         if (ground % 20 === 0) await sleep(0);
       }
+      if (lootables.length + collectables.length > 0) await sleep(settle);
     }
     log('harvest: ' + harvested + ' harvest · ' + collected + ' loot · ' + ground + ' ground' +
-      ' · ' + cooling + ' cd' +
       (depleted ? ' · ' + depleted + ' dep' : '') +
       (failed ? ' · ' + failed + ' fail' : '') +
       (hasHarvestTrigger ? '' : ' · no trigger'));
@@ -1215,14 +1227,14 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '#fmv-analyze .stat.warn b{color:#ffd479;}'
       + '#fmv-analyze .row{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 12px;}'
       + '#fmv-analyze .row .dim{color:#8a8a99;font-size:10px;}'
-      + '#fmv-analyze .tile{position:relative;width:56px;height:56px;display:flex;align-items:center;justify-content:center;'
+      + '#fmv-analyze .tile{position:relative;aspect-ratio:1;display:flex;align-items:center;justify-content:center;'
       + 'border:1px solid rgba(130,150,255,.12);border-radius:8px;background:rgba(255,255,255,.04);'
       + 'transition:border-color .15s,background .15s;cursor:pointer;}'
       + '#fmv-analyze .tile:hover{border-color:rgba(130,150,255,.4);background:rgba(130,150,255,.1);}'
       + '#fmv-analyze .tile img.px{width:46px;height:46px;object-fit:contain;image-rendering:auto;pointer-events:none;}'
       + '#fmv-analyze .tile b{position:absolute;right:4px;bottom:3px;font-size:9.5px;font-weight:700;color:#fff;'
       + 'background:rgba(10,12,20,.8);border-radius:5px;padding:0 4px;line-height:1.6;pointer-events:none;}'
-      + '#fmv-analyze .igrid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;padding:4px 12px 10px;}'
+      + '#fmv-analyze .igrid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:4px 12px 10px;}'
       + '#fmv-analyze .atabs{display:flex;gap:4px;padding:8px 12px 4px;}'
       + '#fmv-analyze .atab{flex:1;width:auto;padding:5px 0;font-size:10.5px;border:none;border-radius:7px;'
       + 'background:rgba(255,255,255,.04);color:#8a8a99;cursor:pointer;transition:background .15s,color .15s;}'
@@ -1538,7 +1550,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     },
     resetStats: statsReset,
     running: () => state.running,
-    version: '1.5.0'
+    version: '1.5.1'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

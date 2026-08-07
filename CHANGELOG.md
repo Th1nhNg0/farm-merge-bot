@@ -5,6 +5,24 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] — 2026-08-08
+
+### Fixed
+
+- **Harvest now skips the cooldown wait**: the game does NOT enforce the tile
+  cooldown on the direct `LootReceived` harvest path (verified live: harvesting
+  an on-cooldown item works, hp −1, loot produced) — the cooldown entry in the
+  tile save model only gates the normal tap path. The bot-side cooldown check
+  was removed, so the Harvest button always harvests everything with hp left
+  (previously you could only skip the wait via Sort, which moved items to cells
+  without a cooldown entry). The dead `tileAt` helper and the `cooling` counter
+  were dropped.
+- **Harvest speedup**: the collect loop slept a fixed 1500ms before every round
+  (up to 6 rounds ≈ 9s worst case). The settle time is now measured adaptively
+  from the game's actual tick rate (~150ms when visible, up to 1500ms in
+  throttled background tabs), and rounds scan first and only sleep when work was
+  found — a full harvest finishes in ~1s instead of 4–9s.
+
 ## [1.5.0] — 2026-08-08
 
 ### Added
