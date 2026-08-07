@@ -6,6 +6,8 @@
 // Chrome restart / Discord activity restart / game reload (the activity
 // restarts on frame reload, which wipes the injection).
 
+export const VERSION = "1.0.0";
+
 import { CDP, attach, evalIn, findGameTarget, WS_URL } from "./cdp_lib.mjs";
 import { POLLER_SOURCE } from "./poller.js";
 import { HUNTER_SOURCE } from "./hunter.js";
@@ -65,7 +67,7 @@ if (stage === "all") {
       } catch (e) { return { error: e.message }; } })()`
   );
   console.log("check:", JSON.stringify(check.result.value));
-  console.log("DONE — the FMV Bot menu is at the TOP-RIGHT of the game window.");
+  console.log("DONE v" + VERSION + " — the FMV Bot menu is at the TOP-RIGHT of the game window.");
 } else {
   console.log("stage '" + stage + "' done");
 }

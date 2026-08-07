@@ -8,18 +8,14 @@
 //     empties: [ ... empty cells ... ]
 //   }
 // No game/DOM dependencies — runs as a plain <script> in the game frame
-// (window.FMVPlan) and as a CommonJS module in Node (module.exports).
+// (window.FMVPlan); menu.js prepends this source to its own injection.
 //
 // Merge rules (enforced by the game, mirrored here):
 //   - 5 identical items merge -> 2 of the next level; 10 -> 4; 15 -> 6
 //     (bonus math for exact multiples of 5, so merges only fire on
 //     5/10/15 chains).
 
-(function (root, factory) {
-  const api = factory();
-  if (typeof module === "object" && module.exports) module.exports = api;
-  if (root) root.FMVPlan = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+globalThis.FMVPlan = (function () {
   "use strict";
 
   function summarize(items) {
@@ -163,24 +159,8 @@
         while (restMap.size >= 5) {
           // previous chunks can disconnect the rest — chunk the LARGEST
           // connected piece each iteration (smaller pieces stay for groups)
-          let bestPiece = null;
-          const pieceSeen = new Set();
-          for (const c of restMap.values()) {
-            const k = c.col + ":" + c.row;
-            if (pieceSeen.has(k)) continue;
-            const piece = [];
-            const queue = [c];
-            pieceSeen.add(k);
-            while (queue.length) {
-              const cur = queue.shift();
-              piece.push(cur);
-              for (const nk of cur.neighbors) {
-                const n = restMap.get(nk);
-                if (n && !pieceSeen.has(nk)) { pieceSeen.add(nk); queue.push(n); }
-              }
-            }
-            if (!bestPiece || piece.length > bestPiece.length) bestPiece = piece;
-          }
+          const pieces = connectedComponents([...restMap.values()], { id, tier });
+          const bestPiece = pieces.reduce((a, b) => (a.length >= b.length ? a : b));
           if (bestPiece.length < 5) break;
           const size = bestPiece.length >= 15 ? 15 : bestPiece.length >= 10 ? 10 : 5;
           const chunk = [];
@@ -234,4 +214,4 @@
   }
 
   return { summarize, computeNeverMove, connectedComponents, planGroup, planAll };
-});
+})();

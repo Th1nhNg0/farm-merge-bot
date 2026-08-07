@@ -14,25 +14,14 @@ export const POLLER_SOURCE = `(function(){
   if (window.__FMV_poller) return;
   window.__FMV_poller = true;
   window.__FMV_rt = [];
-  window.__FMV_captures = [];
-  window.__FMV_err = null;
   const h = self['webpackChunkfarm_merge_game'] || (self['webpackChunkfarm_merge_game'] = []);
   let n = 0;
-  const nameOf = (fn) => {
-    const s = String(fn);
-    const m = s.match(/function\s*([_\w$]+)/);
-    return m ? m[1] : s.slice(0, 40);
-  };
   const timer = setInterval(function(){
     try {
       h.push([[0x7ff00000 + (n++)], {}, function(r){
-        const rec = { name: nameOf(r), at: Date.now() };
-        try { rec.mcount = Object.keys(r.m || {}).length; } catch (e) {}
         window.__FMV_rt.push(r);
-        window.__FMV_captures.push(rec);
       }]);
-    } catch(e) { window.__FMV_err = String(e); }
+    } catch (e) {}
   }, 100);
-  window.__FMV_stop = function(){ clearInterval(timer); };
   setTimeout(function(){ clearInterval(timer); }, 60000);
 })();`;

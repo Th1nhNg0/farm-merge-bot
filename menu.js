@@ -130,7 +130,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── Phase 1: FILL ────────────────────────────────────────────────────────
   async function phaseFill() {
-    const spawnWait = opt('spawnWait', 1000);
+    const spawnWait = 1000;
     let round = 0;
     let spawnedTotal = 0;
     while (round < MAX_FILL_ROUNDS) {
@@ -162,7 +162,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── Phase 2+3: PLAN + MERGE ──────────────────────────────────────────────
   async function phasePlanMerge() {
-    const mergeWait = opt('mergeWait', 300);
+    const mergeWait = 300;
     let round = 0;
     while (round < MAX_PLAN_ROUNDS) {
       round++;
@@ -490,12 +490,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── UI ───────────────────────────────────────────────────────────────────
   let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn;
-  function opt(id, dflt) {
-    const el = document.getElementById(id);
-    if (!el) return dflt;
-    const v = parseInt(el.value, 10);
-    return isNaN(v) || v < 0 ? dflt : v;
-  }
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
     if (!el) return;
@@ -649,9 +643,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       logToggle.title = open ? 'collapse log' : 'expand log';
       updateLogView();
     });
-
-    const hiddenInput = document.getElementById('input-field');
-    if (hiddenInput) hiddenInput.style.display = 'none';
   }
 
   // ── install ──────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # FMV injection — drive Farm Merge Valley merges by direct function calls
 
-Date: 2026-08-06 · Discord Activity build (served from `1187013846746005515.discordsays.com`, CrazyGames proxy)
+Version: 1.0.0 · Date: 2026-08-06 · Discord Activity build (served from `1187013846746005515.discordsays.com`, CrazyGames proxy)
 
 **Status: WORKING (Discord embed).** Live merges are executed by calling the game's own webpack modules over CDP — no pyautogui, no drag simulation. The scripts re-discover the webpack internals at runtime, so they work against the game embedded in Discord as an Activity (voice channel → Activities → Farm Merge Valley).
 
@@ -64,10 +64,9 @@ out manually (the game gets it free because the cell is already empty mid-drag).
 | `poller.js` | Generic poller injected into the game frame; captures all webpack runtime requires into `window.__FMV_rt` |
 | `hunter.js` | In-frame module hunter: picks the main runtime, re-discovers root container / farm services / component map / MergeTrigger ctor for the current build |
 | `fmv_helper.js` | `window.FMV` v4 (board / merge / move / swap / spawnCrate / services / req / I / root / rootServices) |
-| `menu.js` | In-game bot menu (FMV Bot overlay, top-right of the game window): draggable panel with Sort / Fill / Harvest / Plan+Merge / Auto Orders / Orders / Refresh + status + log + wait-time options. All bot logic runs in-frame; exposes `window.FMV.menu` |
+| `menu.js` | In-game bot menu (FMV Bot overlay, top-right of the game window): draggable panel with Sort / Fill / Harvest / Plan+Merge / Auto Orders / Orders / Refresh + status + log. All bot logic runs in-frame; exposes `window.FMV.menu` |
 | `install.mjs` | One-shot installer — poller (if missing) → hunter (if missing) → FMV helper → menu overlay |
 | `eval.mjs` | One-off `Runtime.evaluate` of a JS expression in the game frame |
-| `merge_demo.mjs` | Prints mergeable clusters and fires one merge `fromCol fromRow toCol toRow` |
 
 ## 5. How to run
 
@@ -99,16 +98,14 @@ node install.mjs
 | `Auto Orders` | Toggle: claims completed orders and starts every affordable order every few seconds until stopped; click again (label becomes `STOP`) to stop after the current cycle |
 | `Refresh` | Updates the `items · empty · crates` status line |
 
-- Options row: `spawn wait` (crate auto-open wait, ms) and `merge wait` (post-merge
-  animation wait, ms). Click the header bar to collapse the menu; drag the header to
-  move it anywhere.
+- Click the header bar to collapse the menu; drag the header to move it anywhere.
 - The log panel shows every action (fill rounds, group counts, move/swap/merge success rates).
 - **Re-run `install.mjs` after any Chrome restart / Discord activity restart / game
   reload** — the injection lives in the frame and does not survive a reload.
 
 ### CLI-only alternatives (debugging / scripting)
 
-- `node eval.mjs "…"` / `node merge_demo.mjs c r c r` — one-off evals / single merge.
+- `node eval.mjs "…"` — one-off evals; `node eval.mjs "window.FMV.merge(c,r,c,r)"` for a single merge.
 
 ### Read the board
 
@@ -121,7 +118,7 @@ Each entry: `{col, row, id, tier, mergeable}` (e.g. `{col: 69, row: 67, id: "whe
 ### Fire a merge
 
 ```powershell
-node merge_demo.mjs 68 68 68 69
+node eval.mjs "window.FMV.merge(68, 68, 68, 69)"
 ```
 
 Drops the item at (68,68) onto (68,69). Result `{ok: true, chainLen: n, total: n+1}`.
