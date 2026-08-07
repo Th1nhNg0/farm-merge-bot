@@ -876,18 +876,23 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   // ── VISIT: auto-collect friend-reward bubbles ─────────────────────────────
-  // When a friend visits the farm, a FriendReward bubble lands on a random
-  // board entity (train station, animals, plants). The game processes each tap
-  // through a dedicated friendReward behavior family (_onInteractionTap →
-  // _processReward: deplete heavy-object HP, etc.). We drive that family
-  // directly (no click simulation), in iterative rounds with settle delays —
-  // the same pattern as the harvest collect phase. Leftover rewards are
-  // claimed through the visitorReward service (_model._rewards).
-  let visitProc = null, visitSim = null, visitRewardSvc = null;
+  // Two tap paths exist, depending on whose farm is loaded:
+  //   visitor path (a FRIEND's farm — you are the visitor): entities carry a
+  //     VisitorAction behavior; the game taps them through the visitorAction
+  //     family — the family simulator fires interactionHelper._createClick
+  //     (the official pipeline), the processor _onActivityTapped adds your
+  //     reward to visitorReward and registers the owner reward on the farm.
+  //   owner path (YOUR farm — friends visited you): entities carry FriendReward;
+  //     the game processes taps via the friendReward family (_onInteractionTap
+  //     → _processReward).
+  // The behavior-family registries are rebuilt when the farm changes, so the
+  // discovery runs fresh on every call (never cache across farms). The
+  // visitorReward service is a stable root singleton and is cached.
+  let visitRewardSvc = null;
   function findVisitServices() {
-    if (visitProc && visitRewardSvc) return true;
-    let proc = null, sim = null;
     const S = window.FMV.services();
+    if (!S) return false;
+    const ctx = { visitorProc: null, visitorSim: null, ownerProc: null, ownerSim: null };
     outer:
     for (const cell of S.mapGrid._cells.values()) {
       if (!cell || !cell.content) continue;
@@ -900,18 +905,25 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         let types = null;
         try { types = reg._filter._behaviorTypes; } catch (e) {}
         if (!types || !Array.isArray(types)) continue;
-        if (types.indexOf('friendReward') === -1) continue;
+        const isVisitor = types.indexOf('visitorAction') !== -1;
+        const isOwner = types.indexOf('friendReward') !== -1;
+        if (!isVisitor && !isOwner) continue;
         let sub = null;
         try { sub = reg.onGameObjectAdded._subscribers[0].context; } catch (e) { continue; }
         if (!sub) continue;
-        if (!proc && typeof sub._onInteractionTap === 'function' && typeof sub._processReward === 'function') proc = sub;
-        if (!sim && typeof sub._simulateClick === 'function') sim = sub;
-        if (proc && sim) break outer;
+        if (isVisitor) {
+          if (!ctx.visitorProc && typeof sub._onActivityTapped === 'function' && typeof sub._createVisitorReward === 'function') ctx.visitorProc = sub;
+          if (!ctx.visitorSim && typeof sub._simulateClick === 'function') ctx.visitorSim = sub;
+        }
+        if (isOwner) {
+          if (!ctx.ownerProc && typeof sub._onInteractionTap === 'function' && typeof sub._processReward === 'function') ctx.ownerProc = sub;
+          if (!ctx.ownerSim && typeof sub._simulateClick === 'function') ctx.ownerSim = sub;
+        }
+        if (ctx.visitorProc && ctx.visitorSim && ctx.ownerProc && ctx.ownerSim) break outer;
       }
     }
-    visitProc = proc;
-    visitSim = sim;
-    if (visitRewardSvc) return !!(proc || sim);
+    window.__FMV_visitCtx = ctx;
+    if (visitRewardSvc) return !!(ctx.visitorProc || ctx.visitorSim || ctx.ownerProc || ctx.ownerSim);
     const R = window.FMV.rootServices();
     const seen = new Set();
     const search = (obj, depth) => {
@@ -932,7 +944,25 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       } catch (e) {}
     };
     search(R, 0);
-    return !!(proc || sim);
+    return !!(ctx.visitorProc || ctx.visitorSim || ctx.ownerProc || ctx.ownerSim);
+  }
+
+  // which tap path applies to an entity = which family registry is attached to
+  // its onBehaviorAdded event (the game routes taps the same way)
+  function isVisitorEntity(e) {
+    try {
+      const ev = e.onBehaviorAdded;
+      if (!ev || !ev._subscribers) return false;
+      for (let i = 0; i < ev._subscribers.length; i++) {
+        const reg = ev._subscribers[i].context;
+        if (!reg || !reg._filter) continue;
+        let types = null;
+        try { types = reg._filter._behaviorTypes; } catch (e2) {}
+        if (!types || !Array.isArray(types) || types.indexOf('visitorAction') === -1) continue;
+        return true;
+      }
+    } catch (e2) {}
+    return false;
   }
 
   async function collectVisits() {
@@ -940,24 +970,49 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (!findVisitServices()) throw new Error('friend reward services not found — game version changed?');
     const S = window.FMV.services();
     const I = window.FMV.I();
-    let processed = 0, failed = 0;
+    const C = window.__FMV_visitCtx;
+    let processed = 0, visitorTaps = 0, ownerTaps = 0, failed = 0;
     for (let round = 0; round < 6 && !state.stop; round++) {
       const cands = [];
       for (const cell of S.mapGrid._cells.values()) {
         if (!cell || !cell.content) continue;
         const e = cell.content;
-        if (!e.hasBehavior || !e.hasBehavior(I.FriendReward)) continue;
-        cands.push({ e: e, col: cell.column, row: cell.row });
+        let va = false, fr = false;
+        try { va = e.hasBehavior(I.VisitorAction); } catch (e2) {}
+        try { fr = e.hasBehavior(I.FriendReward); } catch (e2) {}
+        if (!va && !fr) continue;
+        // visitor path (a friend's farm): live = the action behavior is present
+        // (the tap consumes VisitorAction; a lingering FriendReward is spent)
+        if (isVisitorEntity(e) && !va) continue;
+        cands.push({ e: e, col: cell.column, row: cell.row, visitor: va || isVisitorEntity(e) });
       }
       if (!cands.length) break;
       for (const c of cands) {
         if (state.stop) break;
         const cell = S.mapGrid.getCell(c.col, c.row);
-        if (!cell || cell.content !== c.e || !c.e.hasBehavior(I.FriendReward)) { failed++; continue; }
+        if (!cell || cell.content !== c.e) { failed++; continue; }
+        let va = false, fr = false;
+        try { va = c.e.hasBehavior(I.VisitorAction); } catch (e2) {}
+        try { fr = c.e.hasBehavior(I.FriendReward); } catch (e2) {}
+        if (c.visitor) {
+          if (!va) continue;
+        } else if (!fr) {
+          failed++;
+          continue;
+        }
         try {
-          if (visitProc && typeof visitProc._onInteractionTap === 'function') visitProc._onInteractionTap(c.e);
-          else if (visitProc) visitProc._processReward(c.e);
-          else visitSim._simulateClick(c.e);
+          if (c.visitor) {
+            if (C.visitorSim) C.visitorSim._simulateClick(c.e);
+            else if (C.visitorProc) C.visitorProc._onActivityTapped(c.e);
+            else throw new Error('no visitor tap handler');
+            visitorTaps++;
+          } else {
+            if (C.ownerProc && typeof C.ownerProc._onInteractionTap === 'function') C.ownerProc._onInteractionTap(c.e);
+            else if (C.ownerProc) C.ownerProc._processReward(c.e);
+            else if (C.ownerSim) C.ownerSim._simulateClick(c.e);
+            else throw new Error('no owner tap handler');
+            ownerTaps++;
+          }
           processed++;
         } catch (e2) { failed++; }
         if (processed % 20 === 0) await sleep(0);
@@ -966,6 +1021,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     }
     let claimed = 0;
     if (visitRewardSvc) {
+      // the reward pipeline lands asynchronously (a few ticks after the tap) —
+      // settle before reading the pending list so nothing is missed
+      await sleep(1500);
       try {
         const m = visitRewardSvc._model;
         if (m && Array.isArray(m._rewards)) claimed = m._rewards.length;
@@ -978,6 +1036,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     }
     stats.friendRewards += processed;
     log('visit: ' + processed + ' bubble' +
+      (visitorTaps ? ' · ' + visitorTaps + ' visitor' : '') +
+      (ownerTaps ? ' · ' + ownerTaps + ' owner' : '') +
       (claimed ? ' · ' + claimed + ' reward' : '') +
       (failed ? ' · ' + failed + ' fail' : ''));
   }

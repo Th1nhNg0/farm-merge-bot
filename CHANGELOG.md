@@ -5,6 +5,25 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-08-08
+
+### Fixed
+
+- **Visit on friend farms**: the button only worked on your own farm. The
+  friend-visit flow was reversed — when on a friend's farm the game routes
+  bubble taps through the `visitorAction` behavior family (not `friendReward`),
+  and the behavior-family registries are rebuilt per farm, so the cached
+  owner-side processor silently did nothing ("visit: 162 bubble" with no
+  rewards). Discovery now runs fresh per call and captures both tap paths
+  (visitor: family simulator → `interactionHelper._createClick`, processor
+  `_onActivityTapped`; owner: `_onInteractionTap` → `_processReward`), and each
+  entity is dispatched by which family registry is attached to it. Also, a tap
+  consumes `VisitorAction` but leaves `FriendReward` on the entity — spent
+  bubbles are now filtered out (they were being re-tapped forever), and
+  bubbles that carry only `VisitorAction` (no `FriendReward`) are recognized.
+  The reward claim step waits for the async pipeline to land before reading
+  pending rewards.
+
 ## [1.4.0] — 2026-08-08
 
 ### Added
