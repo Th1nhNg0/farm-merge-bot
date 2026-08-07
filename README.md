@@ -1,6 +1,6 @@
 # FMV injection — drive Farm Merge Valley merges by direct function calls
 
-Version: 1.0.0 · Date: 2026-08-06 · Discord Activity build (served from `1187013846746005515.discordsays.com`, CrazyGames proxy)
+Version: 1.4.1 · Date: 2026-08-08 · Discord Activity build (served from `1187013846746005515.discordsays.com`, CrazyGames proxy)
 
 **Status: WORKING (Discord embed).** Live merges are executed by calling the game's own webpack modules over CDP — no pyautogui, no drag simulation. The scripts re-discover the webpack internals at runtime, so they work against the game embedded in Discord as an Activity (voice channel → Activities → Farm Merge Valley).
 
@@ -150,6 +150,11 @@ into content (coins/energy/items) within ~1-2 s.
 | Crate spawn event | `rootServices().hudServiceRegistry._activeService._commonEvents.spawnCrates` |
 
 ## 7. Operational notes / gotchas
+
+- **Version strings must stay in sync**: on every release bump, update the
+  `Project version` in `AGENTS.md`, `CHANGELOG.md`, this `Version:` line, and the
+  `VERSION` constant in `src/install.mjs` plus the `version:` fields in
+  `src/fmv_helper.js` and `src/menu.js` (shown in the menu header) — all five.
 
 - **The game target is re-discovered by URL** (`discordsays.com`) — only one game session
   should be open.

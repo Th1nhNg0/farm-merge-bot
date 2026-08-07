@@ -1125,6 +1125,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + 'margin-bottom:5px;color:#9a9aa8;font-size:9px;}'
       + '#fmv-menu .status.err{color:#ff9a9a;}'
       + '#fmv-menu .btns{display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:5px;}'
+      + '#fmv-menu .btns > *:only-child{grid-column:1 / -1;}'
       + '#fmv-menu .btns:last-of-type{margin-bottom:0;}'
       + '#fmv-menu .tabs{display:flex;gap:10px;margin-bottom:5px;padding:0 2px;'
       + 'border-bottom:1px solid rgba(130,150,255,.12);}'
@@ -1432,7 +1433,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     stats: () => ({ ...stats, elapsed: Math.floor((Date.now() - stats.startedAt) / 1000) }),
     resetStats: statsReset,
     running: () => state.running,
-    version: '1.2.0'
+    version: '1.4.1'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

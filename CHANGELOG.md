@@ -5,6 +5,17 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-08-08
+
+### Fixed
+
+- **Menu version text was stale**: the in-game header, `window.FMV.version` and the
+  installer banner still reported 1.2.0 while the project was at 1.4.1. All three
+  now read the current version, and README §7 documents the five places that must
+  be kept in sync on every release bump.
+- **Auto All button width**: the button sat alone in the 4-column `.btns` grid and
+  only filled one cell; lone buttons now span the full row.
+
 ## [1.4.1] — 2026-08-08
 
 ### Fixed
