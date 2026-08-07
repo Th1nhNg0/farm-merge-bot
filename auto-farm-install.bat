@@ -9,7 +9,9 @@ if not exist "%CHROME%" set "CHROME=%ProgramFiles%\Google\Chrome\Application\chr
 
 echo [1/3] Launching Chrome with CDP on port 9222...
 if exist "%CHROME%" (
-    start "" "%CHROME%" --remote-debugging-port=9222 --enable-features=IsolateSandboxedIframes --user-data-dir="%PROFILE%" "%DISCORD_URL%"
+    start "" "%CHROME%" --remote-debugging-port=9222 --enable-features=IsolateSandboxedIframes ^
+        --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows ^
+        --user-data-dir="%PROFILE%" "%DISCORD_URL%"
 ) else (
     echo Chrome not found at "%CHROME%" - check the CHROME path.
     pause
@@ -34,6 +36,7 @@ exit /b 1
 
 :cdp_ok
 echo CDP is up.
+echo (background flags on: the farm keeps running when the Chrome window is hidden/occluded)
 echo.
 echo Open the farm activity in the Discord tab (voice channel ^> Activities ^> Farm Merge Valley),
 echo then press any key to run src\install.mjs...

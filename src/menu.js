@@ -1,14 +1,17 @@
 // In-game bot menu overlay (FMV Bot). Installed by install_menu.mjs.
 // All bot logic runs INSIDE the game frame — the menu buttons drive it:
 //   [Fill]         spawn crates on every empty cell until the map is full
-//   [Plan+Merge]   plan ALL groups (natural 5/10/15 + move/swap grouping)
+//   [Merge]        plan ALL groups (natural 5/10/15 + move/swap grouping)
 //                  from one snapshot, then execute them in one batched pass
 //   [Orders]       claim completed orders, then start every affordable order
-  //   [Auto Orders]  toggle: claim completed + start affordable orders in a loop
-  //                  every few seconds until stopped; when the board fills up,
-  //                  runs plan+merge to merge items and free space
+//   Auto tab: checkboxes select which automations run — [Auto Orders] claim +
+//                  start affordable orders in a loop (plan+merge when the board
+//                  fills up), [Auto Clear] spend energy clearing tree/rock/
+//                  toolbox via the game's own payment/collect tap functions —
+//                  and [Auto All] starts every checked loop in parallel.
 //   [Refresh]      update the items/empty/crates status line
-// Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, stop, status, running }.
+// Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, autoClear,
+//                             autoAll, stop, status, running }.
 
 // Shared planner (plan.js) is prepended to the injected source, so the menu
 // IIFE below can use window.FMVPlan (same logic as the CLI scripts).
@@ -24,7 +27,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
   const ORDERS_WAIT_MS = 5000;
-
+  const CLEAR_WAIT_MS = 4000;
+  const CLEAR_SOURCES = new Set(['tree', 'rock', 'toolbox']);
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
     const d = new Date(), p = (n) => (n < 10 ? '0' : '') + n;
@@ -344,52 +348,150 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   // ── HARVEST: tap every READY harvestable via the game's own tap path ─────
-  // Uses the game's own click simulator (_simulateClick on the tap router), so
-  // loot, cooldowns, animations and saves are all handled by the game itself.
+  // Uses the game's own harvest machinery directly:
+  //   HARVEST  — adding a LootReceived behavior triggers the game's harvest
+  //              service (_onLootReceived → _handleHarvest): hp -1, cooldown,
+  //              and the produced item becomes a lootable bubble. Plain
+  //              tapRouter._simulateClick does NOT harvest (verified: crops
+  //              tapped that way never lose hp or produce loot).
+  //   COLLECT  — one tap on a lootable harvestable (via _simulateClick) spawns
+  //              the loot objects and consumes the crop (lootingRemovesObject).
+  // The game processes each action on its next loop tick (~1 fps in background
+  // tabs), so the collect phase iterates with settle delays until no lootables
+  // remain instead of a single sweep that can race the game.
   // Readiness = no cooldown entry in the tile save model (the game writes it
-  // on harvest) + hitpoints remaining. Tapping a cooling animal is a harmless
-  // no-op (game-enforced), but we skip them to keep the log accurate.
-  // Sources (tree/rock, which cost energy to produce) are not tapped yet —
-  // their ready-state needs a follow-up.
+  // on harvest) + hitpoints remaining.
+  function getTapRouter(S) {
+    // The subscriber list is rebuilt by the game as it spawns/destroys
+    // subsystems, so never trust index 0 — find any context with _simulateClick.
+    try {
+      const subs = S.interactionService.onGestureTap._subscribers;
+      for (const s of subs || []) {
+        if (s && s.context && typeof s.context._simulateClick === 'function') return s.context;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  let lootReceivedCtor = null;
+  function findLootReceivedCtor() {
+    if (lootReceivedCtor) return true;
+    // the trigger module (MergeTrigger, __FMV_hcId) also exports LootReceived /
+    // LootTrigger — an instance whose type is 'lootReceived' identifies it
+    const scan = (ex) => {
+      if (!ex || typeof ex !== 'object') return null;
+      for (const k of Object.keys(ex)) {
+        const v = ex[k];
+        if (typeof v !== 'function' || !v.prototype) continue;
+        try {
+          const inst = new v({});
+          if (inst && inst.type === 'lootReceived') return v;
+        } catch (e) {}
+      }
+      return null;
+    };
+    try { lootReceivedCtor = scan(window.FMV.req(window.__FMV_hcId)); } catch (e) {}
+    return !!lootReceivedCtor;
+  }
+
   async function harvestAll() {
     assertFMV();
     const S = window.FMV.services();
     const I = window.FMV.I();
-    const tapRouter = (function () {
-      try { return S.interactionService.onGestureTap._subscribers[0].context; } catch (e) { return null; }
-    })();
+    const tapRouter = getTapRouter(S);
     if (!tapRouter || typeof tapRouter._simulateClick !== 'function') {
       throw new Error('tap router not found — game version changed?');
     }
+    const hasHarvestTrigger = findLootReceivedCtor();
     let tiles = null;
     try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
-    let tapped = 0, cooling = 0, blocked = 0, depleted = 0;
-    for (const cell of S.mapGrid._cells.values()) {
-      if (state.stop) break;
-      if (!cell || !cell.content) continue;
-      const e = cell.content;
-      if (!e.hasBehavior || !e.hasBehavior(I.Harvestable)) continue;
-      const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
-      if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
-      let onCooldown = false;
-      if (tiles) {
-        try {
-          const m = tiles['TilesStateModel_' + cell.column + ':' + cell.row];
-          const tile = m && m.data && m.data.state ? m.data.state.data : null;
-          onCooldown = !!(tile && tile.cooldown);
-        } catch (e2) {}
+    const tileAt = (col, row) => {
+      if (!tiles) return null;
+      try {
+        const m = tiles['TilesStateModel_' + col + ':' + row];
+        return m && m.data && m.data.state ? m.data.state.data : null;
+      } catch (e) { return null; }
+    };
+
+    // phase 1: harvest every READY harvestable (no cooldown, not lootable)
+    let harvested = 0, cooling = 0, depleted = 0;
+    if (hasHarvestTrigger) {
+      for (const cell of S.mapGrid._cells.values()) {
+        if (state.stop) break;
+        if (!cell || !cell.content) continue;
+        const e = cell.content;
+        if (!e.hasBehavior || !e.hasBehavior(I.Harvestable)) continue;
+        if (e.hasBehavior(I.Lootable)) continue;
+        const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
+        if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
+        if (tileAt(cell.column, cell.row) && tileAt(cell.column, cell.row).cooldown) { cooling++; continue; }
+        if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
+        try { e.addBehavior(new lootReceivedCtor({})); harvested++; } catch (e2) {
+          log('harvest fail ' + cell.column + ':' + cell.row, 'warn');
+        }
+        if (harvested % 20 === 0) await sleep(0);
       }
-      if (onCooldown) { cooling++; continue; }
-      let valid = true;
-      try { valid = !!S.interactionWhitelistService.isTapValid({ column: cell.column, row: cell.row }); } catch (e2) {}
-      if (!valid) { blocked++; continue; }
-      try { tapRouter._simulateClick(e); tapped++; } catch (e2) {
-        log('tap fail ' + cell.column + ':' + cell.row, 'warn');
-      }
-      if (tapped % 20 === 0) await sleep(0);
     }
-    log('harvest: ' + tapped + ' tap · ' + cooling + ' cd' +
-      (depleted ? ' · ' + depleted + ' dep' : '') + (blocked ? ' · ' + blocked + ' blk' : ''));
+
+    // phase 2: collect — keep tapping lootable harvestables (the harvest
+    // results, plus leftovers) and GROUND COLLECTABLES (the produced items
+    // that land on empty cells as bubbles) until none remain; each round
+    // waits for the game to process the previous round's actions
+    let collected = 0;
+    let ground = 0;
+    let failed = 0;
+    // only tap collectables whose reward is a real board item (blueprint) —
+    // coin/gem/energy reward bubbles are not harvest products and must not be
+    // clicked
+    const isProductCollectable = (e) => {
+      try {
+        const cb = e.getBehavior(I.Collectable);
+        const r = cb && cb._data && cb._data.reward;
+        if (!r || !r[0] || !r[0].key) return false;
+        return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
+      } catch (err) { return false; }
+    };
+    for (let round = 0; round < 6 && !state.stop; round++) {
+      await sleep(1500);
+      const lootables = [];
+      const collectables = [];
+      for (const cell of S.mapGrid._cells.values()) {
+        if (!cell || !cell.content) continue;
+        const e = cell.content;
+        if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) {
+          if (!e.hasBehavior(I.Harvestable)) continue;
+          if (!e.hasBehavior(I.Lootable)) continue;
+        }
+        const rec = { e: e, col: cell.column, row: cell.row };
+        if (e.hasBehavior(I.Lootable)) lootables.push(rec);
+        else if (isProductCollectable(e)) collectables.push(rec);
+      }
+      if (!lootables.length && !collectables.length) break;
+      // guard: the board shifts while we run — never tap a stale reference
+      // (the entity may have moved or been consumed; tapping it would hit
+      // whatever the game now resolves at that cell)
+      const atCell = (r) => {
+        const c = S.mapGrid.getCell(r.col, r.row);
+        return c && c.content === r.e;
+      };
+      for (const r of lootables) {
+        if (state.stop) break;
+        if (!atCell(r) || !r.e.hasBehavior(I.Lootable)) { failed++; continue; }
+        try { tapRouter._simulateClick(r.e); collected++; } catch (e2) { failed++; }
+        if (collected % 20 === 0) await sleep(0);
+      }
+      for (const r of collectables) {
+        if (state.stop) break;
+        if (!atCell(r) || !r.e.hasBehavior(I.Collectable)) { failed++; continue; }
+        try { tapRouter._simulateClick(r.e); ground++; } catch (e2) { failed++; }
+        if (ground % 20 === 0) await sleep(0);
+      }
+    }
+    log('harvest: ' + harvested + ' harvest · ' + collected + ' loot · ' + ground + ' ground' +
+      ' · ' + cooling + ' cd' +
+      (depleted ? ' · ' + depleted + ' dep' : '') +
+      (failed ? ' · ' + failed + ' fail' : '') +
+      (hasHarvestTrigger ? '' : ' · no trigger'));
   }
 
   // ── ORDERS: claim finished orders, then start affordable orders ────────────
@@ -443,7 +545,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   function requestStop() {
     state.stop = true;
     log('stop — halting', 'warn');
-    if (autoBtn) {
+    if (autoBtn && state.mode === 'auto-all') {
       autoBtn.textContent = 'Stopping…';
       autoBtn.disabled = true;
     }
@@ -461,35 +563,286 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     return true;
   }
 
-  // ── Auto-orders loop: claim + start orders every few seconds; when the
-  //    board fills up, run plan+merge to merge items and free space ─────────
-  async function autoOrders() {
+  // ── Auto All: runs every SELECTED automation loop in parallel. The checkboxes
+  //    on the Auto tab choose which loops the master button starts; each loop
+  //    stops on its own (clear: energy out etc.) or on the shared STOP.
+  const prefs = { orders: true, clear: true, clearTree: true, clearRock: true, clearToolbox: true };
+  try {
+    const p = window.__FMV_prefs;
+    if (p && typeof p === 'object') {
+      prefs.orders = p.orders !== false;
+      prefs.clear = p.clear !== false;
+      prefs.clearTree = p.clearTree !== false;
+      prefs.clearRock = p.clearRock !== false;
+      prefs.clearToolbox = p.clearToolbox !== false;
+    }
+  } catch (e) {}
+  function savePrefs() {
+    try {
+      window.__FMV_prefs = {
+        orders: !!prefs.orders, clear: !!prefs.clear,
+        clearTree: !!prefs.clearTree, clearRock: !!prefs.clearRock,
+        clearToolbox: !!prefs.clearToolbox
+      };
+    } catch (e) {}
+  }
+
+  // ── auto-orders loop body: claim + start orders; plan+merge when full ────
+  async function runOrdersLoop() {
+    let cycle = 0;
+    while (state.running && !state.stop) {
+      cycle++;
+      log('orders cyc ' + cycle, 'ok');
+      await orders();
+      await freeBoardSpace();
+      const deadline = Date.now() + ORDERS_WAIT_MS;
+      while (!state.stop && Date.now() < deadline) await sleep(250);
+    }
+  }
+
+  // ── auto-clear loop body: one pass per cycle. Transient blockers (energy
+  //    out, no free workers — both recover over time) only pause the loop;
+  //    it waits and retries until energy regenerates / workers free up.
+  //    Permanent blockers (board full, nothing ready) auto-off.
+  async function runClearLoop() {
+    let cycle = 0;
+    let waiting = false;
+    while (state.running && !state.stop) {
+      cycle++;
+      log('clear cyc ' + cycle, 'ok');
+      const reason = await clearOnce();
+      if (reason === 'not focused' || reason === 'no tap services') {
+        // game paused (background tab) or tap services mid-rebuild — wait and retry
+        await sleep(1000);
+        continue;
+      }
+      if (reason === 'energy out' || reason === 'collected only' || reason === 'no free workers') {
+        if (!waiting) log('clear: ' + reason + ' — waiting', 'warn');
+        waiting = true;
+        const deadline = Date.now() + CLEAR_WAIT_MS * 3;
+        while (!state.stop && Date.now() < deadline) await sleep(1000);
+        continue;
+      }
+      waiting = false;
+      if (reason) {
+        log('clear stop: ' + reason, 'warn');
+        break;
+      }
+      const deadline = Date.now() + CLEAR_WAIT_MS;
+      while (!state.stop && Date.now() < deadline) await sleep(250);
+    }
+  }
+
+  async function autoAll() {
     if (state.running) { requestStop(); return; }
     if (state.busy) return;
+    const selected = [];
+    if (prefs.orders) selected.push(runOrdersLoop);
+    if (prefs.clear) {
+      if (!prefs.clearTree && !prefs.clearRock && !prefs.clearToolbox) {
+        log('clear: no source types selected — tick Tree/Rock/Toolbox', 'warn');
+      } else {
+        selected.push(runClearLoop);
+      }
+    }
+    if (!selected.length) { log('no automation selected — tick the boxes', 'warn'); return; }
     state.running = true;
+    state.mode = 'auto-all';
     state.stop = false;
     state.rounds = 0;
     state.opStart = Date.now();
     setUI();
-    let cycle = 0;
     try {
-      while (state.running && !state.stop) {
-        cycle++;
-        log('cyc ' + cycle, 'ok');
-        await orders();
-        await freeBoardSpace();
-        const deadline = Date.now() + ORDERS_WAIT_MS;
-        while (!state.stop && Date.now() < deadline) await sleep(250);
-      }
+      await Promise.all(selected.map(function (fn) { return fn(); }));
     } catch (e) {
       log('ERR: ' + (e && e.message ? e.message : e), 'err');
     }
     state.running = false;
+    state.mode = null;
     state.stop = false;
     state.opStart = null;
     setUI();
     refreshStatus();
-    log('auto off');
+    log('auto all off');
+  }
+
+  // ── CLEAR: spend energy on tree/rock/toolbox sources by driving the game's
+  //    own tap functions directly (payment service + lootable collector — no
+  //    click simulation): pay deducts energy and turns the source lootable,
+  //    collect spawns the loot and damages hp. Cheapest taps first.
+  //    Returns a stop reason (or null to keep going): energy out / no free
+  //    workers / board full (drops need space — avoid burning energy when the
+  //    board can't take the loot).
+  // ── tap services discovery (cached) ─────────────────────────────────────
+  // The game's own source-tap machinery: a resource-gate payment service
+  // (_attemptPayment: checks workers, deducts energy, turns the source
+  // lootable) and a lootable collector (_onInteractionAdded: spawns the loot
+  // objects and damages hp). Both are reachable through the entity
+  // behavior-family registries on onBehaviorAdded; calling them directly IS
+  // the game's own tap action (no popouts, no click simulation).
+  let paySvc = null, lootSvc = null;
+  function findTapServices() {
+    if (paySvc && lootSvc) return true;
+    let pay = null, loot = null;
+    const S = window.FMV.services();
+    outer:
+    for (const cell of S.mapGrid._cells.values()) {
+      if (!cell || !cell.content) continue;
+      let ev = null;
+      try { ev = cell.content.onBehaviorAdded; } catch (e) { continue; }
+      if (!ev || !ev._subscribers) continue;
+      for (let i = 0; i < ev._subscribers.length; i++) {
+        const reg = ev._subscribers[i].context;
+        if (!reg || !reg.onGameObjectAdded || !reg._filter) continue;
+        let types = null;
+        try { types = reg._filter._behaviorTypes; } catch (e) {}
+        if (!types || !Array.isArray(types)) continue;
+        let sub = null;
+        try { sub = reg.onGameObjectAdded._subscribers[0].context; } catch (e) { continue; }
+        if (!sub) continue;
+        if (!pay && typeof sub._attemptPayment === 'function') pay = sub;
+        if (!loot && types.indexOf('interactionTap') !== -1 && types.indexOf('lootable') !== -1 &&
+            typeof sub._onInteractionAdded === 'function') loot = sub;
+        if (pay && loot) break outer;
+      }
+    }
+    paySvc = pay;
+    lootSvc = loot;
+    return !!(pay && loot);
+  }
+
+  async function clearOnce() {
+    assertFMV();
+    // The game pauses its main loop while the tab is hidden, so taps would
+    // queue up and all fire at once on refocus — never tap while hidden.
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return 'not focused';
+    const S = window.FMV.services();
+    const I = window.FMV.I();
+    if (!findTapServices()) return 'no tap services';
+    const tapRouter = getTapRouter(S);
+    if (!tapRouter || typeof tapRouter._simulateClick !== 'function') return 'no router';
+    let tiles = null;
+    try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
+    const readEnergy = () => {
+      try {
+        const v = window.FMV.rootServices().inventory.getAmount('energy');
+        return typeof v === 'number' ? v : Number(v) || 0;
+      } catch (e) { return 0; }
+    };
+
+    // scan: sources = hp>0, not cooling, not lootable (payable) | lootables (collect)
+    const scan = () => {
+      const cands = [];
+      const lootables = [];
+      let empties = 0;
+      for (const cell of S.mapGrid._cells.values()) {
+        if (!cell) continue;
+        if (!cell.content) { empties++; continue; }
+        const e = cell.content;
+        let id = null;
+        try { id = e.getObjectIdAndTier().id; } catch (e2) {}
+        if (!id || !(prefs.clearTree && id === 'tree' ||
+                     prefs.clearRock && id === 'rock' ||
+                     prefs.clearToolbox && id === 'toolbox')) continue;
+        const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
+        if (!hp || typeof hp.current !== 'number' || hp.current <= 0) continue;
+        let tile = null;
+        if (tiles) {
+          try {
+            const m = tiles['TilesStateModel_' + cell.column + ':' + cell.row];
+            tile = m && m.data && m.data.state ? m.data.state.data : null;
+          } catch (e2) {}
+        }
+        if (tile && tile.cooldown) continue;
+        if (tile && tile.lootable) {
+          lootables.push({ entity: e, col: cell.column, row: cell.row });
+          continue;
+        }
+        const rg = e.hasBehavior(I.ResourceGate) ? e.getBehavior(I.ResourceGate) : null;
+        let cost = null;
+        try { if (rg && Array.isArray(rg.cost) && rg.cost[0]) cost = Number(rg.cost[0].amount); } catch (e2) {}
+        if (!Number.isFinite(cost)) continue;
+        let workers = 1;
+        try { workers = Number(rg.workers) || 1; } catch (e2) {}
+        cands.push({ entity: e, cost: cost, workers: workers, col: cell.column, row: cell.row });
+      }
+      return { cands, lootables, empties };
+    };
+
+    let { cands, lootables, empties } = scan();
+    if (empties === 0) return 'board full';
+
+    // 1) collect pending loot first (free — frees sources for the next payment)
+    let collected = 0;
+    for (const l of lootables) {
+      if (state.stop) break;
+      try { lootSvc._onInteractionAdded(l.entity); collected++; } catch (e2) {
+        log('loot fail ' + l.col + ':' + l.row, 'warn');
+      }
+      if (collected % 20 === 0) await sleep(0);
+    }
+    // the collected sources may be payable now — rescan before paying
+    if (collected) ({ cands } = scan());
+    if (!cands.length) return (collected ? 'collected only' : 'nothing ready');
+
+    // 2) pay ready sources, cheapest first, until energy is too low
+    cands.sort((a, b) => a.cost - b.cost);
+    let energy = readEnergy();
+    if (energy < cands[0].cost) {
+      return (collected ? 'collected only' : 'energy out');
+    }
+    let tapped = 0;
+    let noWorkers = 0;
+    for (const c of cands) {
+      if (state.stop) break;
+      energy = readEnergy();
+      if (energy < c.cost) break;
+      let free = true;
+      try { free = !!S.gameWorkers.hasEnoughWorkers(c.workers); } catch (e2) {}
+      if (!free) { noWorkers++; continue; }
+      try {
+        await paySvc._attemptPayment(c.entity, 'fmv-' + c.col + ':' + c.row, c.entity.getBehavior(I.ResourceGate));
+        try { lootSvc._onInteractionAdded(c.entity); } catch (e3) {}
+        tapped++;
+      } catch (e2) {
+        log('pay fail ' + c.col + ':' + c.row, 'warn');
+      }
+      if (tapped % 10 === 0) await sleep(0);
+    }
+    if (tapped === 0 && noWorkers > 0) return 'no free workers';
+
+    // 3) collect ground collectables — produced items land on empty cells as
+    //    bubbles (Collectable behavior) and need a tap to be picked up; only
+    //    PRODUCT bubbles (reward key is a real blueprint) — coin/gem/energy
+    //    reward bubbles are not ours to click. Guards stale references too.
+    let ground = 0;
+    const isProductCollectable = (e) => {
+      try {
+        const cb = e.getBehavior(I.Collectable);
+        const r = cb && cb._data && cb._data.reward;
+        if (!r || !r[0] || !r[0].key) return false;
+        return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
+      } catch (err) { return false; }
+    };
+    if (tapped) await sleep(1500);
+    for (const cell of S.mapGrid._cells.values()) {
+      if (state.stop) break;
+      if (!cell || !cell.content) continue;
+      const e = cell.content;
+      if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) continue;
+      if (!isProductCollectable(e)) continue;
+      if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
+      try { tapRouter._simulateClick(e); ground++; } catch (e2) {}
+      if (ground % 20 === 0) await sleep(0);
+    }
+
+    energy = readEnergy();
+    log('clear: ' + tapped + ' tap · ' + energy + ' energy' +
+      (collected ? ' · ' + collected + ' loot' : '') +
+      (ground ? ' · ' + ground + ' ground' : '') +
+      (noWorkers ? ' · ' + noWorkers + ' noworkers' : '') +
+      (state.stop ? ' · stop' : ''));
+    return null;
   }
 
   // ── one-shot op wrapper ──────────────────────────────────────────────────
@@ -510,6 +863,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── UI ───────────────────────────────────────────────────────────────────
   let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn;
+  let chkOrders, chkClear, chkTree, chkRock, chkToolbox, clearTypesRow;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
     if (!el) return;
@@ -534,9 +888,14 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   function setUI() {
     if (!dot) return;
     dot.className = 'dot' + (state.running || state.busy ? ' busy' : '');
-    autoBtn.textContent = state.running ? 'STOP' : 'Auto Orders';
-    autoBtn.disabled = false;
+    autoBtn.textContent = state.mode === 'auto-all' ? '■ STOP' : '▶ Auto All';
     const dis = state.busy || state.running;
+    autoBtn.disabled = dis && state.mode !== 'auto-all';
+    if (chkOrders) chkOrders.disabled = dis;
+    if (chkClear) chkClear.disabled = dis;
+    if (chkTree) chkTree.disabled = dis;
+    if (chkRock) chkRock.disabled = dis;
+    if (chkToolbox) chkToolbox.disabled = dis;
     sortBtn.disabled = dis;
     fillBtn.disabled = dis;
     harvestBtn.disabled = dis;
@@ -551,33 +910,55 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (oldStyle) oldStyle.remove();
     const style = document.createElement('style');
     style.id = 'fmv-menu-style';
-    style.textContent = '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:260px;'
-      + 'background:rgba(13,14,22,.82);color:#d7d7e0;font:10.5px/1.4 ui-monospace,Consolas,monospace;'
-      + 'border:1px solid rgba(130,150,255,.18);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.55);'
+    style.textContent = '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:244px;'
+      + 'background:rgba(13,14,22,.82);color:#d7d7e0;font:10px/1.35 ui-monospace,Consolas,monospace;'
+      + 'border:1px solid rgba(130,150,255,.18);border-radius:9px;box-shadow:0 8px 32px rgba(0,0,0,.55);'
       + 'user-select:none;overflow:hidden;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}'
-      + '#fmv-menu .head{display:flex;align-items:center;gap:6px;padding:5px 9px;cursor:move;touch-action:none;'
+      + '#fmv-menu .head{display:flex;align-items:center;gap:5px;padding:4px 8px;cursor:move;touch-action:none;'
       + 'background:linear-gradient(180deg,rgba(255,255,255,.05),transparent);}'
-      + '#fmv-menu .title{font-weight:700;font-size:11px;color:#9ad0ff;flex:1;letter-spacing:.4px;}'
+      + '#fmv-menu .title{font-weight:700;font-size:10.5px;color:#9ad0ff;flex:1;letter-spacing:.3px;}'
       + '#fmv-menu .fold{color:#7a7a88;font-size:10px;}'
-      + '#fmv-menu .dot{width:7px;height:7px;border-radius:50%;background:#3d3;box-shadow:0 0 6px #3d3;}'
+      + '#fmv-menu .dot{width:6px;height:6px;border-radius:50%;background:#3d3;box-shadow:0 0 6px #3d3;}'
       + '#fmv-menu .dot.busy{background:#fa0;animation:pulse 1s infinite;}'
       + '@keyframes pulse{50%{opacity:.35}}'
-      + '#fmv-menu .body{padding:6px 7px 8px;}'
-      + '#fmv-menu .status{padding:3px 6px;background:rgba(255,255,255,.04);border-radius:6px;'
-      + 'margin-bottom:6px;color:#9a9aa8;}'
+      + '#fmv-menu .body{padding:5px 6px 6px;}'
+      + '#fmv-menu .status{padding:2px 5px;background:rgba(255,255,255,.04);border-radius:5px;'
+      + 'margin-bottom:5px;color:#9a9aa8;font-size:9px;}'
       + '#fmv-menu .status.err{color:#ff9a9a;}'
-      + '#fmv-menu .btns{display:flex;gap:3px;margin-bottom:6px;}'
-      + '#fmv-menu button{flex:1;font:inherit;padding:4px 0;border:1px solid rgba(130,150,255,.14);'
-      + 'border-radius:6px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
+      + '#fmv-menu .btns{display:flex;gap:3px;margin-bottom:5px;}'
+      + '#fmv-menu .btns:last-of-type{margin-bottom:0;}'
+      + '#fmv-menu .tabs{display:flex;gap:10px;margin-bottom:5px;padding:0 2px;'
+      + 'border-bottom:1px solid rgba(130,150,255,.12);}'
+      + '#fmv-menu .tabs button{flex:1;font:inherit;padding:2px 0 4px;border:none;border-radius:0;'
+      + 'background:none;color:#8a8a99;cursor:pointer;transition:color .15s;}'
+      + '#fmv-menu .tabs button:hover:not(:disabled){background:none;color:#b8c8e8;}'
+      + '#fmv-menu .tabs button.on{color:#9ad0ff;box-shadow:inset 0 -2px 0 #9ad0ff;}'
+      + '#fmv-menu button{flex:1;font:inherit;padding:3px 0;border:1px solid rgba(130,150,255,.14);'
+      + 'border-radius:5px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
       + 'transition:background .15s,transform .05s;}'
+      + '#fmv-menu button.toggle{background:rgba(90,220,140,.06);border-color:rgba(90,220,140,.22);'
+      + 'font-weight:600;}'
+      + '#fmv-menu button.toggle:hover:not(:disabled){background:rgba(90,220,140,.14);}'
+      + '#fmv-menu .chks{display:flex;flex-direction:column;gap:2px;margin-bottom:5px;}'
+      + '#fmv-menu .chk{display:flex;align-items:center;gap:6px;padding:2px 5px;border-radius:5px;'
+      + 'cursor:pointer;color:#c8c8d4;user-select:none;}'
+      + '#fmv-menu .chk:hover{background:rgba(255,255,255,.05);}'
+      + '#fmv-menu .chk input{accent-color:#5adc8c;margin:0;cursor:pointer;}'
+      + '#fmv-menu .chk input:disabled{cursor:default;opacity:.5;}'
+      + '#fmv-menu .chk input:disabled + span{opacity:.5;}'
+      + '#fmv-menu .chkrow{display:flex;align-items:center;gap:8px;padding:1px 5px 4px 23px;}'
+      + '#fmv-menu .chkmini{display:flex;align-items:center;gap:3px;font-size:9px;color:#9a9aa8;'
+      + 'cursor:pointer;user-select:none;}'
+      + '#fmv-menu .chkmini input{accent-color:#5adc8c;margin:0;cursor:pointer;}'
+      + '#fmv-menu .chkmini input:disabled{cursor:default;opacity:.5;}'
       + '#fmv-menu button:hover:not(:disabled){background:rgba(130,150,255,.16);}'
       + '#fmv-menu button:active:not(:disabled){transform:translateY(1px);}'
       + '#fmv-menu button:disabled{opacity:.4;cursor:default;}'
       + '#fmv-menu .logwrap{position:relative;}'
-      + '#fmv-menu .log{height:19px;overflow:hidden;scrollbar-width:thin;background:rgba(0,0,0,.32);'
-      + 'border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:2px 22px 2px 6px;'
-      + 'font-size:9px;line-height:1.35;white-space:pre-wrap;word-break:break-word;}'
-      + '#fmv-menu .log.open{height:100px;overflow:auto;padding:3px 22px 3px 6px;}'
+      + '#fmv-menu .log{height:16px;overflow:hidden;scrollbar-width:thin;background:rgba(0,0,0,.32);'
+      + 'border:1px solid rgba(255,255,255,.06);border-radius:5px;padding:1px 20px 1px 5px;'
+      + 'font-size:8.5px;line-height:1.3;white-space:pre-wrap;word-break:break-word;margin-top:5px;}'
+      + '#fmv-menu .log.open{height:90px;overflow:auto;padding:2px 20px 2px 5px;}'
       + '#fmv-menu .log::-webkit-scrollbar{width:6px;}'
       + '#fmv-menu .log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px;}'
       + '#fmv-menu #fmv-log-toggle{position:absolute;top:2px;right:2px;width:16px;height:14px;padding:0;'
@@ -596,15 +977,36 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '<span class="fold">-</span></div>'
       + '<div class="body">'
       + '<div class="status" id="fmv-status">installing...</div>'
+      + '<div class="tabs">'
+      + '<button id="fmv-tab-farm" class="tab on">Farm</button>'
+      + '<button id="fmv-tab-auto" class="tab">Auto</button>'
+      + '</div>'
+      + '<div class="tabpane" id="fmv-pane-farm">'
       + '<div class="btns">'
-      + '<button id="fmv-sort">Sort</button>'
-      + '<button id="fmv-fill">Fill</button>'
-      + '<button id="fmv-harvest">Harvest</button>'
+      + '<button id="fmv-sort">⇅ Sort</button>'
+      + '<button id="fmv-plan">◆ Merge</button>'
       + '</div>'
       + '<div class="btns">'
-      + '<button id="fmv-plan">Plan+Merge</button>'
-      + '<button id="fmv-auto-orders">Auto Orders</button>'
-      + '<button id="fmv-orders">Orders</button>'
+      + '<button id="fmv-harvest">✦ Harvest</button>'
+      + '<button id="fmv-orders">⚑ Orders</button>'
+      + '</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-fill">▦ Fill</button>'
+      + '</div>'
+      + '</div>'
+      + '<div class="tabpane" id="fmv-pane-auto" style="display:none">'
+      + '<div class="chks">'
+      + '<label class="chk" title="claim + start orders in a loop"><input type="checkbox" id="fmv-chk-orders"' + (prefs.orders ? ' checked' : '') + '><span>Auto Orders</span></label>'
+      + '<label class="chk" title="spend energy clearing sources"><input type="checkbox" id="fmv-chk-clear"' + (prefs.clear ? ' checked' : '') + '><span>Auto Clear</span></label>'
+      + '</div>'
+      + '<div class="chkrow" id="fmv-clear-types"' + (prefs.clear ? '' : ' style="display:none"') + '>'
+      + '<label class="chkmini"><input type="checkbox" id="fmv-chk-tree"' + (prefs.clearTree ? ' checked' : '') + '><span>Tree</span></label>'
+      + '<label class="chkmini"><input type="checkbox" id="fmv-chk-rock"' + (prefs.clearRock ? ' checked' : '') + '><span>Rock</span></label>'
+      + '<label class="chkmini"><input type="checkbox" id="fmv-chk-toolbox"' + (prefs.clearToolbox ? ' checked' : '') + '><span>Toolbox</span></label>'
+      + '</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-auto-all" class="toggle">▶ Auto All</button>'
+      + '</div>'
       + '</div>'
       + '<div class="logwrap">'
       + '<div class="log"></div>'
@@ -617,7 +1019,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     dot.title = 'stop current op';
     dot.style.cursor = 'pointer';
     dot.addEventListener('click', () => { if (window.FMV && window.FMV.menu) window.FMV.menu.stop(); });
-    autoBtn = el.querySelector('#fmv-auto-orders');
+    autoBtn = el.querySelector('#fmv-auto-all');
+    chkOrders = el.querySelector('#fmv-chk-orders');
+    chkClear = el.querySelector('#fmv-chk-clear');
+    chkTree = el.querySelector('#fmv-chk-tree');
+    chkRock = el.querySelector('#fmv-chk-rock');
+    chkToolbox = el.querySelector('#fmv-chk-toolbox');
+    clearTypesRow = el.querySelector('#fmv-clear-types');
     sortBtn = el.querySelector('#fmv-sort');
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
@@ -659,7 +1067,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       body.style.display = body.style.display === 'none' ? '' : 'none';
       fold.textContent = body.style.display === 'none' ? '+' : '-';
     });
-    autoBtn.addEventListener('click', autoOrders);
+    autoBtn.addEventListener('click', autoAll);
     sortBtn.addEventListener('click', () => runOp(sortBoard));
     fillBtn.addEventListener('click', () => runOp(phaseFill));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
@@ -672,6 +1080,31 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       logToggle.title = open ? 'collapse log' : 'expand log';
       updateLogView();
     });
+    const tabFarm = el.querySelector('#fmv-tab-farm');
+    const tabAuto = el.querySelector('#fmv-tab-auto');
+    const paneFarm = el.querySelector('#fmv-pane-farm');
+    const paneAuto = el.querySelector('#fmv-pane-auto');
+    const selectTab = (name) => {
+      const isAuto = name === 'auto';
+      paneFarm.style.display = isAuto ? 'none' : '';
+      paneAuto.style.display = isAuto ? '' : 'none';
+      tabFarm.classList.toggle('on', !isAuto);
+      tabAuto.classList.toggle('on', isAuto);
+    };
+    tabFarm.addEventListener('click', () => selectTab('farm'));
+    tabAuto.addEventListener('click', () => selectTab('auto'));
+    const syncClearTypes = () => {
+      clearTypesRow.style.display = chkClear.checked ? '' : 'none';
+    };
+    chkOrders.addEventListener('change', function () { prefs.orders = chkOrders.checked; savePrefs(); });
+    chkClear.addEventListener('change', function () {
+      prefs.clear = chkClear.checked;
+      syncClearTypes();
+      savePrefs();
+    });
+    chkTree.addEventListener('change', function () { prefs.clearTree = chkTree.checked; savePrefs(); });
+    chkRock.addEventListener('change', function () { prefs.clearRock = chkRock.checked; savePrefs(); });
+    chkToolbox.addEventListener('change', function () { prefs.clearToolbox = chkToolbox.checked; savePrefs(); });
   }
 
   // ── install ──────────────────────────────────────────────────────────────
@@ -682,13 +1115,15 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvest: () => runOp(harvestAll),
     fill: () => runOp(phaseFill),
     planMerge: () => runOp(phasePlanMerge),
-    autoOrders,
+    autoOrders: () => { prefs.orders = true; prefs.clear = false; savePrefs(); return autoAll(); },
+    autoClear: () => { prefs.orders = false; prefs.clear = true; savePrefs(); return autoAll(); },
+    autoAll,
     stop: () => {
       if (state.running || state.busy) requestStop();
     },
     status: refreshStatus,
     running: () => state.running,
-    version: '1.0.0'
+    version: '1.2.0'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

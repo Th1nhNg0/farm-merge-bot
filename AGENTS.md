@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.0.2 (see `CHANGELOG.md`).
+Project version: 1.2.0 (see `CHANGELOG.md`).
 
 ## What this is
 
@@ -15,12 +15,13 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 | File | Purpose |
 |---|---|
 | `src/cdp_lib.mjs` | CDP client (Node built-in WebSocket); port discovery via `DevToolsActivePort` + `/json/version` fallback; `findGameTarget()` matches the `discordsays.com` iframe |
-| `src/poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt` |
+| `src/poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt`; prepends the pause-protection patch so fresh game loads are covered |
 | `src/hunter.js` | In-frame module hunter; picks the main runtime and re-discovers root container / farm services / component map / MergeTrigger ctor structurally (no hardcoded ids) |
 | `src/fmv_helper.js` | `window.FMV` v4: `board` / `merge` / `move` / `swap` / `spawnCrate` / `services` / `req` / `I` / `root` / `rootServices` |
-| `src/menu.js` | In-game FMV Bot overlay (top-right): Sort / Fill / Harvest / Plan+Merge / Orders / Auto Orders / Refresh + log panel; exposes `window.FMV.menu` |
+| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Auto tabs — Sort / Fill / Harvest / Plan+Merge / Orders (Farm) and Auto Orders / Auto Clear toggles (Auto) + log panel; exposes `window.FMV.menu` |
 | `src/install.mjs` | One-shot installer — poller → hunter → FMV → menu, evaluated live in the frame; exports `VERSION` |
 | `src/eval.mjs` | One-off `Runtime.evaluate` in the game frame |
+| `src/pause_protect.js` | Background-tab protection: fakes `document.visibilityState`/`hasFocus`, swallows `visibilitychange`, bridges `requestAnimationFrame` with a timer watchdog (the game's Pixi Ticker resolves bare rAF at call time, so the bridge is picked up on the next tick) |
 | `src/plan.js` | Merge planner (5/10/15 chain grouping, move/swap ops) |
 | `src/hunter.js` / `src/fmv_helper.js` | See above |
 | `auto-farm-install.bat` | Launcher for `src/install.mjs` |
@@ -41,6 +42,35 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   `getObjectIdAndTier()`, `getBlueprintID()`, `hasBehavior(I.Mergeable)`,
   `getBehavior(I.Mergeable)`.
 - Crate spawn event: `rootServices().hudServiceRegistry._activeService._commonEvents.spawnCrates`.
+- **Source tap machinery** (Auto Clear uses this, no click simulation): every
+  entity's `onBehaviorAdded` is a shared event with ~177 behavior-family
+  registries; each registry (`_filter._behaviorTypes`) exposes
+  `onGameObjectAdded._subscribers[0].context`. The resource-gate payment
+  service (context has `_attemptPayment`) does: worker check
+  (`gameWorkers.hasEnoughWorkers`), energy deduction (`inventory.deductItems`),
+  then marks the source `lootable` (tile save model `lootable.loot`). The
+  lootable collector (registry filter contains `interactionTap`+`lootable`,
+  context has `_onInteractionAdded`) spawns the loot objects and -1 hp.
+  `tapRouter._simulateClick` only works for harvestables (animals) — sources
+  need the popout→confirm flow, so call `_attemptPayment` directly.
+- **Harvest machinery** (Harvest button): plain taps do NOT harvest crops —
+  the game's harvest runs when a `LootReceived` behavior lands on the entity
+  (ctor = the trigger-module export whose instance `type === 'lootReceived'`,
+  module 10295 alongside MergeTrigger). Harvest = add `LootReceived` (hp -1,
+  cooldown, product becomes a `lootable` bubble on the crop). Collect = tap the
+  lootable (spawns the loot as **ground `Collectable` bubbles** on empty
+  cells) then tap those Collectables to pick them up. The Harvest button does
+  all three in iterative rounds (the ~1 fps background loop needs settle time).
+- **Game pauses while the tab is hidden** (`document.visibilityState`): taps
+  queue in the entity `_behaviorQueue` and all fire on refocus — Auto Clear
+  refuses to tap while hidden. The pause-protection patch (`pause_protect.js`,
+  installed first by install.mjs and embedded in the poller) fakes the
+  visibility state and bridges `requestAnimationFrame` with a timer watchdog,
+  so the game keeps ticking in background tabs. Without Chrome flags
+  (`--disable-background-timer-throttling --disable-renderer-backgrounding
+  --disable-backgrounding-occluded-windows`) background tabs throttle timers
+  to ~1/s, so hidden mode runs at ~1 fps (bot ops still work; game time
+  advances ~100 ms per tick).
 - `window.FMV.I` is a getter FUNCTION — always call it: `FMV.I().Mergeable`.
   Bare `FMV.I` yields `undefined` and makes everything look non-mergeable.
 
@@ -74,9 +104,12 @@ node src\eval.mjs "window.FMV.merge(68, 68, 68, 69)"
 node src\eval.mjs "window.FMV.spawnCrate(73, 70)"
 ```
 
-Prerequisites: chrome-devtools MCP Chrome running with `--remote-debugging-port=9222`
-and `IsolateSandboxedIframes` (config in `~/.config/opencode/opencode.jsonc`); the
-Discord activity open; Node.js ≥ 22.
+Prerequisites: Chrome running with `--remote-debugging-port=9222` and
+`IsolateSandboxedIframes` — normally launched by `auto-farm-install.bat`, which
+also passes the background flags (`--disable-background-timer-throttling`,
+`--disable-renderer-backgrounding`, `--disable-backgrounding-occluded-windows`)
+so the farm keeps running while the window is hidden; the Discord activity
+open; Node.js ≥ 22.
 
 ## Conventions
 
@@ -86,10 +119,12 @@ Discord activity open; Node.js ≥ 22.
   side-effect-free for the hunter's stubbed enumeration.
 - No lint/typecheck config in this repo (nothing to run).
 - Never commit secrets: session tokens / nakama backend tokens must not be committed.
-- **Changelog on commit**: whenever the user asks to commit and push code, first
-  update `CHANGELOG.md` (Keep a Changelog format; patch bump for fixes, minor for
-  features — add an `Added`/`Fixed` section describing the change), bump the
-  `Project version` line in this file to match, and include both files in the commit.
+- **No auto commits or changelog updates**: never commit and never touch
+  `CHANGELOG.md` / the `Project version` line unless the user explicitly asks.
+  When the user does ask to commit and push code, first update `CHANGELOG.md`
+  (Keep a Changelog format; patch bump for fixes, minor for features — add an
+  `Added`/`Fixed` section describing the change), bump the `Project version`
+  line in this file to match, and include both files in the commit.
 - Commit messages use conventional prefixes (`fix:`, `feat:`, `refactor:`, `release:`).
 
 ## Session history

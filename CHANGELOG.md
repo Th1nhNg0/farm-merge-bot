@@ -5,6 +5,73 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-08-07
+
+### Added
+
+- **Background-tab protection** (`pause_protect.js`): the game no longer freezes
+  when the tab is hidden. The patch fakes `document.visibilityState`/`hidden`/
+  `hasFocus`, swallows `visibilitychange`, and bridges `requestAnimationFrame`
+  with a timer watchdog (the game's Pixi Ticker resolves bare rAF at call time,
+  so the bridge is picked up on the next tick) — entity behavior queues keep
+  draining in background tabs. Installed first by `install.mjs` and embedded in
+  the poller for fresh game loads; `auto-farm-install.bat` now also passes
+  `--disable-background-timer-throttling --disable-renderer-backgrounding
+  --disable-backgrounding-occluded-windows` so hidden mode runs at full speed.
+- **Auto All + checkboxes**: the Auto tab was redesigned — Auto Orders / Auto
+  Clear are now checkboxes that select which automation loops run, and the
+  master **Auto All** button starts every checked loop in parallel (each stops
+  independently). Selections persist across menu reinstalls.
+- **Clear source-type selection**: Auto Clear has per-type checkboxes (Tree /
+  Rock / Toolbox) — only the checked source families are paid.
+- **Clear wait-and-retry**: transient blockers (`energy out`, `no free
+  workers`, `collected only`) no longer turn the loop off — it logs
+  "waiting", polls, and resumes automatically when energy regenerates or
+  workers free up. Permanent blockers (`board full`, `nothing ready`) still
+  auto-off.
+- **Harvest overhaul**: the Harvest button now runs the game's real harvest
+  machinery — adding the game's own `LootReceived` trigger behavior harvests
+  ready crops/animals (plain click simulation never did), then lootable
+  harvestables are tapped to collect, and finally ground **Collectable**
+  bubbles (produced items that land on empty cells) are tapped to pick up.
+  All in iterative rounds with settle delays for the ~1 fps background loop.
+- **Menu polish**: icon + renamed buttons (`⇅ Sort` `◆ Merge` `✦ Harvest`
+  `⚑ Orders` `▦ Fill`, `▶ Auto All`/`■ STOP`), underline-style tabs, compact
+  layout.
+
+### Fixed
+
+- **Accidental taps in Harvest/Auto Clear**: stale entity references (the board
+  shifts while the bot runs) are re-verified against the scanned cell before
+  every tap, and the ground-collect sweep only touches product bubbles (reward
+  is a real blueprint) — coin/gem/energy reward bubbles are never clicked.
+
+## [1.1.0] — 2026-08-07
+
+### Added
+
+- **Auto Clear toggle**: spends energy clearing `tree` / `rock` / `toolbox`
+  sources by driving the game's own tap functions directly — the resource-gate
+  payment service (`_attemptPayment`, checks workers, deducts energy, makes the
+  source lootable) and the lootable collector (spawns the loot objects and
+  damages hp). No click simulation, no popouts, camera-independent. One pass
+  per cycle collects pending loot first, then pays ready sources cheapest-first
+  (cooldown-aware via the tile save model); stops automatically when energy is
+  below the cheapest tap, no workers are free, or the board has no room for
+  drops. Never taps while the game tab is hidden (the paused game loop would
+  queue taps up and fire them all on refocus). Exposed as
+  `window.FMV.menu.autoClear`.
+- **Menu Auto tab**: the overlay now has a Farm/Auto tab bar. The Auto tab
+  holds the two toggles (Auto Orders, Auto Clear); the one-shot ops (Sort,
+  Fill, Harvest, Plan+Merge, Orders) live in the Farm tab. Status line and log
+  panel stay visible on both tabs.
+
+### Fixed
+
+- **Toggle labels**: the Auto Orders / Auto Clear buttons now show "STOP" only
+  for the toggle that is actually running; `requestStop()` marks the active
+  toggle with "Stopping…" instead of unconditionally disabling Auto Orders.
+
 ## [1.0.2] — 2026-08-07
 
 ### Fixed
@@ -81,7 +148,8 @@ Initial release. The first stable version of the Discord Activity build.
   activity restart / game reload — re-run `node src\install.mjs`.
 - The Discord activity restarts if the main thread stalls for seconds — heavy work
   must stay batched with event-loop breathing.
-- Trees/rocks (energy-cost sources) are not harvested yet.
+- Trees/rocks/toolboxes (energy-cost sources) are now covered by the Auto Clear
+  toggle (see 1.1.0).
 - Only one game session should be open (target matched by URL).
 - `window.FMV.I` is a getter function and must be called (`FMV.I()`) — bare
   `FMV.I` yields `undefined` and makes everything look non-mergeable.

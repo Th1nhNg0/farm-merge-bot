@@ -6,13 +6,14 @@
 // Chrome restart / Discord activity restart / game reload (the activity
 // restarts on frame reload, which wipes the injection).
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.2.0";
 
 import { CDP, attach, evalIn, findGameTarget, WS_URL } from "./cdp_lib.mjs";
 import { POLLER_SOURCE } from "./poller.js";
 import { HUNTER_SOURCE } from "./hunter.js";
 import { FMV_HELPER_SOURCE } from "./fmv_helper.js";
 import { MENU_SOURCE } from "./menu.js";
+import { PAUSE_PROTECT_SOURCE } from "./pause_protect.js";
 
 const stage = process.argv[2] || "all";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,6 +29,10 @@ const sid = await attach(cdp, target.targetId);
 
 const probe = async () =>
   (await evalIn(cdp, sid, "({polled: (window.__FMV_rt || []).length, hasFMV: !!window.FMV, menu: !!(window.FMV && window.FMV.menu)})")).result.value;
+
+// Pause protection first: keeps the game loop alive in background tabs and
+// repairs the current session's visibility state (idempotent).
+await evalIn(cdp, sid, PAUSE_PROTECT_SOURCE);
 
 let p = await probe();
 console.log("probe:", JSON.stringify(p));
