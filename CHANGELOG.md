@@ -5,6 +5,26 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] — 2026-08-08
+
+### Fixed
+
+- **Harvest respects the cooldown wait again** (reverts the 1.5.1 cooldown
+  skip): phase 1 once more skips harvestables whose tile save model
+  (`TilesStateModel_col:row`) carries a `cooldown` entry, so the game's wait
+  between harvests is honored; the `tileAt` helper and the `cooling` counter
+  in the harvest log are back.
+- **Adaptive settles across all buttons** (shared `adaptSettle` helper):
+  measures the game's real tick rate once (~300ms window, cached 30s,
+  invalidated on visibility/focus changes) and derives a ~4-tick settle
+  clamped to 150–1500ms. Applied to Merge (300ms fixed → adaptive per round),
+  Clear (1500ms fixed → adaptive + multi-round ground-collect retry so late
+  loot isn't missed), Visit (both 1500ms settles → adaptive), and the Auto
+  Orders / Auto Clear cycle waits (`min(5000, settle×8)` / `min(4000,
+  settle×4)`) — ~3–4× faster cycles when the tab is visible, identical pacing
+  when throttled in a background tab. Harvest reuses the helper. Fill, Sort
+  and the Orders button are unchanged (game-bound or already fast).
+
 ## [1.5.1] — 2026-08-08
 
 ### Fixed

@@ -23,6 +23,37 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // ── adaptive settle ───────────────────────────────────────────────────────
+  // Measures the game's real tick rate once (~300ms window) and derives a
+  // settle time of ~4 ticks, clamped to [minMs, maxMs]. Visible tabs tick at
+  // ~15fps (~66ms/tick) → settle ≈ 150-260ms; throttled background tabs tick
+  // at ~1fps → settle ≈ 1500ms (the old fixed wait). The measurement is cached
+  // ~30s and invalidated on visibility changes, so operations stay fast when
+  // the window is visible and safe when the tab is throttled.
+  let settleCacheMs = null, settleCacheAt = 0;
+  function invalidateSettle() { settleCacheMs = null; settleCacheAt = 0; }
+  try {
+    document.addEventListener('visibilitychange', invalidateSettle);
+    document.addEventListener('focus', invalidateSettle);
+    document.addEventListener('blur', invalidateSettle);
+  } catch (e) {}
+  const adaptSettle = async (minMs, maxMs) => {
+    if (settleCacheMs !== null && Date.now() - settleCacheAt < 30000) return settleCacheMs;
+    const tickMs = await new Promise((res) => {
+      let n = 0, first = null;
+      const tick = (t) => {
+        if (first === null) first = t;
+        else if (t - first >= 300) { res((t - first) / n); return; }
+        n++;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      setTimeout(() => res(n ? 300 / n : 1000), 400);
+    });
+    settleCacheMs = Math.max(minMs, Math.min(maxMs, tickMs * 4));
+    settleCacheAt = Date.now();
+    return settleCacheMs;
+  };
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null };
   const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
     lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
@@ -201,7 +232,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── Phase 2+3: PLAN + MERGE ──────────────────────────────────────────────
   async function phasePlanMerge() {
-    const mergeWait = 300;
+    const mergeWait = await adaptSettle(150, 1500);
     let round = 0;
     while (round < MAX_PLAN_ROUNDS && !state.stop) {
       round++;
@@ -445,15 +476,19 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       throw new Error('tap router not found — game version changed?');
     }
     const hasHarvestTrigger = findLootReceivedCtor();
+    let tiles = null;
+    try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
+    const tileAt = (col, row) => {
+      if (!tiles) return null;
+      try {
+        const m = tiles['TilesStateModel_' + col + ':' + row];
+        return m && m.data && m.data.state ? m.data.state.data : null;
+      } catch (e) { return null; }
+    };
 
-    // phase 1: harvest every READY harvestable (not lootable, hp remaining).
-    // NOTE: the game does NOT enforce the tile cooldown on the direct
-    // LootReceived path (verified live: harvesting a cooled-down item works,
-    // hp -1, loot produced) — the cooldown entry in the tile save model only
-    // gates the normal tap path. So no cooldown check here: the button always
-    // harvests, skipping the wait (previously you could only skip it via
-    // sort, which moved items to cells without a cooldown entry).
-    let harvested = 0, depleted = 0;
+    // phase 1: harvest every READY harvestable — no tile-model cooldown
+    // (respects the game's wait between harvests), not lootable, hp remaining.
+    let harvested = 0, cooling = 0, depleted = 0;
     if (hasHarvestTrigger) {
       for (const cell of S.mapGrid._cells.values()) {
         if (state.stop) break;
@@ -463,6 +498,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         if (e.hasBehavior(I.Lootable)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
+        if (tileAt(cell.column, cell.row) && tileAt(cell.column, cell.row).cooldown) { cooling++; continue; }
         if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
         try { e.addBehavior(new lootReceivedCtor({})); harvested++; } catch (e2) {
           log('harvest fail ' + cell.column + ':' + cell.row, 'warn');
@@ -491,20 +527,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
       } catch (err) { return false; }
     };
-    const settle = await (async () => {
-      const ms = await new Promise((res) => {
-        let n = 0, first = null;
-        const tick = (t) => {
-          if (first === null) first = t;
-          else if (t - first >= 300) { res((t - first) / n); return; }
-          n++;
-          requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-        setTimeout(() => res(n ? 300 / n : 1000), 400);
-      });
-      return Math.max(150, Math.min(1500, ms * 4));
-    })();
+    const settle = await adaptSettle(150, 1500);
     if (harvested > 0) await sleep(settle);
     for (let round = 0; round < 6 && !state.stop; round++) {
       const lootables = [];
@@ -543,6 +566,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       if (lootables.length + collectables.length > 0) await sleep(settle);
     }
     log('harvest: ' + harvested + ' harvest · ' + collected + ' loot · ' + ground + ' ground' +
+      ' · ' + cooling + ' cd' +
       (depleted ? ' · ' + depleted + ' dep' : '') +
       (failed ? ' · ' + failed + ' fail' : '') +
       (hasHarvestTrigger ? '' : ' · no trigger'));
@@ -655,7 +679,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       log('orders cyc ' + cycle, 'ok');
       await orders();
       await freeBoardSpace();
-      const deadline = Date.now() + ORDERS_WAIT_MS;
+      const wait = await adaptSettle(150, 1500) * 8;
+      const deadline = Date.now() + Math.min(ORDERS_WAIT_MS, Math.max(1500, wait));
       while (!state.stop && Date.now() < deadline) await sleep(250);
     }
   }
@@ -688,7 +713,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         log('clear stop: ' + reason, 'warn');
         break;
       }
-      const deadline = Date.now() + CLEAR_WAIT_MS;
+      const wait = await adaptSettle(150, 1500) * 4;
+      const deadline = Date.now() + Math.min(CLEAR_WAIT_MS, Math.max(1000, wait));
       while (!state.stop && Date.now() < deadline) await sleep(250);
     }
   }
@@ -878,6 +904,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     //    bubbles (Collectable behavior) and need a tap to be picked up; only
     //    PRODUCT bubbles (reward key is a real blueprint) — coin/gem/energy
     //    reward bubbles are not ours to click. Guards stale references too.
+    //    Iterates with adaptive settles until none remain (the loot lands on
+    //    the game's next tick, so a single sweep can race it).
     let ground = 0;
     const isProductCollectable = (e) => {
       try {
@@ -887,16 +915,25 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
       } catch (err) { return false; }
     };
-    if (tapped) await sleep(1500);
-    for (const cell of S.mapGrid._cells.values()) {
-      if (state.stop) break;
-      if (!cell || !cell.content) continue;
-      const e = cell.content;
-      if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) continue;
-      if (!isProductCollectable(e)) continue;
-      if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
-      try { tapRouter._simulateClick(e); ground++; } catch (e2) {}
-      if (ground % 20 === 0) await sleep(0);
+    if (tapped) await sleep(await adaptSettle(150, 1500));
+    for (let round = 0; round < 4 && !state.stop; round++) {
+      const found = [];
+      for (const cell of S.mapGrid._cells.values()) {
+        if (state.stop) break;
+        if (!cell || !cell.content) continue;
+        const e = cell.content;
+        if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) continue;
+        if (!isProductCollectable(e)) continue;
+        if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
+        found.push(e);
+      }
+      if (!found.length) break;
+      for (const e of found) {
+        if (state.stop) break;
+        try { tapRouter._simulateClick(e); ground++; } catch (e2) {}
+        if (ground % 20 === 0) await sleep(0);
+      }
+      await sleep(await adaptSettle(150, 1500));
     }
 
     energy = readEnergy();
@@ -1052,13 +1089,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         } catch (e2) { failed++; }
         if (processed % 20 === 0) await sleep(0);
       }
-      await sleep(1500);
+      await sleep(await adaptSettle(150, 1500));
     }
     let claimed = 0;
     if (visitRewardSvc) {
       // the reward pipeline lands asynchronously (a few ticks after the tap) —
       // settle before reading the pending list so nothing is missed
-      await sleep(1500);
+      await sleep(await adaptSettle(150, 1500));
       try {
         const m = visitRewardSvc._model;
         if (m && Array.isArray(m._rewards)) claimed = m._rewards.length;
@@ -1550,7 +1587,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     },
     resetStats: statsReset,
     running: () => state.running,
-    version: '1.5.1'
+    version: '1.5.2'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');
