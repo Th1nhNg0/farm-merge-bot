@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.0.0 (see `CHANGELOG.md`).
+Project version: 1.0.1 (see `CHANGELOG.md`).
 
 ## What this is
 
@@ -86,6 +86,11 @@ Discord activity open; Node.js ≥ 22.
   side-effect-free for the hunter's stubbed enumeration.
 - No lint/typecheck config in this repo (nothing to run).
 - Never commit secrets: session tokens / nakama backend tokens must not be committed.
+- **Changelog on commit**: whenever the user asks to commit and push code, first
+  update `CHANGELOG.md` (Keep a Changelog format; patch bump for fixes, minor for
+  features — add an `Added`/`Fixed` section describing the change), bump the
+  `Project version` line in this file to match, and include both files in the commit.
+- Commit messages use conventional prefixes (`fix:`, `feat:`, `refactor:`, `release:`).
 
 ## Session history
 
