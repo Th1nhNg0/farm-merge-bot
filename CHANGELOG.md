@@ -5,6 +5,21 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-08-08
+
+### Added
+
+- **Analysis popup** (`◉ Analyze` tab): a second draggable in-frame panel showing
+  session counters for everything the bot has done — merges, moves, swaps,
+  crates spawned, harvests, loot/ground picked, orders claimed/started, sources
+  cleared, energy spent by Auto Clear, failures, and elapsed time (mm:ss). Live
+  refresh every 2s while open, reset button, and the counters are exposed as
+  `window.FMV.menu.stats()` / `resetStats()` for CLI reads.
+- **One-shot Clear button** (`⛏ Clear` on the Farm tab): runs a single Auto
+  Clear pass (collect loot → pay ready sources cheapest-first → pick up ground
+  collectables) using the Tree/Rock/Toolbox prefs from the Auto tab, without
+  starting the loop.
+
 ## [1.2.0] — 2026-08-07
 
 ### Added

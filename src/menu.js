@@ -24,6 +24,16 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null };
+  const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
+    lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
+    ordersClaimed: 0, ordersStarted: 0, failed: 0, startedAt: Date.now() };
+  function statsReset() {
+    stats.merged = 0; stats.moved = 0; stats.swapped = 0; stats.crates = 0;
+    stats.harvested = 0; stats.lootCollected = 0; stats.groundCollected = 0;
+    stats.sourcesCleared = 0; stats.energySpent = 0;
+    stats.ordersClaimed = 0; stats.ordersStarted = 0; stats.failed = 0;
+    stats.startedAt = Date.now();
+  }
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
   const ORDERS_WAIT_MS = 5000;
@@ -158,6 +168,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         if (spawned % 50 === 0) await sleep(0);
       }
       spawnedTotal += spawned;
+      stats.crates += spawned;
       log('+' + spawned + '/' + board.empties.length + ' crates, opening…');
       await sleep(spawnWait);
     }
@@ -187,6 +198,11 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       log('mv ' + movesOk + '/' + result.moves.length +
         ' · sw ' + swapsOk + '/' + result.swaps.length +
         ' · mg ' + mergesOk + '/' + result.merges.length);
+      stats.merged += mergesOk;
+      stats.moved += movesOk;
+      stats.swapped += swapsOk;
+      stats.failed += (result.moves.length - movesOk) + (result.swaps.length - swapsOk) +
+        (result.merges.length - mergesOk);
       if (mergesOk === 0) { log('no merges — stop', 'warn'); return false; }
       if (state.stop) { log('stop — halting', 'warn'); return false; }
       await sleep(mergeWait);
@@ -345,6 +361,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
     log('sort: mv ' + moves + ' · sw ' + swaps + ' · fail ' + fails +
       (moves + swaps >= cap ? ' (cap)' : ''));
+    stats.moved += moves;
+    stats.swapped += swaps;
+    stats.failed += fails;
   }
 
   // ── HARVEST: tap every READY harvestable via the game's own tap path ─────
@@ -492,6 +511,10 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       (depleted ? ' · ' + depleted + ' dep' : '') +
       (failed ? ' · ' + failed + ' fail' : '') +
       (hasHarvestTrigger ? '' : ' · no trigger'));
+    stats.harvested += harvested;
+    stats.lootCollected += collected;
+    stats.groundCollected += ground;
+    stats.failed += failed;
   }
 
   // ── ORDERS: claim finished orders, then start affordable orders ────────────
@@ -539,6 +562,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       started++;
     }
     log('orders: +' + claimed + ' · +' + started + ' start' + (skipped ? ' · ' + skipped + ' skip' : ''));
+    stats.ordersClaimed += claimed;
+    stats.ordersStarted += started;
   }
 
   // ── Stop request: set the flag + give immediate UI feedback ──────────────
@@ -778,6 +803,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       if (state.stop) break;
       try { lootSvc._onInteractionAdded(l.entity); collected++; } catch (e2) {
         log('loot fail ' + l.col + ':' + l.row, 'warn');
+        stats.failed++;
       }
       if (collected % 20 === 0) await sleep(0);
     }
@@ -788,6 +814,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     // 2) pay ready sources, cheapest first, until energy is too low
     cands.sort((a, b) => a.cost - b.cost);
     let energy = readEnergy();
+    const energyBefore = energy;
     if (energy < cands[0].cost) {
       return (collected ? 'collected only' : 'energy out');
     }
@@ -806,6 +833,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         tapped++;
       } catch (e2) {
         log('pay fail ' + c.col + ':' + c.row, 'warn');
+        stats.failed++;
       }
       if (tapped % 10 === 0) await sleep(0);
     }
@@ -837,6 +865,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     }
 
     energy = readEnergy();
+    stats.sourcesCleared += tapped;
+    stats.energySpent += Math.max(0, energyBefore - energy);
     log('clear: ' + tapped + ' tap · ' + energy + ' energy' +
       (collected ? ' · ' + collected + ' loot' : '') +
       (ground ? ' · ' + ground + ' ground' : '') +
@@ -862,7 +892,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn;
+  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn;
   let chkOrders, chkClear, chkTree, chkRock, chkToolbox, clearTypesRow;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
@@ -901,6 +931,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvestBtn.disabled = dis;
     planBtn.disabled = dis;
     orderBtn.disabled = dis;
+    if (clearBtn) clearBtn.disabled = dis;
   }
 
   function buildUI() {
@@ -968,6 +999,28 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '#fmv-menu #fmv-log-toggle:hover{background:rgba(130,150,255,.22);color:#e8e8f0;}'
       + '#fmv-menu .l{color:#b8b8c8;}#fmv-menu .l.warn{color:#ffd479;}'
       + '#fmv-menu .l.ok{color:#7ed67e;}#fmv-menu .l.err{color:#ff8f8f;}'
+      + '#fmv-menu button.on{color:#9ad0ff;border-color:rgba(130,150,255,.35);}'
+      + '#fmv-analyze{position:fixed;top:12px;right:264px;z-index:2147483647;width:210px;'
+      + 'background:rgba(13,14,22,.82);color:#d7d7e0;font:10px/1.45 ui-monospace,Consolas,monospace;'
+      + 'border:1px solid rgba(130,150,255,.18);border-radius:9px;box-shadow:0 8px 32px rgba(0,0,0,.55);'
+      + 'user-select:none;overflow:hidden;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}'
+      + '#fmv-analyze .head{display:flex;align-items:center;gap:5px;padding:4px 8px;cursor:move;touch-action:none;'
+      + 'background:linear-gradient(180deg,rgba(255,255,255,.05),transparent);}'
+      + '#fmv-analyze .title{font-weight:700;font-size:10.5px;color:#9ad0ff;flex:1;letter-spacing:.3px;}'
+      + '#fmv-analyze .close{flex:none;width:16px;height:14px;padding:0;font-size:11px;line-height:1;'
+      + 'border:1px solid rgba(130,150,255,.15);border-radius:4px;background:rgba(255,255,255,.06);'
+      + 'color:#8a8a99;cursor:pointer;}'
+      + '#fmv-analyze .close:hover{background:rgba(130,150,255,.22);color:#e8e8f0;}'
+      + '#fmv-analyze .sec{color:#8a8a99;font-size:9px;padding:4px 8px 1px;letter-spacing:.4px;}'
+      + '#fmv-analyze .row{display:flex;justify-content:space-between;padding:1px 8px;}'
+      + '#fmv-analyze .row b{color:#e8e8f0;font-weight:600;}'
+      + '#fmv-analyze .row.fail b{color:#ff8f8f;}'
+      + '#fmv-analyze .foot{padding:5px 8px 6px;}'
+      + '#fmv-analyze button{font:inherit;width:100%;padding:3px 0;border:1px solid rgba(130,150,255,.14);'
+      + 'border-radius:5px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
+      + 'transition:background .15s,transform .05s;}'
+      + '#fmv-analyze button:hover{background:rgba(130,150,255,.16);}'
+      + '#fmv-analyze button:active{transform:translateY(1px);}'
       + '#input-field{display:none !important;}';
     document.head.appendChild(style);
 
@@ -980,6 +1033,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '<div class="tabs">'
       + '<button id="fmv-tab-farm" class="tab on">Farm</button>'
       + '<button id="fmv-tab-auto" class="tab">Auto</button>'
+      + '<button id="fmv-tab-analyze" class="tab">Analyze</button>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-farm">'
       + '<div class="btns">'
@@ -992,6 +1046,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '</div>'
       + '<div class="btns">'
       + '<button id="fmv-fill">▦ Fill</button>'
+      + '<button id="fmv-clear-once">⛏ Clear</button>'
       + '</div>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-auto" style="display:none">'
@@ -1015,6 +1070,78 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '</div>';
     document.body.appendChild(el);
 
+    const oldPopup = document.getElementById('fmv-analyze');
+    if (oldPopup) oldPopup.remove();
+    if (window.__FMV_analyzeTimer) { clearInterval(window.__FMV_analyzeTimer); window.__FMV_analyzeTimer = null; }
+    const popup = document.createElement('div');
+    popup.id = 'fmv-analyze';
+    popup.style.display = 'none';
+    popup.innerHTML = '<div class="head"><span class="title">Analysis · session</span><button class="close" title="close">×</button></div>'
+      + '<div class="sec">Production</div>'
+      + '<div class="row"><span>merges</span><b data-k="merged">0</b></div>'
+      + '<div class="row"><span>moves</span><b data-k="moved">0</b></div>'
+      + '<div class="row"><span>swaps</span><b data-k="swapped">0</b></div>'
+      + '<div class="row"><span>crates</span><b data-k="crates">0</b></div>'
+      + '<div class="row"><span>harvests</span><b data-k="harvested">0</b></div>'
+      + '<div class="row"><span>loot picked</span><b data-k="lootCollected">0</b></div>'
+      + '<div class="row"><span>ground picked</span><b data-k="groundCollected">0</b></div>'
+      + '<div class="sec">Orders</div>'
+      + '<div class="row"><span>claimed</span><b data-k="ordersClaimed">0</b></div>'
+      + '<div class="row"><span>started</span><b data-k="ordersStarted">0</b></div>'
+      + '<div class="sec">Clear</div>'
+      + '<div class="row"><span>sources</span><b data-k="sourcesCleared">0</b></div>'
+      + '<div class="row"><span>energy spent</span><b data-k="energySpent">0</b></div>'
+      + '<div class="sec">Misc</div>'
+      + '<div class="row fail"><span>failures</span><b data-k="failed">0</b></div>'
+      + '<div class="row"><span>elapsed</span><b data-k="elapsed">0s</b></div>'
+      + '<div class="foot"><button id="fmv-analyze-reset">Reset</button></div>';
+    document.body.appendChild(popup);
+    const analyzeTick = () => {
+      if (popup.style.display === 'none') return;
+      for (const b of popup.querySelectorAll('b[data-k]')) {
+        const k = b.getAttribute('data-k');
+        if (k === 'elapsed') {
+          const s = Math.floor((Date.now() - stats.startedAt) / 1000);
+          b.textContent = Math.floor(s / 60) + ':' + ((s % 60) < 10 ? '0' : '') + (s % 60);
+        } else {
+          b.textContent = stats[k];
+        }
+      }
+    };
+    window.__FMV_analyzeTimer = setInterval(analyzeTick, 2000);
+    const closePopup = () => {
+      popup.style.display = 'none';
+      if (analyzeBtn) analyzeBtn.classList.remove('on');
+    };
+    const popupHead = popup.querySelector('.head');
+    const popupClose = popup.querySelector('.close');
+    popupClose.addEventListener('pointerdown', (e) => e.stopPropagation());
+    popupClose.addEventListener('click', closePopup);
+    popup.querySelector('#fmv-analyze-reset').addEventListener('click', () => { statsReset(); analyzeTick(); });
+    let popupDrag = false;
+    popupHead.addEventListener('pointerdown', (e) => {
+      popupDrag = true;
+      const r = popup.getBoundingClientRect();
+      popup.style.left = r.left + 'px';
+      popup.style.top = r.top + 'px';
+      popup.style.right = 'auto';
+      popup.__offX = e.clientX - r.left;
+      popup.__offY = e.clientY - r.top;
+      try { popupHead.setPointerCapture(e.pointerId); } catch (e2) {}
+    });
+    popupHead.addEventListener('pointermove', (e) => {
+      if (!popupDrag) return;
+      e.preventDefault();
+      popup.style.left = (e.clientX - popup.__offX) + 'px';
+      popup.style.top = (e.clientY - popup.__offY) + 'px';
+    });
+    const endPopupDrag = (e) => {
+      popupDrag = false;
+      try { popupHead.releasePointerCapture(e.pointerId); } catch (e2) {}
+    };
+    popupHead.addEventListener('pointerup', endPopupDrag);
+    popupHead.addEventListener('pointercancel', endPopupDrag);
+
     dot = el.querySelector('.dot');
     dot.title = 'stop current op';
     dot.style.cursor = 'pointer';
@@ -1031,6 +1158,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvestBtn = el.querySelector('#fmv-harvest');
     planBtn = el.querySelector('#fmv-plan');
     orderBtn = el.querySelector('#fmv-orders');
+    analyzeBtn = el.querySelector('#fmv-tab-analyze');
+    clearBtn = el.querySelector('#fmv-clear-once');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -1070,9 +1199,16 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     autoBtn.addEventListener('click', autoAll);
     sortBtn.addEventListener('click', () => runOp(sortBoard));
     fillBtn.addEventListener('click', () => runOp(phaseFill));
+    clearBtn.addEventListener('click', () => runOp(clearOnce));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
     orderBtn.addEventListener('click', () => runOp(orders));
+    analyzeBtn.addEventListener('click', () => {
+      const open = popup.style.display !== 'none';
+      popup.style.display = open ? 'none' : '';
+      analyzeBtn.classList.toggle('on', !open);
+      analyzeTick();
+    });
     const logToggle = el.querySelector('#fmv-log-toggle');
     logToggle.addEventListener('click', () => {
       const open = logEl.current.classList.toggle('open');
@@ -1122,6 +1258,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       if (state.running || state.busy) requestStop();
     },
     status: refreshStatus,
+    stats: () => ({ ...stats, elapsed: Math.floor((Date.now() - stats.startedAt) / 1000) }),
+    resetStats: statsReset,
     running: () => state.running,
     version: '1.2.0'
   };
