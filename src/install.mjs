@@ -6,7 +6,7 @@
 // Chrome restart / Discord activity restart / game reload (the activity
 // restarts on frame reload, which wipes the injection).
 
-export const VERSION = "1.5.3";
+export const VERSION = "1.5.4";
 
 import { CDP, attach, evalIn, findGameTarget, WS_URL } from "./cdp_lib.mjs";
 import { POLLER_SOURCE } from "./poller.js";
@@ -33,6 +33,9 @@ const probe = async () =>
 // Pause protection first: keeps the game loop alive in background tabs and
 // repairs the current session's visibility state (idempotent).
 await evalIn(cdp, sid, PAUSE_PROTECT_SOURCE);
+
+// Single source of truth for the version shown in the FMV helper + menu.
+await evalIn(cdp, sid, "window.__FMV_version = " + JSON.stringify(VERSION) + ";");
 
 let p = await probe();
 console.log("probe:", JSON.stringify(p));

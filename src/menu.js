@@ -1,4 +1,4 @@
-// In-game bot menu overlay (FMV Bot). Installed by install_menu.mjs.
+// In-game bot menu overlay (FMV Bot). Installed by install.mjs.
 // All bot logic runs INSIDE the game frame — the menu buttons drive it:
 //   [Fill]         spawn crates on every empty cell until the map is full
 //   [Merge]        plan ALL groups (natural 5/10/15 + move/swap grouping)
@@ -13,11 +13,14 @@
 // Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, autoClear,
 //                             autoAll, stop, status, running }.
 
-// Shared planner (plan.js) is prepended to the injected source, so the menu
-// IIFE below can use window.FMVPlan (same logic as the CLI scripts).
+// Shared planner (plan.js) and game-access helpers (util.js) are prepended to
+// the injected source, so the menu IIFE below can use window.FMVPlan (same
+// logic as the CLI scripts) and window.FMVUtil.
 import { readFileSync } from "node:fs";
 
-export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "utf8") + "\n" + `(function(){
+export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "utf8")
+  + "\n" + readFileSync(new URL("./util.js", import.meta.url), "utf8")
+  + "\n" + `(function(){
   if (window.FMV && window.FMV.menu && window.FMV.menu.running && window.FMV.menu.running()) {
     return { ok: false, reason: 'menu running' };
   }
@@ -54,6 +57,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     settleCacheAt = Date.now();
     return settleCacheMs;
   };
+  const SETTLE_MIN = 150;
+  const SETTLE_MAX = 1500;
+  const settleSleep = async () => sleep(await adaptSettle(SETTLE_MIN, SETTLE_MAX));
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null };
   const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
     lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
@@ -102,40 +108,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
   function assertFMV() {
     if (!window.FMV || !window.FMV.services) {
-      throw new Error('FMV lost — Discord activity restarted; re-run install_menu.mjs');
+      throw new Error('FMV lost — Discord activity restarted; re-run install.mjs');
     }
   }
 
-  // ── board snapshot (read in-frame) ───────────────────────────────────────
-  function readBoard() {
-    assertFMV();
-    const S = window.FMV.services();
-    if (!S || !S.mapGrid) return { error: 'farm services not ready' };
-    const I = window.FMV.I();
-    const out = { cells: {}, empties: [], items: [] };
-    for (const cell of S.mapGrid._cells.values()) {
-      if (!cell) continue;
-      const e = { col: cell.column, row: cell.row, empty: !cell.content, neighbors: [] };
-      try { e.neighbors = cell.getNeighbors().map((n) => n.column + ':' + n.row); } catch (e2) {}
-      if (cell.content) {
-        let info = null;
-        try { info = cell.content.getObjectIdAndTier ? cell.content.getObjectIdAndTier() : null; } catch (e2) {}
-        e.id = info ? info.id : (cell.content.getBlueprintID ? cell.content.getBlueprintID() : null);
-        e.tier = info ? info.tier : null;
-        e.mergeable = !!(cell.content.hasBehavior && cell.content.hasBehavior(I.Mergeable));
-        if (e.mergeable) {
-          try {
-            const mb = cell.content.getBehavior(I.Mergeable);
-            e.target = mb && mb._data && mb._data.target ? String(mb._data.target) : null;
-          } catch (e2) {}
-        }
-      }
-      const key = e.col + ':' + e.row;
-      out.cells[key] = e;
-      if (e.empty) out.empties.push(e); else out.items.push(e);
-    }
-    return out;
-  }
+  // ── board snapshot (read in-frame, via FMVUtil) ─────────────────────────
+  // Returns { cells, empties, items } or { error } (no throw — callers check).
+  const readBoard = window.FMVUtil.readBoard;
 
   // ── planner: shared logic from plan.js (window.FMVPlan) ────────────────────
 
@@ -232,7 +211,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
   // ── Phase 2+3: PLAN + MERGE ──────────────────────────────────────────────
   async function phasePlanMerge() {
-    const mergeWait = await adaptSettle(150, 1500);
+    const mergeWait = await adaptSettle(SETTLE_MIN, SETTLE_MAX);
     let round = 0;
     while (round < MAX_PLAN_ROUNDS && !state.stop) {
       round++;
@@ -434,17 +413,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   // remain instead of a single sweep that can race the game.
   // Readiness = no cooldown entry in the tile save model (the game writes it
   // on harvest) + hitpoints remaining.
-  function getTapRouter(S) {
-    // The subscriber list is rebuilt by the game as it spawns/destroys
-    // subsystems, so never trust index 0 — find any context with _simulateClick.
-    try {
-      const subs = S.interactionService.onGestureTap._subscribers;
-      for (const s of subs || []) {
-        if (s && s.context && typeof s.context._simulateClick === 'function') return s.context;
-      }
-    } catch (e) {}
-    return null;
-  }
+  const getTapRouter = window.FMVUtil.getTapRouter;
 
   // Entities WE already sent LootReceived to this session, with the send time.
   // The game writes the cooldown (tile entry / cooldown behavior / timer) only
@@ -485,15 +454,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       throw new Error('tap router not found — game version changed?');
     }
     const hasHarvestTrigger = findLootReceivedCtor();
-    let tiles = null;
-    try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
-    const tileAt = (col, row) => {
-      if (!tiles) return null;
-      try {
-        const m = tiles['TilesStateModel_' + col + ':' + row];
-        return m && m.data && m.data.state ? m.data.state.data : null;
-      } catch (e) { return null; }
-    };
+    const tiles = FMVUtil.tileModel();
 
     // phase 1: harvest every READY harvestable — no tile-model cooldown
     // (respects the game's wait between harvests), not lootable, hp remaining,
@@ -509,7 +470,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         if (e.hasBehavior(I.Lootable)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
-        if (tileAt(cell.column, cell.row) && tileAt(cell.column, cell.row).cooldown) { cooling++; continue; }
+        if (FMVUtil.tileAt(tiles, cell.column, cell.row) && FMVUtil.tileAt(tiles, cell.column, cell.row).cooldown) { cooling++; continue; }
         const pendingAt = pendingHarvests.get(e);
         if (pendingAt && Date.now() - pendingAt < LAG_WINDOW) { cooling++; continue; }
         if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
@@ -535,18 +496,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     let collected = 0;
     let ground = 0;
     let failed = 0;
-    // only tap collectables whose reward is a real board item (blueprint) —
-    // coin/gem/energy reward bubbles are not harvest products and must not be
-    // clicked
-    const isProductCollectable = (e) => {
-      try {
-        const cb = e.getBehavior(I.Collectable);
-        const r = cb && cb._data && cb._data.reward;
-        if (!r || !r[0] || !r[0].key) return false;
-        return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
-      } catch (err) { return false; }
-    };
-    const settle = await adaptSettle(150, 1500);
+    const settle = await adaptSettle(SETTLE_MIN, SETTLE_MAX);
     if (harvested > 0) await sleep(settle);
     for (let round = 0; round < 6 && !state.stop; round++) {
       const lootables = [];
@@ -560,7 +510,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         }
         const rec = { e: e, col: cell.column, row: cell.row };
         if (e.hasBehavior(I.Lootable)) lootables.push(rec);
-        else if (isProductCollectable(e)) collectables.push(rec);
+        else if (FMVUtil.isProductCollectable(e, I)) collectables.push(rec);
       }
       if (!lootables.length && !collectables.length) break;
       // guard: the board shifts while we run — never tap a stale reference
@@ -698,7 +648,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       log('orders cyc ' + cycle, 'ok');
       await orders();
       await freeBoardSpace();
-      const wait = await adaptSettle(150, 1500) * 8;
+      const wait = await adaptSettle(SETTLE_MIN, SETTLE_MAX) * 8;
       const deadline = Date.now() + Math.min(ORDERS_WAIT_MS, Math.max(1500, wait));
       while (!state.stop && Date.now() < deadline) await sleep(250);
     }
@@ -732,7 +682,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         log('clear stop: ' + reason, 'warn');
         break;
       }
-      const wait = await adaptSettle(150, 1500) * 4;
+      const wait = await adaptSettle(SETTLE_MIN, SETTLE_MAX) * 4;
       const deadline = Date.now() + Math.min(CLEAR_WAIT_MS, Math.max(1000, wait));
       while (!state.stop && Date.now() < deadline) await sleep(250);
     }
@@ -790,27 +740,18 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (paySvc && lootSvc) return true;
     let pay = null, loot = null;
     const S = window.FMV.services();
-    outer:
-    for (const cell of S.mapGrid._cells.values()) {
-      if (!cell || !cell.content) continue;
+    FMVUtil.forEachCell(S, (cell) => {
+      if (!cell.content) return;
       let ev = null;
-      try { ev = cell.content.onBehaviorAdded; } catch (e) { continue; }
-      if (!ev || !ev._subscribers) continue;
-      for (let i = 0; i < ev._subscribers.length; i++) {
-        const reg = ev._subscribers[i].context;
-        if (!reg || !reg.onGameObjectAdded || !reg._filter) continue;
-        let types = null;
-        try { types = reg._filter._behaviorTypes; } catch (e) {}
-        if (!types || !Array.isArray(types)) continue;
-        let sub = null;
-        try { sub = reg.onGameObjectAdded._subscribers[0].context; } catch (e) { continue; }
-        if (!sub) continue;
+      try { ev = cell.content.onBehaviorAdded; } catch (e) { return; }
+      FMVUtil.walkBehaviorRegistries(ev, (reg, types, sub) => {
         if (!pay && typeof sub._attemptPayment === 'function') pay = sub;
         if (!loot && types.indexOf('interactionTap') !== -1 && types.indexOf('lootable') !== -1 &&
             typeof sub._onInteractionAdded === 'function') loot = sub;
-        if (pay && loot) break outer;
-      }
-    }
+        if (pay && loot) return false;
+      });
+      if (pay && loot) return false;
+    });
     paySvc = pay;
     lootSvc = loot;
     return !!(pay && loot);
@@ -826,8 +767,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (!findTapServices()) return 'no tap services';
     const tapRouter = getTapRouter(S);
     if (!tapRouter || typeof tapRouter._simulateClick !== 'function') return 'no router';
-    let tiles = null;
-    try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
+    const tiles = FMVUtil.tileModel();
     const readEnergy = () => {
       try {
         const v = window.FMV.rootServices().inventory.getAmount('energy');
@@ -852,12 +792,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (!hp || typeof hp.current !== 'number' || hp.current <= 0) continue;
         let tile = null;
-        if (tiles) {
-          try {
-            const m = tiles['TilesStateModel_' + cell.column + ':' + cell.row];
-            tile = m && m.data && m.data.state ? m.data.state.data : null;
-          } catch (e2) {}
-        }
+        if (tiles) tile = FMVUtil.tileAt(tiles, cell.column, cell.row);
         if (tile && tile.cooldown) continue;
         if (tile && tile.lootable) {
           lootables.push({ entity: e, col: cell.column, row: cell.row });
@@ -926,33 +861,16 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     //    Iterates with adaptive settles until none remain (the loot lands on
     //    the game's next tick, so a single sweep can race it).
     let ground = 0;
-    const isProductCollectable = (e) => {
-      try {
-        const cb = e.getBehavior(I.Collectable);
-        const r = cb && cb._data && cb._data.reward;
-        if (!r || !r[0] || !r[0].key) return false;
-        return window.FMV.rootServices().blueprintCollection.hasBlueprint(r[0].key);
-      } catch (err) { return false; }
-    };
-    if (tapped) await sleep(await adaptSettle(150, 1500));
+    if (tapped) await settleSleep();
     for (let round = 0; round < 4 && !state.stop; round++) {
-      const found = [];
-      for (const cell of S.mapGrid._cells.values()) {
-        if (state.stop) break;
-        if (!cell || !cell.content) continue;
-        const e = cell.content;
-        if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) continue;
-        if (!isProductCollectable(e)) continue;
-        if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
-        found.push(e);
-      }
+      const found = FMVUtil.collectablesOnBoard(S, I);
       if (!found.length) break;
       for (const e of found) {
         if (state.stop) break;
         try { tapRouter._simulateClick(e); ground++; } catch (e2) {}
         if (ground % 20 === 0) await sleep(0);
       }
-      await sleep(await adaptSettle(150, 1500));
+      await settleSleep();
     }
 
     energy = readEnergy();
@@ -984,24 +902,14 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const S = window.FMV.services();
     if (!S) return false;
     const ctx = { visitorProc: null, visitorSim: null, ownerProc: null, ownerSim: null };
-    outer:
-    for (const cell of S.mapGrid._cells.values()) {
-      if (!cell || !cell.content) continue;
+    FMVUtil.forEachCell(S, (cell) => {
+      if (!cell.content) return;
       let ev = null;
-      try { ev = cell.content.onBehaviorAdded; } catch (e) { continue; }
-      if (!ev || !ev._subscribers) continue;
-      for (let i = 0; i < ev._subscribers.length; i++) {
-        const reg = ev._subscribers[i].context;
-        if (!reg || !reg.onGameObjectAdded || !reg._filter) continue;
-        let types = null;
-        try { types = reg._filter._behaviorTypes; } catch (e) {}
-        if (!types || !Array.isArray(types)) continue;
+      try { ev = cell.content.onBehaviorAdded; } catch (e) { return; }
+      FMVUtil.walkBehaviorRegistries(ev, (reg, types, sub) => {
         const isVisitor = types.indexOf('visitorAction') !== -1;
         const isOwner = types.indexOf('friendReward') !== -1;
-        if (!isVisitor && !isOwner) continue;
-        let sub = null;
-        try { sub = reg.onGameObjectAdded._subscribers[0].context; } catch (e) { continue; }
-        if (!sub) continue;
+        if (!isVisitor && !isOwner) return;
         if (isVisitor) {
           if (!ctx.visitorProc && typeof sub._onActivityTapped === 'function' && typeof sub._createVisitorReward === 'function') ctx.visitorProc = sub;
           if (!ctx.visitorSim && typeof sub._simulateClick === 'function') ctx.visitorSim = sub;
@@ -1010,9 +918,10 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
           if (!ctx.ownerProc && typeof sub._onInteractionTap === 'function' && typeof sub._processReward === 'function') ctx.ownerProc = sub;
           if (!ctx.ownerSim && typeof sub._simulateClick === 'function') ctx.ownerSim = sub;
         }
-        if (ctx.visitorProc && ctx.visitorSim && ctx.ownerProc && ctx.ownerSim) break outer;
-      }
-    }
+        if (ctx.visitorProc && ctx.visitorSim && ctx.ownerProc && ctx.ownerSim) return false;
+      });
+      if (ctx.visitorProc && ctx.visitorSim && ctx.ownerProc && ctx.ownerSim) return false;
+    });
     window.__FMV_visitCtx = ctx;
     if (visitRewardSvc) return !!(ctx.visitorProc || ctx.visitorSim || ctx.ownerProc || ctx.ownerSim);
     const R = window.FMV.rootServices();
@@ -1042,16 +951,11 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   // its onBehaviorAdded event (the game routes taps the same way)
   function isVisitorEntity(e) {
     try {
-      const ev = e.onBehaviorAdded;
-      if (!ev || !ev._subscribers) return false;
-      for (let i = 0; i < ev._subscribers.length; i++) {
-        const reg = ev._subscribers[i].context;
-        if (!reg || !reg._filter) continue;
-        let types = null;
-        try { types = reg._filter._behaviorTypes; } catch (e2) {}
-        if (!types || !Array.isArray(types) || types.indexOf('visitorAction') === -1) continue;
-        return true;
-      }
+      let found = false;
+      FMVUtil.walkBehaviorRegistries(e.onBehaviorAdded, (reg, types) => {
+        if (types.indexOf('visitorAction') !== -1) { found = true; return false; }
+      });
+      return found;
     } catch (e2) {}
     return false;
   }
@@ -1108,13 +1012,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         } catch (e2) { failed++; }
         if (processed % 20 === 0) await sleep(0);
       }
-      await sleep(await adaptSettle(150, 1500));
+      await settleSleep();
     }
     let claimed = 0;
     if (visitRewardSvc) {
       // the reward pipeline lands asynchronously (a few ticks after the tap) —
       // settle before reading the pending list so nothing is missed
-      await sleep(await adaptSettle(150, 1500));
+      await settleSleep();
       try {
         const m = visitRewardSvc._model;
         if (m && Array.isArray(m._rewards)) claimed = m._rewards.length;
@@ -1169,7 +1073,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       el.textContent = 'items ' + items + ' · empty ' + empty + ' · crates ' + crates + extra;
       el.className = 'status' + (b.error ? ' err' : '');
     } catch (e) {
-      el.textContent = 'FMV not ready — re-run install_menu.mjs';
+      el.textContent = 'FMV not ready — re-run install.mjs';
       el.className = 'status err';
     }
   }
@@ -1606,7 +1510,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     },
     resetStats: statsReset,
     running: () => state.running,
-    version: '1.5.3'
+    version: window.__FMV_version || '1.5.4'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

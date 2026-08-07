@@ -183,32 +183,32 @@ globalThis.FMVPlan = (function () {
     }
 
     // 2) grouped plans: biggest groups first (15 > 10 > 5), many per key
-  const groups = [];
-  const keys = Object.entries(counts)
-    .filter(([, n]) => n >= 5)
-    .map(([k, n]) => {
-      const [id, tier] = k.split("_");
-      return [k, n, connectedComponents(items, { id, tier }).length];
-    })
-    .sort((a, b) => a[2] - b[2] || b[1] - a[1]);
-  for (const [k] of keys) {
+    const groups = [];
+    const keys = Object.entries(counts)
+      .filter(([, n]) => n >= 5)
+      .map(([k, n]) => {
+        const [id, tier] = k.split("_");
+        return [k, n, connectedComponents(items, { id, tier }).length];
+      })
+      .sort((a, b) => a[2] - b[2] || b[1] - a[1]);
+    for (const [k] of keys) {
       const [id, tier] = k.split("_");
       const avail = () => items.filter((c) => c.id === id && c.tier === tier &&
         !usedCells.has(c.col + ":" + c.row) && !usedItems.has(c.col + ":" + c.row));
-    let n = avail().length;
-    while (n >= 5) {
-      const maxSize = n >= 15 ? 15 : n >= 10 ? 10 : 5;
-      let g = null;
-      for (let size = maxSize; size >= 5; size -= 5) {
-        g = planGroup(board, { id, tier }, size, usedCells, usedItems, neverMove);
-        if (g) break;
+      let n = avail().length;
+      while (n >= 5) {
+        const maxSize = n >= 15 ? 15 : n >= 10 ? 10 : 5;
+        let g = null;
+        for (let size = maxSize; size >= 5; size -= 5) {
+          g = planGroup(board, { id, tier }, size, usedCells, usedItems, neverMove);
+          if (g) break;
+        }
+        if (!g) break;
+        groups.push({ key: k, size: g.group.length, group: g.group, needsMove: g.needsMove, needsSwap: g.needsSwap, sources: g.sources });
+        for (const c of g.group) usedCells.add(c.col + ":" + c.row);
+        for (const s of g.sources) usedItems.add(s.col + ":" + s.row);
+        n = avail().length;
       }
-      if (!g) break;
-      groups.push({ key: k, size: g.group.length, group: g.group, needsMove: g.needsMove, needsSwap: g.needsSwap, sources: g.sources });
-      for (const c of g.group) usedCells.add(c.col + ":" + c.row);
-      for (const s of g.sources) usedItems.add(s.col + ":" + s.row);
-      n = avail().length;
-    }
     }
     return { naturals, groups };
   }

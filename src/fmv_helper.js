@@ -133,5 +133,5 @@ export const FMV_HELPER_SOURCE = `(function(){
   }
 
   window.FMV = { board, merge, move, swap, spawnCrate, services, req, I, root, rootServices,
-                 mergeCtor: MergeTriggerCtor, version: '1.5.3' };
+                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.5.4' };
 })();`;

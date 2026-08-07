@@ -5,6 +5,25 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] — 2026-08-08
+
+### Changed
+
+- **Shared game-access helpers extracted** (`src/util.js` → `window.FMVUtil`):
+  `readBoard`, `tileModel`, `tileAt`, `getTapRouter`, `walkBehaviorRegistries`,
+  `isProductCollectable`, `collectablesOnBoard` and `forEachCell` now live in one
+  in-frame module prepended to the menu injection (same pattern as `plan.js`),
+  replacing duplicated copies in `menu.js`: the identical `isProductCollectable`
+  definitions, both tile save-model readers, both ground-collect scans, the
+  tap-router lookup and the three behavior-registry walks (Auto Clear payment/
+  loot discovery, visit tap-path discovery, visitor-entity detection). Purely
+  structural — no behavior change (verified live: install, plan+merge, harvest,
+  clear all pass).
+- **Version is single-sourced**: `install.mjs` injects `window.__FMV_version`
+  once; `fmv_helper.js` and `menu.js` read it (with a fallback) instead of
+  hardcoding. The menu's stale `1.5.2` label also now matches the project
+  version. README §7 updated: one place to bump instead of five.
+
 ## [1.5.3] — 2026-08-08
 
 ### Fixed
