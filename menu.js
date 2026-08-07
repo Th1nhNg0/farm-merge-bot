@@ -4,8 +4,9 @@
 //   [Plan+Merge]   plan ALL groups (natural 5/10/15 + move/swap grouping)
 //                  from one snapshot, then execute them in one batched pass
 //   [Orders]       claim completed orders, then start every affordable order
-//   [Auto Orders]  toggle: claim completed + start affordable orders in a loop
-//                  every few seconds until stopped
+  //   [Auto Orders]  toggle: claim completed + start affordable orders in a loop
+  //                  every few seconds until stopped; when the board fills up,
+  //                  runs plan+merge to merge items and free space
 //   [Refresh]      update the items/empty/crates status line
 // Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, stop, status, running }.
 
@@ -438,7 +439,19 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       (skipped ? ', skipped ' + skipped : ''));
   }
 
-  // ── Auto-orders loop: claim + start orders every few seconds ─────────────
+  // ── Board-full guard: when no empty cells are left, merge to free space ───
+  async function freeBoardSpace() {
+    assertFMV();
+    const board = readBoard();
+    if (board.error) throw new Error(board.error);
+    if (board.empties.length > 0) return false;
+    log('board is full (' + board.items.length + ' items) — running plan+merge', 'warn');
+    await phasePlanMerge();
+    return true;
+  }
+
+  // ── Auto-orders loop: claim + start orders every few seconds; when the
+  //    board fills up, run plan+merge to merge items and free space ─────────
   async function autoOrders() {
     if (state.running) { state.stop = true; log('stop requested — finishing current op...'); return; }
     if (state.busy) return;
@@ -451,6 +464,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         cycle++;
         log('=== orders cycle ' + cycle + ' ===', 'ok');
         await orders();
+        await freeBoardSpace();
         await sleep(ORDERS_WAIT_MS);
       }
     } catch (e) {
@@ -652,7 +666,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     stop: () => { state.stop = true; log('stop requested'); },
     status: refreshStatus,
     running: () => state.running,
-    version: '1.1'
+    version: '1.2'
   };
   setUI();
   log('menu installed — FMV ' + window.FMV.version, 'ok');
