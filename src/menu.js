@@ -26,13 +26,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null };
   const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
     lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
-    ordersClaimed: 0, ordersStarted: 0, failed: 0, startedAt: Date.now() };
+    ordersClaimed: 0, ordersStarted: 0, friendRewards: 0, failed: 0, startedAt: Date.now() };
   function statsReset() {
     stats.merged = 0; stats.moved = 0; stats.swapped = 0; stats.crates = 0;
     stats.harvested = 0; stats.lootCollected = 0; stats.groundCollected = 0;
     stats.sourcesCleared = 0; stats.energySpent = 0;
-    stats.ordersClaimed = 0; stats.ordersStarted = 0; stats.failed = 0;
-    stats.startedAt = Date.now();
+    stats.ordersClaimed = 0; stats.ordersStarted = 0; stats.friendRewards = 0;
+    stats.failed = 0; stats.startedAt = Date.now();
   }
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
@@ -875,6 +875,113 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     return null;
   }
 
+  // ── VISIT: auto-collect friend-reward bubbles ─────────────────────────────
+  // When a friend visits the farm, a FriendReward bubble lands on a random
+  // board entity (train station, animals, plants). The game processes each tap
+  // through a dedicated friendReward behavior family (_onInteractionTap →
+  // _processReward: deplete heavy-object HP, etc.). We drive that family
+  // directly (no click simulation), in iterative rounds with settle delays —
+  // the same pattern as the harvest collect phase. Leftover rewards are
+  // claimed through the visitorReward service (_model._rewards).
+  let visitProc = null, visitSim = null, visitRewardSvc = null;
+  function findVisitServices() {
+    if (visitProc && visitRewardSvc) return true;
+    let proc = null, sim = null;
+    const S = window.FMV.services();
+    outer:
+    for (const cell of S.mapGrid._cells.values()) {
+      if (!cell || !cell.content) continue;
+      let ev = null;
+      try { ev = cell.content.onBehaviorAdded; } catch (e) { continue; }
+      if (!ev || !ev._subscribers) continue;
+      for (let i = 0; i < ev._subscribers.length; i++) {
+        const reg = ev._subscribers[i].context;
+        if (!reg || !reg.onGameObjectAdded || !reg._filter) continue;
+        let types = null;
+        try { types = reg._filter._behaviorTypes; } catch (e) {}
+        if (!types || !Array.isArray(types)) continue;
+        if (types.indexOf('friendReward') === -1) continue;
+        let sub = null;
+        try { sub = reg.onGameObjectAdded._subscribers[0].context; } catch (e) { continue; }
+        if (!sub) continue;
+        if (!proc && typeof sub._onInteractionTap === 'function' && typeof sub._processReward === 'function') proc = sub;
+        if (!sim && typeof sub._simulateClick === 'function') sim = sub;
+        if (proc && sim) break outer;
+      }
+    }
+    visitProc = proc;
+    visitSim = sim;
+    if (visitRewardSvc) return !!(proc || sim);
+    const R = window.FMV.rootServices();
+    const seen = new Set();
+    const search = (obj, depth) => {
+      if (!obj || depth > 6 || visitRewardSvc) return;
+      try {
+        for (const k of Object.keys(obj)) {
+          let v;
+          try { v = obj[k]; } catch (e) { continue; }
+          if (v && typeof v === 'object' && !seen.has(v)) {
+            seen.add(v);
+            if (typeof v.hasRewards === 'function' && v._model && Array.isArray(v._model._rewards)) {
+              visitRewardSvc = v;
+              return;
+            }
+            search(v, depth + 1);
+          }
+        }
+      } catch (e) {}
+    };
+    search(R, 0);
+    return !!(proc || sim);
+  }
+
+  async function collectVisits() {
+    assertFMV();
+    if (!findVisitServices()) throw new Error('friend reward services not found — game version changed?');
+    const S = window.FMV.services();
+    const I = window.FMV.I();
+    let processed = 0, failed = 0;
+    for (let round = 0; round < 6 && !state.stop; round++) {
+      const cands = [];
+      for (const cell of S.mapGrid._cells.values()) {
+        if (!cell || !cell.content) continue;
+        const e = cell.content;
+        if (!e.hasBehavior || !e.hasBehavior(I.FriendReward)) continue;
+        cands.push({ e: e, col: cell.column, row: cell.row });
+      }
+      if (!cands.length) break;
+      for (const c of cands) {
+        if (state.stop) break;
+        const cell = S.mapGrid.getCell(c.col, c.row);
+        if (!cell || cell.content !== c.e || !c.e.hasBehavior(I.FriendReward)) { failed++; continue; }
+        try {
+          if (visitProc && typeof visitProc._onInteractionTap === 'function') visitProc._onInteractionTap(c.e);
+          else if (visitProc) visitProc._processReward(c.e);
+          else visitSim._simulateClick(c.e);
+          processed++;
+        } catch (e2) { failed++; }
+        if (processed % 20 === 0) await sleep(0);
+      }
+      await sleep(1500);
+    }
+    let claimed = 0;
+    if (visitRewardSvc) {
+      try {
+        const m = visitRewardSvc._model;
+        if (m && Array.isArray(m._rewards)) claimed = m._rewards.length;
+        if (claimed && typeof visitRewardSvc._addRewardsToInventory === 'function') {
+          visitRewardSvc._addRewardsToInventory();
+        } else if (claimed && typeof visitRewardSvc.showNewRewards === 'function') {
+          visitRewardSvc.showNewRewards();
+        }
+      } catch (e2) {}
+    }
+    stats.friendRewards += processed;
+    log('visit: ' + processed + ' bubble' +
+      (claimed ? ' · ' + claimed + ' reward' : '') +
+      (failed ? ' · ' + failed + ' fail' : ''));
+  }
+
   // ── one-shot op wrapper ──────────────────────────────────────────────────
   async function runOp(fn) {
     if (state.busy || state.running) return;
@@ -892,7 +999,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn;
+  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn, visitBtn;
   let chkOrders, chkClear, chkTree, chkRock, chkToolbox, clearTypesRow;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
@@ -932,6 +1039,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     planBtn.disabled = dis;
     orderBtn.disabled = dis;
     if (clearBtn) clearBtn.disabled = dis;
+    if (visitBtn) visitBtn.disabled = dis;
   }
 
   function buildUI() {
@@ -956,7 +1064,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '#fmv-menu .status{padding:2px 5px;background:rgba(255,255,255,.04);border-radius:5px;'
       + 'margin-bottom:5px;color:#9a9aa8;font-size:9px;}'
       + '#fmv-menu .status.err{color:#ff9a9a;}'
-      + '#fmv-menu .btns{display:flex;gap:3px;margin-bottom:5px;}'
+      + '#fmv-menu .btns{display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:5px;}'
       + '#fmv-menu .btns:last-of-type{margin-bottom:0;}'
       + '#fmv-menu .tabs{display:flex;gap:10px;margin-bottom:5px;padding:0 2px;'
       + 'border-bottom:1px solid rgba(130,150,255,.12);}'
@@ -1037,16 +1145,15 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-farm">'
       + '<div class="btns">'
-      + '<button id="fmv-sort">⇅ Sort</button>'
-      + '<button id="fmv-plan">◆ Merge</button>'
-      + '</div>'
-      + '<div class="btns">'
-      + '<button id="fmv-harvest">✦ Harvest</button>'
-      + '<button id="fmv-orders">⚑ Orders</button>'
-      + '</div>'
-      + '<div class="btns">'
       + '<button id="fmv-fill">▦ Fill</button>'
+      + '<button id="fmv-plan">◆ Merge</button>'
+      + '<button id="fmv-harvest">✦ Harvest</button>'
+      + '<button id="fmv-sort">⇅ Sort</button>'
+      + '</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-orders">⚑ Orders</button>'
       + '<button id="fmv-clear-once">⛏ Clear</button>'
+      + '<button id="fmv-visit">☕ Visit</button>'
       + '</div>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-auto" style="display:none">'
@@ -1085,6 +1192,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '<div class="row"><span>harvests</span><b data-k="harvested">0</b></div>'
       + '<div class="row"><span>loot picked</span><b data-k="lootCollected">0</b></div>'
       + '<div class="row"><span>ground picked</span><b data-k="groundCollected">0</b></div>'
+      + '<div class="row"><span>visits</span><b data-k="friendRewards">0</b></div>'
       + '<div class="sec">Orders</div>'
       + '<div class="row"><span>claimed</span><b data-k="ordersClaimed">0</b></div>'
       + '<div class="row"><span>started</span><b data-k="ordersStarted">0</b></div>'
@@ -1160,6 +1268,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     orderBtn = el.querySelector('#fmv-orders');
     analyzeBtn = el.querySelector('#fmv-tab-analyze');
     clearBtn = el.querySelector('#fmv-clear-once');
+    visitBtn = el.querySelector('#fmv-visit');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -1200,6 +1309,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     sortBtn.addEventListener('click', () => runOp(sortBoard));
     fillBtn.addEventListener('click', () => runOp(phaseFill));
     clearBtn.addEventListener('click', () => runOp(clearOnce));
+    visitBtn.addEventListener('click', () => runOp(collectVisits));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
     orderBtn.addEventListener('click', () => runOp(orders));
@@ -1253,6 +1363,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     planMerge: () => runOp(phasePlanMerge),
     autoOrders: () => { prefs.orders = true; prefs.clear = false; savePrefs(); return autoAll(); },
     autoClear: () => { prefs.orders = false; prefs.clear = true; savePrefs(); return autoAll(); },
+    visit: () => runOp(collectVisits),
     autoAll,
     stop: () => {
       if (state.running || state.busy) requestStop();

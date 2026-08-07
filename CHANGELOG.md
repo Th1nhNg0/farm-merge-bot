@@ -5,6 +5,29 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-08-08
+
+### Added
+
+- **Visit auto-collect** (`☕ Visit` on the Farm tab): when a friend visits the
+  farm, `FriendReward` bubbles land on random board entities (train station,
+  animals, plants) — the button scans every entity with the `FriendReward`
+  behavior and taps them via the game's own friend-reward processor family
+  (`_onInteractionTap` → `_processReward`, `_simulateClick` fallback), in
+  iterative rounds with settle delays and stale-reference guards. Leftover
+  rewards are claimed through the `visitorReward` service. Counted in the
+  Analysis popup (`visits`), exposed as `window.FMV.menu.visit`.
+- **One-shot Clear button** (`⛏ Clear` on the Farm tab): runs a single Auto
+  Clear pass (collect loot → pay ready sources cheapest-first → pick up ground
+  collectables) using the Tree/Rock/Toolbox prefs from the Auto tab, without
+  starting the loop.
+
+### Changed
+
+- **Farm tab layout**: buttons now sit in a 4-column grid — row 1
+  `▦ Fill` `◆ Merge` `✦ Harvest` `⇅ Sort`, row 2 `⚑ Orders` `⛏ Clear` `☕ Visit`
+  — one compact screen instead of three cramped rows.
+
 ## [1.3.0] — 2026-08-08
 
 ### Added
