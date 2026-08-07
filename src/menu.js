@@ -26,13 +26,15 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null };
   const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
     lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
-    ordersClaimed: 0, ordersStarted: 0, friendRewards: 0, failed: 0, startedAt: Date.now() };
+    ordersClaimed: 0, ordersStarted: 0, friendRewards: 0, failed: 0, startedAt: Date.now(),
+    mergedBy: {} };
   function statsReset() {
     stats.merged = 0; stats.moved = 0; stats.swapped = 0; stats.crates = 0;
     stats.harvested = 0; stats.lootCollected = 0; stats.groundCollected = 0;
     stats.sourcesCleared = 0; stats.energySpent = 0;
     stats.ordersClaimed = 0; stats.ordersStarted = 0; stats.friendRewards = 0;
     stats.failed = 0; stats.startedAt = Date.now();
+    stats.mergedBy = {};
   }
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
@@ -122,8 +124,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         swaps.push([[s.col, s.row], [t.col, t.row]]);
       }
     }
-    for (const nat of naturals) merges.push([[nat.cells[0].col, nat.cells[0].row], [nat.cells[1].col, nat.cells[1].row]]);
-    for (const g of groups) merges.push([[g.group[0].col, g.group[0].row], [g.group[1].col, g.group[1].row]]);
+    for (const nat of naturals) merges.push({ key: nat.key, from: nat.cells[0], to: nat.cells[1] });
+    for (const g of groups) merges.push({ key: g.key, from: g.group[0], to: g.group[1] });
 
     const out = { moves: [], swaps: [], merges: [] };
     const FMV = window.FMV;
@@ -136,7 +138,28 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       await sleep(0);
     }
     for (let i = 0; i < merges.length && !state.stop; i += 20) {
-      for (const m of merges.slice(i, i + 20)) out.merges.push(FMV.merge(m[0][0], m[0][1], m[1][0], m[1][1]));
+      for (const m of merges.slice(i, i + 20)) {
+        let tex = null;
+        try {
+          const cell = FMV.services().mapGrid.getCell(m.from.col, m.from.row);
+          if (cell && cell.content && cell.content.children) {
+            for (const k of cell.content.children) {
+              if (k && k.name === 'maincontainer' && k.children) {
+                for (const s of k.children) {
+                  if (s && s.name === 'mainsprite' && s._texture) { tex = s._texture; break; }
+                }
+                if (tex) break;
+              }
+            }
+          }
+        } catch (e3) {}
+        const r = FMV.merge(m.from.col, m.from.row, m.to.col, m.to.row);
+        out.merges.push(r);
+        if (r && r.ok) {
+          const prev = stats.mergedBy[m.key];
+          stats.mergedBy[m.key] = { n: (prev ? prev.n : 0) + 1, tex: tex || (prev && prev.tex) || null };
+        }
+      }
       await sleep(0);
     }
     return out;
@@ -1169,24 +1192,46 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '#fmv-menu .l{color:#b8b8c8;}#fmv-menu .l.warn{color:#ffd479;}'
       + '#fmv-menu .l.ok{color:#7ed67e;}#fmv-menu .l.err{color:#ff8f8f;}'
       + '#fmv-menu button.on{color:#9ad0ff;border-color:rgba(130,150,255,.35);}'
-      + '#fmv-analyze{position:fixed;top:12px;right:264px;z-index:2147483647;width:210px;'
-      + 'background:rgba(13,14,22,.82);color:#d7d7e0;font:10px/1.45 ui-monospace,Consolas,monospace;'
-      + 'border:1px solid rgba(130,150,255,.18);border-radius:9px;box-shadow:0 8px 32px rgba(0,0,0,.55);'
-      + 'user-select:none;overflow:hidden;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}'
-      + '#fmv-analyze .head{display:flex;align-items:center;gap:5px;padding:4px 8px;cursor:move;touch-action:none;'
-      + 'background:linear-gradient(180deg,rgba(255,255,255,.05),transparent);}'
-      + '#fmv-analyze .title{font-weight:700;font-size:10.5px;color:#9ad0ff;flex:1;letter-spacing:.3px;}'
-      + '#fmv-analyze .close{flex:none;width:16px;height:14px;padding:0;font-size:11px;line-height:1;'
-      + 'border:1px solid rgba(130,150,255,.15);border-radius:4px;background:rgba(255,255,255,.06);'
-      + 'color:#8a8a99;cursor:pointer;}'
+      + '#fmv-analyze{position:fixed;top:12px;right:264px;z-index:2147483647;width:700px;'
+      + 'background:rgba(15,17,28,.9);color:#d7d7e0;font:11px/1.5 ui-monospace,Consolas,monospace;'
+      + 'border:1px solid rgba(130,150,255,.22);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);'
+      + 'user-select:none;overflow:hidden;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);}'
+      + '#fmv-analyze .head{display:flex;align-items:center;gap:8px;padding:10px 12px 8px;cursor:move;touch-action:none;'
+      + 'background:linear-gradient(180deg,rgba(130,150,255,.08),transparent);}'
+      + '#fmv-analyze .title{font-weight:700;font-size:13px;color:#9ad0ff;flex:1;letter-spacing:.3px;}'
+      + '#fmv-analyze .sub{color:#6f6f82;font-size:10px;letter-spacing:.4px;}'
+      + '#fmv-analyze .close{flex:none;width:20px;height:20px;padding:0;font-size:12px;line-height:1;'
+      + 'border:1px solid rgba(130,150,255,.18);border-radius:6px;background:rgba(255,255,255,.06);'
+      + 'color:#8a8a99;cursor:pointer;transition:background .15s;}'
       + '#fmv-analyze .close:hover{background:rgba(130,150,255,.22);color:#e8e8f0;}'
-      + '#fmv-analyze .sec{color:#8a8a99;font-size:9px;padding:4px 8px 1px;letter-spacing:.4px;}'
-      + '#fmv-analyze .row{display:flex;justify-content:space-between;padding:1px 8px;}'
-      + '#fmv-analyze .row b{color:#e8e8f0;font-weight:600;}'
-      + '#fmv-analyze .row.fail b{color:#ff8f8f;}'
-      + '#fmv-analyze .foot{padding:5px 8px 6px;}'
-      + '#fmv-analyze button{font:inherit;width:100%;padding:3px 0;border:1px solid rgba(130,150,255,.14);'
-      + 'border-radius:5px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
+      + '#fmv-analyze .sec{color:#7c7c92;font-size:9.5px;padding:10px 12px 4px;letter-spacing:1px;text-transform:uppercase;}'
+      + '#fmv-analyze .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:2px 12px 4px;}'
+      + '#fmv-analyze .stat{display:flex;flex-direction:column;gap:2px;background:rgba(255,255,255,.04);'
+      + 'border:1px solid rgba(130,150,255,.1);border-radius:8px;padding:7px 10px;}'
+      + '#fmv-analyze .stat span{color:#8a8a99;font-size:9px;letter-spacing:.5px;text-transform:uppercase;}'
+      + '#fmv-analyze .stat b{color:#eef0ff;font-size:15px;font-weight:700;line-height:1.2;}'
+      + '#fmv-analyze .stat.fail{border-color:rgba(255,120,120,.25);}'
+      + '#fmv-analyze .stat.fail b{color:#ff8f8f;}'
+      + '#fmv-analyze .stat.warn b{color:#ffd479;}'
+      + '#fmv-analyze .row{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 12px;}'
+      + '#fmv-analyze .row .dim{color:#8a8a99;font-size:10px;}'
+      + '#fmv-analyze .tile{position:relative;width:56px;height:56px;display:flex;align-items:center;justify-content:center;'
+      + 'border:1px solid rgba(130,150,255,.12);border-radius:8px;background:rgba(255,255,255,.04);'
+      + 'transition:border-color .15s,background .15s;cursor:pointer;}'
+      + '#fmv-analyze .tile:hover{border-color:rgba(130,150,255,.4);background:rgba(130,150,255,.1);}'
+      + '#fmv-analyze .tile img.px{width:46px;height:46px;object-fit:contain;image-rendering:auto;pointer-events:none;}'
+      + '#fmv-analyze .tile b{position:absolute;right:4px;bottom:3px;font-size:9.5px;font-weight:700;color:#fff;'
+      + 'background:rgba(10,12,20,.8);border-radius:5px;padding:0 4px;line-height:1.6;pointer-events:none;}'
+      + '#fmv-analyze .igrid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;padding:4px 12px 10px;}'
+      + '#fmv-analyze .atabs{display:flex;gap:4px;padding:8px 12px 4px;}'
+      + '#fmv-analyze .atab{flex:1;width:auto;padding:5px 0;font-size:10.5px;border:none;border-radius:7px;'
+      + 'background:rgba(255,255,255,.04);color:#8a8a99;cursor:pointer;transition:background .15s,color .15s;}'
+      + '#fmv-analyze .atab:hover{background:rgba(255,255,255,.08);color:#c8c8d5;}'
+      + '#fmv-analyze .atab.on{background:rgba(130,150,255,.2);color:#cfe3ff;}'
+      + '#fmv-analyze .apane{max-height:400px;overflow:auto;scrollbar-width:thin;padding-bottom:4px;}'
+      + '#fmv-analyze .foot{padding:8px 12px 10px;}'
+      + '#fmv-analyze button{font:inherit;width:100%;padding:6px 0;border:1px solid rgba(130,150,255,.16);'
+      + 'border-radius:8px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
       + 'transition:background .15s,transform .05s;}'
       + '#fmv-analyze button:hover{background:rgba(130,150,255,.16);}'
       + '#fmv-analyze button:active{transform:translateY(1px);}'
@@ -1244,27 +1289,78 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const popup = document.createElement('div');
     popup.id = 'fmv-analyze';
     popup.style.display = 'none';
-    popup.innerHTML = '<div class="head"><span class="title">Analysis · session</span><button class="close" title="close">×</button></div>'
+    popup.innerHTML = '<div class="head"><span class="title">Analysis</span><span class="sub">session</span><button class="close" title="close">×</button></div>'
+      + '<div class="atabs">'
+      + '<button class="atab on" data-at="summary">Summary</button>'
+      + '<button class="atab" data-at="items">Items</button>'
+      + '</div>'
+      + '<div class="apane" data-ap="summary">'
       + '<div class="sec">Production</div>'
-      + '<div class="row"><span>merges</span><b data-k="merged">0</b></div>'
-      + '<div class="row"><span>moves</span><b data-k="moved">0</b></div>'
-      + '<div class="row"><span>swaps</span><b data-k="swapped">0</b></div>'
-      + '<div class="row"><span>crates</span><b data-k="crates">0</b></div>'
-      + '<div class="row"><span>harvests</span><b data-k="harvested">0</b></div>'
-      + '<div class="row"><span>loot picked</span><b data-k="lootCollected">0</b></div>'
-      + '<div class="row"><span>ground picked</span><b data-k="groundCollected">0</b></div>'
-      + '<div class="row"><span>visits</span><b data-k="friendRewards">0</b></div>'
+      + '<div class="stats">'
+      + '<div class="stat"><span>merges</span><b data-k="merged">0</b></div>'
+      + '<div class="stat"><span>moves</span><b data-k="moved">0</b></div>'
+      + '<div class="stat"><span>swaps</span><b data-k="swapped">0</b></div>'
+      + '<div class="stat"><span>crates</span><b data-k="crates">0</b></div>'
+      + '<div class="stat"><span>harvests</span><b data-k="harvested">0</b></div>'
+      + '<div class="stat"><span>loot picked</span><b data-k="lootCollected">0</b></div>'
+      + '<div class="stat"><span>ground picked</span><b data-k="groundCollected">0</b></div>'
+      + '<div class="stat"><span>visits</span><b data-k="friendRewards">0</b></div>'
+      + '</div>'
       + '<div class="sec">Orders</div>'
-      + '<div class="row"><span>claimed</span><b data-k="ordersClaimed">0</b></div>'
-      + '<div class="row"><span>started</span><b data-k="ordersStarted">0</b></div>'
+      + '<div class="stats">'
+      + '<div class="stat"><span>claimed</span><b data-k="ordersClaimed">0</b></div>'
+      + '<div class="stat"><span>started</span><b data-k="ordersStarted">0</b></div>'
+      + '</div>'
       + '<div class="sec">Clear</div>'
-      + '<div class="row"><span>sources</span><b data-k="sourcesCleared">0</b></div>'
-      + '<div class="row"><span>energy spent</span><b data-k="energySpent">0</b></div>'
+      + '<div class="stats">'
+      + '<div class="stat"><span>sources</span><b data-k="sourcesCleared">0</b></div>'
+      + '<div class="stat"><span>energy spent</span><b data-k="energySpent">0</b></div>'
+      + '</div>'
       + '<div class="sec">Misc</div>'
-      + '<div class="row fail"><span>failures</span><b data-k="failed">0</b></div>'
-      + '<div class="row"><span>elapsed</span><b data-k="elapsed">0s</b></div>'
+      + '<div class="stats">'
+      + '<div class="stat fail"><span>failures</span><b data-k="failed">0</b></div>'
+      + '<div class="stat"><span>elapsed</span><b data-k="elapsed">0s</b></div>'
+      + '</div>'
+      + '</div>'
+      + '<div class="apane" data-ap="items" style="display:none">'
+      + '<div class="sec">Merges by item</div>'
+      + '<div id="fmv-an-mrg" class="igrid"></div>'
+      + '</div>'
       + '<div class="foot"><button id="fmv-analyze-reset">Reset</button></div>';
     document.body.appendChild(popup);
+    const spriteUrlCache = new Map();
+    const spriteURL = (k) => {
+      if (spriteUrlCache.has(k)) return spriteUrlCache.get(k);
+      let url = null;
+      try {
+        const tex = stats.mergedBy[k] && stats.mergedBy[k].tex;
+        if (tex && tex.baseTexture && tex.baseTexture.resource && tex._frame) {
+          const res = tex.baseTexture.resolution || 1;
+          const f = tex._frame;
+          const src = tex.baseTexture.resource.source;
+          const cv = document.createElement('canvas');
+          cv.width = Math.max(1, Math.round(f.width * res));
+          cv.height = Math.max(1, Math.round(f.height * res));
+          const ctx = cv.getContext('2d');
+          ctx.drawImage(src, f.x * res, f.y * res, f.width * res, f.height * res, 0, 0, cv.width, cv.height);
+          url = cv.toDataURL();
+        }
+      } catch (e2) {}
+      spriteUrlCache.set(k, url);
+      return url;
+    };
+    const renderItemList = (el, map) => {
+      const entries = Object.entries(map).sort((a, b) => b[1].n - a[1].n);
+      if (!entries.length) {
+        el.innerHTML = '<div class="row"><span class="dim">— none yet —</span></div>';
+        return;
+      }
+      el.innerHTML = entries.map(([k, v]) => {
+        const url = spriteURL(k);
+        const img = url ? '<img class="px" src="' + url + '" alt="' + k + '">' : '';
+        return '<div class="tile" title="' + k + '">' + img + '<b>' + v.n + '</b></div>';
+      }).join('');
+    };
     const analyzeTick = () => {
       if (popup.style.display === 'none') return;
       for (const b of popup.querySelectorAll('b[data-k]')) {
@@ -1276,8 +1372,13 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
           b.textContent = stats[k];
         }
       }
+      renderItemList(popup.querySelector('#fmv-an-mrg'), stats.mergedBy);
     };
     window.__FMV_analyzeTimer = setInterval(analyzeTick, 2000);
+    popup.querySelectorAll('.atab').forEach((t) => t.addEventListener('click', () => {
+      popup.querySelectorAll('.atab').forEach((x) => x.classList.toggle('on', x === t));
+      popup.querySelectorAll('.apane').forEach((p) => { p.style.display = p.getAttribute('data-ap') === t.getAttribute('data-at') ? '' : 'none'; });
+    }));
     const closePopup = () => {
       popup.style.display = 'none';
       if (analyzeBtn) analyzeBtn.classList.remove('on');
@@ -1286,7 +1387,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const popupClose = popup.querySelector('.close');
     popupClose.addEventListener('pointerdown', (e) => e.stopPropagation());
     popupClose.addEventListener('click', closePopup);
-    popup.querySelector('#fmv-analyze-reset').addEventListener('click', () => { statsReset(); analyzeTick(); });
+    popup.querySelector('#fmv-analyze-reset').addEventListener('click', () => { statsReset(); spriteUrlCache.clear(); analyzeTick(); });
     let popupDrag = false;
     popupHead.addEventListener('pointerdown', (e) => {
       popupDrag = true;
@@ -1430,10 +1531,14 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       if (state.running || state.busy) requestStop();
     },
     status: refreshStatus,
-    stats: () => ({ ...stats, elapsed: Math.floor((Date.now() - stats.startedAt) / 1000) }),
+    stats: () => {
+      const counts = {};
+      for (const k of Object.keys(stats.mergedBy)) counts[k] = stats.mergedBy[k].n;
+      return { ...stats, mergedBy: counts, elapsed: Math.floor((Date.now() - stats.startedAt) / 1000) };
+    },
     resetStats: statsReset,
     running: () => state.running,
-    version: '1.4.1'
+    version: '1.5.0'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

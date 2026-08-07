@@ -5,6 +5,18 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-08-08
+
+### Added
+
+- **Analysis popup redesign**: the window grew from 210px to 700px with a modern
+  spacious layout — 4-column stat cards with uppercase labels, pill-style
+  Summary/Items tabs, and a larger header. Merges-by-item moved to an 8-column
+  sprite grid: each merge now captures the source entity's atlas texture at
+  merge time, crops it to a canvas dataURL (same-origin atlas PNG), and the
+  Items tab shows the item sprites with count badges and hover highlight
+  (hover/title shows the item key).
+
 ## [1.4.2] — 2026-08-08
 
 ### Fixed
