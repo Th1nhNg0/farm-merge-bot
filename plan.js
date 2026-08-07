@@ -1,6 +1,6 @@
 // Shared merge planner — single source of truth for the in-game menu
-// (menu.js embeds this source) and the CLI/benchmark (auto_farm.mjs,
-// bench.mjs import it in Node). Pure functions over a board snapshot:
+// (menu.js embeds this source) and Node scripts that import it. Pure
+// functions over a board snapshot:
 //   board = {
 //     cells:   { "col:row": { col, row, empty, neighbors: ["col:row", ...],
 //                             id, tier, mergeable, target } },

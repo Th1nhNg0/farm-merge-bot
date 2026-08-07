@@ -64,9 +64,8 @@ out manually (the game gets it free because the cell is already empty mid-drag).
 | `poller.js` | Generic poller injected into the game frame; captures all webpack runtime requires into `window.__FMV_rt` |
 | `hunter.js` | In-frame module hunter: picks the main runtime, re-discovers root container / farm services / component map / MergeTrigger ctor for the current build |
 | `fmv_helper.js` | `window.FMV` v4 (board / merge / move / swap / spawnCrate / services / req / I / root / rootServices) |
-| `menu.js` | In-game bot menu (FMV Bot overlay, top-right of the game window): draggable panel with Sort / Fill / Harvest / Plan+Merge / Orders / Auto Farm / Refresh + status + log + wait-time options. All bot logic runs in-frame; exposes `window.FMV.menu` |
+| `menu.js` | In-game bot menu (FMV Bot overlay, top-right of the game window): draggable panel with Sort / Fill / Harvest / Plan+Merge / Auto Orders / Orders / Refresh + status + log + wait-time options. All bot logic runs in-frame; exposes `window.FMV.menu` |
 | `install.mjs` | One-shot installer — poller (if missing) → hunter (if missing) → FMV helper → menu overlay |
-| `auto_farm.mjs` | Same bot logic as the menu, driven from the CLI over CDP (fill → plan+merge → repeat) |
 | `eval.mjs` | One-off `Runtime.evaluate` of a JS expression in the game frame |
 | `merge_demo.mjs` | Prints mergeable clusters and fires one merge `fromCol fromRow toCol toRow` |
 
@@ -97,7 +96,7 @@ node install.mjs
 | `Fill` | Spawns a crate on every empty cell until the map is full (crate contents ignored) |
 | `Plan+Merge` | Plans ALL groups from one snapshot (natural 5/10/15 components + move/swap grouping), then executes them in one batched pass; repeats until no groups possible |
 | `Orders` | Claims completed orders, then starts every affordable available order through the game's own `ordersService`; ingredients are deducted and the normal order timer/save path is used |
-| `Auto Farm` | Toggle: fill → plan+merge → repeat until out of crates or no groups; click again (label becomes `STOP`) to stop after the current op |
+| `Auto Orders` | Toggle: claims completed orders and starts every affordable order every few seconds until stopped; click again (label becomes `STOP`) to stop after the current cycle |
 | `Refresh` | Updates the `items · empty · crates` status line |
 
 - Options row: `spawn wait` (crate auto-open wait, ms) and `merge wait` (post-merge
@@ -109,8 +108,6 @@ node install.mjs
 
 ### CLI-only alternatives (debugging / scripting)
 
-- `node auto_farm.mjs` — the same fill → plan+merge → repeat loop as the menu's Auto Farm
-  button, driven from the CLI.
 - `node eval.mjs "…"` / `node merge_demo.mjs c r c r` — one-off evals / single merge.
 
 ### Read the board
@@ -144,18 +141,6 @@ node eval.mjs "window.FMV.spawnCrate(73, 70)"
 Places a crate via the game's crate-spawn system, costs 1 crate from inventory, auto-opens
 into content (coins/energy/items) within ~1-2 s.
 
-### CLI auto-farm (same logic as the menu's Auto Farm button)
-
-```powershell
-node auto_farm.mjs
-```
-
-1. **Fill phase** — spawns a crate on every empty cell until the map is full (crate contents ignored).
-2. **Plan + merge phase** — plans ALL groups from one snapshot (natural 5/10/15 components +
-   move/swap grouping for every key with ≥ 5 items), then executes all moves/swaps/merges in
-   ONE page evaluation (batched with event-loop breathing). 5→2, 10→4, 15→6 bonus math.
-3. Repeats (re-fill after merges) until out of crates or no groups possible.
-
 ## 6. How the hunter discovers things (structural, survives obfuscation)
 
 | Target | Discovery |
@@ -179,8 +164,8 @@ node auto_farm.mjs
 - If the Discord Activity iframe is not exposed as a CDP target, the MCP Chrome must be
   restarted with `IsolateSandboxedIframes` enabled (already in the config).
 - Module ids change on game updates — the hunter re-discovers them every run, no config.
-- Run `install.mjs` only after the farm is fully loaded; the menu and `auto_farm.mjs`
-  show a clear error if the activity restarts mid-run (re-run the installer).
+- Run `install.mjs` only after the farm is fully loaded; the menu shows a clear error if
+  the activity restarts mid-run (re-run the installer).
 - The poller's fake chunk ids (`0x7ff00000 + n`) are safe: real chunk ids are small hex; the
   handler skips runtime callbacks for already-loaded ids. id `0` is permanently consumed after
   one use — never reuse it.

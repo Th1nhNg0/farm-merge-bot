@@ -4,13 +4,13 @@
 //   [Plan+Merge]   plan ALL groups (natural 5/10/15 + move/swap grouping)
 //                  from one snapshot, then execute them in one batched pass
 //   [Orders]       claim completed orders, then start every affordable order
-//   [Auto Farm]    toggle: fill -> plan+merge -> repeat until out of crates
-//                  or no groups; click again to stop after the current op
+//   [Auto Orders]  toggle: claim completed + start affordable orders in a loop
+//                  every few seconds until stopped
 //   [Refresh]      update the items/empty/crates status line
-// Exposes window.FMV.menu = { orders, fill, planMerge, autoFarm, stop, status, running }.
+// Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, stop, status, running }.
 
 // Shared planner (plan.js) is prepended to the injected source, so the menu
-// IIFE below can use window.FMVPlan (same logic as auto_farm.mjs / bench.mjs).
+// IIFE below can use window.FMVPlan (same logic as the CLI scripts).
 import { readFileSync } from "node:fs";
 
 export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "utf8") + "\n" + `(function(){
@@ -22,7 +22,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   const state = { busy: false, running: false, stop: false };
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
-  const MAX_CYCLE_ROUNDS = 12;
+  const ORDERS_WAIT_MS = 5000;
 
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
@@ -438,8 +438,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       (skipped ? ', skipped ' + skipped : ''));
   }
 
-  // ── Auto-farm loop: FILL -> PLAN+MERGE -> repeat ─────────────────────────
-  async function autoFarm() {
+  // ── Auto-orders loop: claim + start orders every few seconds ─────────────
+  async function autoOrders() {
     if (state.running) { state.stop = true; log('stop requested — finishing current op...'); return; }
     if (state.busy) return;
     state.running = true;
@@ -447,17 +447,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     setUI();
     let cycle = 0;
     try {
-      while (state.running && !state.stop && cycle < MAX_CYCLE_ROUNDS) {
+      while (state.running && !state.stop) {
         cycle++;
-        log('=== cycle ' + cycle + ': fill ===', 'ok');
-        const fill = await phaseFill();
-        if (!state.running || state.stop) break;
-        await sleep(1500);
-        log('=== cycle ' + cycle + ': plan+merge ===', 'ok');
-        const progressed = await phasePlanMerge();
-        if (!progressed && fill.spawned === 0) { log('no further progress — stopping'); break; }
+        log('=== orders cycle ' + cycle + ' ===', 'ok');
+        await orders();
+        await sleep(ORDERS_WAIT_MS);
       }
-      if (cycle >= MAX_CYCLE_ROUNDS) log('hit max cycles');
     } catch (e) {
       log('ERROR: ' + (e && e.message ? e.message : e), 'err');
     }
@@ -465,7 +460,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     state.stop = false;
     setUI();
     refreshStatus();
-    log('auto-farm stopped');
+    log('auto-orders stopped');
   }
 
   // ── one-shot op wrapper ──────────────────────────────────────────────────
@@ -506,7 +501,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   function setUI() {
     if (!dot) return;
     dot.className = 'dot' + (state.running || state.busy ? ' busy' : '');
-    autoBtn.textContent = state.running ? 'STOP' : 'Auto Farm';
+    autoBtn.textContent = state.running ? 'STOP' : 'Auto Orders';
     const dis = state.busy || state.running;
     sortBtn.disabled = dis;
     fillBtn.disabled = dis;
@@ -574,7 +569,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '</div>'
       + '<div class="btns">'
       + '<button id="fmv-plan">Plan+Merge</button>'
-      + '<button id="fmv-auto">Auto Farm</button>'
+      + '<button id="fmv-auto-orders">Auto Orders</button>'
       + '<button id="fmv-orders">Orders</button>'
       + '</div>'
       + '<div class="logwrap">'
@@ -585,7 +580,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     document.body.appendChild(el);
 
     dot = el.querySelector('.dot');
-    autoBtn = el.querySelector('#fmv-auto');
+    autoBtn = el.querySelector('#fmv-auto-orders');
     sortBtn = el.querySelector('#fmv-sort');
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
@@ -627,7 +622,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       body.style.display = body.style.display === 'none' ? '' : 'none';
       fold.textContent = body.style.display === 'none' ? '+' : '-';
     });
-    autoBtn.addEventListener('click', autoFarm);
+    autoBtn.addEventListener('click', autoOrders);
     sortBtn.addEventListener('click', () => runOp(sortBoard));
     fillBtn.addEventListener('click', () => runOp(phaseFill));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
@@ -653,7 +648,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     harvest: () => runOp(harvestAll),
     fill: () => runOp(phaseFill),
     planMerge: () => runOp(phasePlanMerge),
-    autoFarm,
+    autoOrders,
     stop: () => { state.stop = true; log('stop requested'); },
     status: refreshStatus,
     running: () => state.running,
