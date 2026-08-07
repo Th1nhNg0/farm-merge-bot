@@ -1,6 +1,6 @@
 // One-off Runtime.evaluate of a JS expression in the game frame.
 //
-// Usage:  node eval.mjs "window.FMV.board().filter(i => i.mergeable)"
+// Usage:  node src\eval.mjs "window.FMV.board().filter(i => i.mergeable)"
 
 import { CDP, attach, evalIn, findGameTarget, WS_URL } from "./cdp_lib.mjs";
 

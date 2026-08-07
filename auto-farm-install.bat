@@ -36,12 +36,12 @@ exit /b 1
 echo CDP is up.
 echo.
 echo Open the farm activity in the Discord tab (voice channel ^> Activities ^> Farm Merge Valley),
-echo then press any key to run install.mjs...
+echo then press any key to run src\install.mjs...
 pause >nul
 
-echo [3/3] Running install.mjs...
+echo [3/3] Running src\install.mjs...
 cd /d "%FARM_DIR%"
-node install.mjs
+node src\install.mjs
 
 echo.
 echo Done - close this window or press any key.

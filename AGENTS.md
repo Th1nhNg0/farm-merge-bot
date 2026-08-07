@@ -14,16 +14,16 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 
 | File | Purpose |
 |---|---|
-| `cdp_lib.mjs` | CDP client (Node built-in WebSocket); port discovery via `DevToolsActivePort` + `/json/version` fallback; `findGameTarget()` matches the `discordsays.com` iframe |
-| `poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt` |
-| `hunter.js` | In-frame module hunter; picks the main runtime and re-discovers root container / farm services / component map / MergeTrigger ctor structurally (no hardcoded ids) |
-| `fmv_helper.js` | `window.FMV` v4: `board` / `merge` / `move` / `swap` / `spawnCrate` / `services` / `req` / `I` / `root` / `rootServices` |
-| `menu.js` | In-game FMV Bot overlay (top-right): Sort / Fill / Harvest / Plan+Merge / Orders / Auto Orders / Refresh + log panel; exposes `window.FMV.menu` |
-| `install.mjs` | One-shot installer — poller → hunter → FMV → menu, evaluated live in the frame; exports `VERSION` |
-| `eval.mjs` | One-off `Runtime.evaluate` in the game frame |
-| `plan.js` | Merge planner (5/10/15 chain grouping, move/swap ops) |
-| `hunter.js` / `fmv_helper.js` | See above |
-| `auto-farm-install.bat` | Launcher for `install.mjs` |
+| `src/cdp_lib.mjs` | CDP client (Node built-in WebSocket); port discovery via `DevToolsActivePort` + `/json/version` fallback; `findGameTarget()` matches the `discordsays.com` iframe |
+| `src/poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt` |
+| `src/hunter.js` | In-frame module hunter; picks the main runtime and re-discovers root container / farm services / component map / MergeTrigger ctor structurally (no hardcoded ids) |
+| `src/fmv_helper.js` | `window.FMV` v4: `board` / `merge` / `move` / `swap` / `spawnCrate` / `services` / `req` / `I` / `root` / `rootServices` |
+| `src/menu.js` | In-game FMV Bot overlay (top-right): Sort / Fill / Harvest / Plan+Merge / Orders / Auto Orders / Refresh + log panel; exposes `window.FMV.menu` |
+| `src/install.mjs` | One-shot installer — poller → hunter → FMV → menu, evaluated live in the frame; exports `VERSION` |
+| `src/eval.mjs` | One-off `Runtime.evaluate` in the game frame |
+| `src/plan.js` | Merge planner (5/10/15 chain grouping, move/swap ops) |
+| `src/hunter.js` / `src/fmv_helper.js` | See above |
+| `auto-farm-install.bat` | Launcher for `src/install.mjs` |
 | `CHANGELOG.md` | Version history |
 
 ## Key facts (Discord build, verified 2026-08-06)
@@ -52,7 +52,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 - **The activity also restarts if the main thread stalls for seconds.** Heavy
   in-page work must be batched with event-loop breathing (`await` between batches).
 - **Injection does not survive** Chrome restart / activity restart / game reload —
-  re-run `node install.mjs`.
+  re-run `node src\install.mjs`.
 - **Never-move rule (family-based)**: an item moves only if its family has a
   mergeable member on the board. No-id buildings (trainstation/dairy/bbq/market/
   bakery/loom…) and static families (tree, rock, area, premium, traintrack,
@@ -66,12 +66,12 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 ## How to run / verify
 
 ```powershell
-node install.mjs            # full install (poller → hunter → FMV → menu)
-node install.mjs poller     # poller only (debug)
-node install.mjs fmv        # hunter + FMV only (debug)
-node eval.mjs "window.FMV.board().filter(i => i.mergeable)"
-node eval.mjs "window.FMV.merge(68, 68, 68, 69)"
-node eval.mjs "window.FMV.spawnCrate(73, 70)"
+node src\install.mjs            # full install (poller → hunter → FMV → menu)
+node src\install.mjs poller     # poller only (debug)
+node src\install.mjs fmv        # hunter + FMV only (debug)
+node src\eval.mjs "window.FMV.board().filter(i => i.mergeable)"
+node src\eval.mjs "window.FMV.merge(68, 68, 68, 69)"
+node src\eval.mjs "window.FMV.spawnCrate(73, 70)"
 ```
 
 Prerequisites: chrome-devtools MCP Chrome running with `--remote-debugging-port=9222`

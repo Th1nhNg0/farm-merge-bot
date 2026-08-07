@@ -1,7 +1,7 @@
 // One-shot installer for the in-game bot menu (FMV Bot).
-//   node install.mjs            full: poller -> hunter -> FMV -> menu overlay
-//   node install.mjs poller     poller only (debug)
-//   node install.mjs fmv        hunter + FMV only (debug)
+//   node src\install.mjs            full: poller -> hunter -> FMV -> menu overlay
+//   node src\install.mjs poller     poller only (debug)
+//   node src\install.mjs fmv        hunter + FMV only (debug)
 // Requires the farm to be fully loaded (activity open). Re-run after any
 // Chrome restart / Discord activity restart / game reload (the activity
 // restarts on frame reload, which wipes the injection).

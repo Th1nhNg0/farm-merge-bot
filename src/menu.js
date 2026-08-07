@@ -20,7 +20,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const state = { busy: false, running: false, stop: false };
+  const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null };
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
   const ORDERS_WAIT_MS = 5000;
@@ -113,15 +113,15 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
     const out = { moves: [], swaps: [], merges: [] };
     const FMV = window.FMV;
-    for (let i = 0; i < moves.length; i += 30) {
+    for (let i = 0; i < moves.length && !state.stop; i += 30) {
       for (const m of moves.slice(i, i + 30)) out.moves.push(FMV.move(m[0][0], m[0][1], m[1][0], m[1][1]));
       await sleep(0);
     }
-    for (let i = 0; i < swaps.length; i += 30) {
+    for (let i = 0; i < swaps.length && !state.stop; i += 30) {
       for (const m of swaps.slice(i, i + 30)) out.swaps.push(FMV.swap(m[0][0], m[0][1], m[1][0], m[1][1]));
       await sleep(0);
     }
-    for (let i = 0; i < merges.length; i += 20) {
+    for (let i = 0; i < merges.length && !state.stop; i += 20) {
       for (const m of merges.slice(i, i + 20)) out.merges.push(FMV.merge(m[0][0], m[0][1], m[1][0], m[1][1]));
       await sleep(0);
     }
@@ -133,8 +133,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const spawnWait = 1000;
     let round = 0;
     let spawnedTotal = 0;
-    while (round < MAX_FILL_ROUNDS) {
+    while (round < MAX_FILL_ROUNDS && !state.stop) {
       round++;
+      state.rounds = round;
       assertFMV();
       const board = readBoard();
       if (board.error) throw new Error(board.error);
@@ -164,8 +165,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   async function phasePlanMerge() {
     const mergeWait = 300;
     let round = 0;
-    while (round < MAX_PLAN_ROUNDS) {
+    while (round < MAX_PLAN_ROUNDS && !state.stop) {
       round++;
+      state.rounds = round;
       assertFMV();
       const board = readBoard();
       const { naturals, groups } = window.FMVPlan.planAll(board);
@@ -182,6 +184,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         ', swaps ' + swapsOk + '/' + result.swaps.length +
         ', merges ' + mergesOk + '/' + result.merges.length);
       if (mergesOk === 0) { log('no merge succeeded — stopping plan phase', 'warn'); return false; }
+      if (state.stop) { log('stop requested — halting plan phase', 'warn'); return false; }
       await sleep(mergeWait);
     }
     log('plan/merge hit round cap');
@@ -307,7 +310,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     // phase 1: vacate target cells occupied by a different key (empty cells as buffers)
     const vacants = board.empties.map((e) => e.col + ':' + e.row);
     for (const t of targetKey.keys()) {
-      if (moves + swaps >= cap) break;
+      if (state.stop || moves + swaps >= cap) break;
       const cur = mirror.get(t);
       if (!cur || cur.key === targetKey.get(t)) continue;
       if (!vacants.length) continue;
@@ -326,7 +329,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     };
     for (const p of plan) {
       for (const c of p.cells) {
-        if (moves + swaps >= cap) break;
+        if (state.stop || moves + swaps >= cap) break;
         const t = c.col + ':' + c.row;
         const cur = mirror.get(t);
         if (cur && cur.key === p.key) { placed.add(t); continue; }
@@ -363,6 +366,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     try { tiles = window.FMV.rootServices().playerData._dataContainers['0']._data; } catch (e) {}
     let tapped = 0, cooling = 0, blocked = 0, depleted = 0;
     for (const cell of S.mapGrid._cells.values()) {
+      if (state.stop) break;
       if (!cell || !cell.content) continue;
       const e = cell.content;
       if (!e.hasBehavior || !e.hasBehavior(I.Harvestable)) continue;
@@ -457,6 +461,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     if (state.busy) return;
     state.running = true;
     state.stop = false;
+    state.rounds = 0;
+    state.opStart = Date.now();
     setUI();
     let cycle = 0;
     try {
@@ -472,6 +478,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     }
     state.running = false;
     state.stop = false;
+    state.opStart = null;
     setUI();
     refreshStatus();
     log('auto-orders stopped');
@@ -481,9 +488,14 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   async function runOp(fn) {
     if (state.busy || state.running) return;
     state.busy = true;
+    state.stop = false;
+    state.rounds = 0;
+    state.opStart = Date.now();
     setUI();
     try { await fn(); } catch (e) { log('ERROR: ' + (e && e.message ? e.message : e), 'err'); }
     state.busy = false;
+    state.opStart = null;
+    if (state.stop) log('stopped by user', 'warn');
     setUI();
     refreshStatus();
   }
@@ -499,7 +511,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       const crates = cratesLeft();
       const items = b.error ? '-' : b.items.length;
       const empty = b.error ? '-' : b.empties.length;
-      el.textContent = 'items ' + items + ' · empty ' + empty + ' · crates ' + crates;
+      let extra = '';
+      if (state.running || state.busy) {
+        if (state.rounds) extra += ' · r' + state.rounds;
+        if (state.opStart) extra += ' · ' + Math.floor((Date.now() - state.opStart) / 1000) + 's';
+      }
+      el.textContent = 'items ' + items + ' · empty ' + empty + ' · crates ' + crates + extra;
       el.className = 'status' + (b.error ? ' err' : '');
     } catch (e) {
       el.textContent = 'FMV not ready — re-run install_menu.mjs';
@@ -566,7 +583,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
     const el = document.createElement('div');
     el.id = 'fmv-menu';
-    el.innerHTML = '<div class="head"><span class="dot"></span><span class="title">FMV Bot · weepingangel89</span>'
+    el.innerHTML = '<div class="head"><span class="dot" title="stop current op"></span><span class="title">FMV Bot v' + (window.FMV && window.FMV.version ? window.FMV.version : '?') + ' · weepingangel89</span>'
       + '<span class="fold">-</span></div>'
       + '<div class="body">'
       + '<div class="status" id="fmv-status">installing...</div>'
@@ -588,6 +605,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     document.body.appendChild(el);
 
     dot = el.querySelector('.dot');
+    dot.title = 'stop current op';
+    dot.style.cursor = 'pointer';
+    dot.addEventListener('click', () => { if (window.FMV && window.FMV.menu) window.FMV.menu.stop(); });
     autoBtn = el.querySelector('#fmv-auto-orders');
     sortBtn = el.querySelector('#fmv-sort');
     fillBtn = el.querySelector('#fmv-fill');
@@ -654,14 +674,19 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     fill: () => runOp(phaseFill),
     planMerge: () => runOp(phasePlanMerge),
     autoOrders,
-    stop: () => { state.stop = true; log('stop requested'); },
+    stop: () => {
+      if (state.running || state.busy) {
+        state.stop = true;
+        log('stop requested — halting after current batch', 'warn');
+      }
+    },
     status: refreshStatus,
     running: () => state.running,
-    version: '1.2'
+    version: '1.0.0'
   };
   setUI();
   log('menu installed — FMV ' + window.FMV.version, 'ok');
   refreshStatus();
-  setInterval(refreshStatus, 2500);
+  if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };
 })();`;

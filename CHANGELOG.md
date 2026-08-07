@@ -19,8 +19,8 @@ Initial release. The first stable version of the Discord Activity build.
 - **Module hunter** (`hunter.js`): picks the main runtime and structurally
   re-discovers root container, farm services, component map (`I`) and
   MergeTrigger ctor — survives obfuscation, no hardcoded module ids.
-- **FMV helper** (`fmv_helper.js`, v4): `window.FMV` API — board, merge, move,
-  swap, spawnCrate, services, `req`, `I()`, `root()`, `rootServices()`.
+- **FMV helper** (`fmv_helper.js`): `window.FMV` API — board, merge, move, swap,
+  spawnCrate, services, `req`, `I()`, `root()`, `rootServices()`.
 - **In-game bot menu** (`menu.js`): draggable top-right overlay with Sort, Fill,
   Harvest, Plan+Merge, Orders, Auto Orders, Refresh + status line and log panel;
   exposes `window.FMV.menu`.
@@ -42,29 +42,26 @@ Initial release. The first stable version of the Discord Activity build.
 - **Plan+Merge**: plans all natural 5/10/15 groups plus move/swap grouping from one
   snapshot, executes in a batched pass with event-loop breathing, repeats until no
   groups are possible.
-- **Docs**: README (Discord build), STATUS session log, `auto-farm-install.bat`.
-
-### Changed
-
-- Replaced the earlier CLI `auto_farm` flow with in-frame bot logic + menu buttons;
-  CLI `auto_farm`/`merge_demo` scripts removed.
-- Removed the CrazyGames integration (`findGameTarget` matches discordsays only).
-- `window.FMV.I` is a getter function and must be called (`FMV.I()`).
-
-### Fixed
-
-- `readBoard`/`merge_demo` used `FMV.I` without calling it — everything looked
-  non-mergeable.
-- `auto_farm` logged the eval response object instead of the crate count.
-- Sort phase 2 iterated cell objects while op helpers expected `'col:row'` strings
-  (`k.split is not a function`).
-- Poller fake chunk id `0` permanently consumed after one use (never reused).
+- **Global stop**: the status dot in the menu header is a stop button (click while
+  an op runs); halt halts fill/harvest/sort mid-cell and plan+merge between
+  batches/rounds, with log feedback.
+- **Menu polish**: header shows the bot version; the status line shows the running
+  round (`rN`) and elapsed time while an op is active.
+- **Docs**: README (Discord build), CHANGELOG, AGENTS.md agent guide,
+  `auto-farm-install.bat` launcher. The earlier CLI `auto_farm` flow was replaced
+  by in-frame bot logic + menu buttons (CLI `auto_farm`/`merge_demo` removed);
+  the CrazyGames integration was dropped (`findGameTarget` matches discordsays
+  only).
 
 ### Known limitations
 
 - Injection lives in the frame and does not survive a Chrome restart / Discord
-  activity restart / game reload — re-run `node install.mjs`.
+  activity restart / game reload — re-run `node src\install.mjs`.
 - The Discord activity restarts if the main thread stalls for seconds — heavy work
   must stay batched with event-loop breathing.
 - Trees/rocks (energy-cost sources) are not harvested yet.
 - Only one game session should be open (target matched by URL).
+- `window.FMV.I` is a getter function and must be called (`FMV.I()`) — bare
+  `FMV.I` yields `undefined` and makes everything look non-mergeable.
+- Poller fake chunk ids are `0x7ff00000 + n`; id `0` is permanently consumed
+  after one use — never reuse it.
