@@ -412,11 +412,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const claiming = () => typeof O.isClaiming === 'function' ? O.isClaiming() : !!O.isClaiming;
     const waitForClaim = async () => {
       const deadline = Date.now() + 8000;
-      while (claiming() && Date.now() < deadline) await sleep(100);
+      while (!state.stop && claiming() && Date.now() < deadline) await sleep(100);
     };
 
     // Claim first so the reward animation can free the building and refresh its order.
     for (const order of (O.getCurrentOrders() || []).slice()) {
+      if (state.stop) break;
       if (!order || order.state !== COMPLETE) continue;
       O.rewardOrder(order.buildingID);
       await waitForClaim();
@@ -425,6 +426,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
     // Re-read after claims because the service may replace a claimed order.
     for (const order of (O.getCurrentOrders() || []).slice()) {
+      if (state.stop) break;
       if (!order || order.state !== STARTABLE) continue;
       const affordable = typeof O._canAffordOrder === 'function' && O._canAffordOrder(order);
       if (!affordable) {
@@ -437,9 +439,20 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     log('orders: +' + claimed + ' · +' + started + ' start' + (skipped ? ' · ' + skipped + ' skip' : ''));
   }
 
+  // ── Stop request: set the flag + give immediate UI feedback ──────────────
+  function requestStop() {
+    state.stop = true;
+    log('stop — halting', 'warn');
+    if (autoBtn) {
+      autoBtn.textContent = 'Stopping…';
+      autoBtn.disabled = true;
+    }
+  }
+
   // ── Board-full guard: when no empty cells are left, merge to free space ───
   async function freeBoardSpace() {
     assertFMV();
+    if (state.stop) return false;
     const board = readBoard();
     if (board.error) throw new Error(board.error);
     if (board.empties.length > 0) return false;
@@ -451,7 +464,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   // ── Auto-orders loop: claim + start orders every few seconds; when the
   //    board fills up, run plan+merge to merge items and free space ─────────
   async function autoOrders() {
-    if (state.running) { state.stop = true; log('stop — finishing op…'); return; }
+    if (state.running) { requestStop(); return; }
     if (state.busy) return;
     state.running = true;
     state.stop = false;
@@ -465,7 +478,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         log('cyc ' + cycle, 'ok');
         await orders();
         await freeBoardSpace();
-        await sleep(ORDERS_WAIT_MS);
+        const deadline = Date.now() + ORDERS_WAIT_MS;
+        while (!state.stop && Date.now() < deadline) await sleep(250);
       }
     } catch (e) {
       log('ERR: ' + (e && e.message ? e.message : e), 'err');
@@ -669,10 +683,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     planMerge: () => runOp(phasePlanMerge),
     autoOrders,
     stop: () => {
-      if (state.running || state.busy) {
-        state.stop = true;
-        log('stop — halting', 'warn');
-      }
+      if (state.running || state.busy) requestStop();
     },
     status: refreshStatus,
     running: () => state.running,

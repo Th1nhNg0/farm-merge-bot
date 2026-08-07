@@ -5,6 +5,19 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-08-07
+
+### Fixed
+
+- **Auto-orders stop**: turning off Auto Orders now halts within ~1s instead of
+  running on for many seconds. Previously `orders()` kept claiming/starting
+  orders after a stop request (claim waits up to 8s each), the board-full
+  plan+merge still ran, and the 5s cycle wait was uninterruptible — the STOP
+  click was only noticed at the next loop-top check. Now a `requestStop()`
+  helper flips the button to "Stopping…" and disables it immediately, the claim
+  wait and order loops exit on stop, the board-full merge guard skips when
+  stopping, and the cycle wait polls `state.stop` (250ms ticks).
+
 ## [1.0.0] — 2026-08-07
 
 Initial release. The first stable version of the Discord Activity build.
