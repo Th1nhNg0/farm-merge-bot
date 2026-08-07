@@ -28,7 +28,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
     const d = new Date(), p = (n) => (n < 10 ? '0' : '') + n;
-    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    return p(d.getHours()) + ':' + p(d.getMinutes());
   }
   function updateLogView() {
     const open = logEl.current.classList.contains('open');
@@ -140,12 +140,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       const board = readBoard();
       if (board.error) throw new Error(board.error);
       if (!board.empties.length) {
-        log('map is full — no empty cells left', 'ok');
+        log('map full', 'ok');
         return { filled: true, spawned: spawnedTotal };
       }
       const crates = cratesLeft();
-      log('fill ' + round + ': ' + board.empties.length + ' empty cells, ' + crates + ' crates left');
-      if (crates <= 0) { log('out of crates — stopping fill', 'warn'); return { filled: false, spawned: spawnedTotal }; }
+      log('fill ' + round + ': ' + board.empties.length + ' empty · ' + crates + ' crates');
+      if (crates <= 0) { log('no crates — fill stop', 'warn'); return { filled: false, spawned: spawnedTotal }; }
       let spawned = 0;
       for (const e of board.empties) {
         if (state.stop) break;
@@ -154,10 +154,10 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         if (spawned % 50 === 0) await sleep(0);
       }
       spawnedTotal += spawned;
-      log('spawned ' + spawned + '/' + board.empties.length + ' crates, waiting for auto-open...');
+      log('+' + spawned + '/' + board.empties.length + ' crates, opening…');
       await sleep(spawnWait);
     }
-    log('fill hit round cap');
+    log('fill cap');
     return { filled: false, spawned: spawnedTotal };
   }
 
@@ -172,22 +172,22 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       const board = readBoard();
       const { naturals, groups } = window.FMVPlan.planAll(board);
       if (!naturals.length && !groups.length) {
-        log('no 5/10/15 group possible this round — done');
+        log('nothing to merge — done');
         return false;
       }
-      log('round ' + round + ': ' + naturals.length + ' natural + ' + groups.length + ' grouped, executing...');
+      log('r' + round + ': ' + naturals.length + '+' + groups.length + ' groups');
       const result = await executeBatch(naturals, groups);
       const movesOk = (result.moves || []).filter((m) => m && m.ok).length;
       const swapsOk = (result.swaps || []).filter((m) => m && m.ok).length;
       const mergesOk = (result.merges || []).filter((m) => m && m.ok).length;
-      log('  moves ' + movesOk + '/' + result.moves.length +
-        ', swaps ' + swapsOk + '/' + result.swaps.length +
-        ', merges ' + mergesOk + '/' + result.merges.length);
-      if (mergesOk === 0) { log('no merge succeeded — stopping plan phase', 'warn'); return false; }
-      if (state.stop) { log('stop requested — halting plan phase', 'warn'); return false; }
+      log('mv ' + movesOk + '/' + result.moves.length +
+        ' · sw ' + swapsOk + '/' + result.swaps.length +
+        ' · mg ' + mergesOk + '/' + result.merges.length);
+      if (mergesOk === 0) { log('no merges — stop', 'warn'); return false; }
+      if (state.stop) { log('stop — halting', 'warn'); return false; }
       await sleep(mergeWait);
     }
-    log('plan/merge hit round cap');
+    log('plan cap');
     return true;
   }
 
@@ -274,13 +274,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       vaultRes = assignCells(vault, zoneCells);
       if (vaultRes.missing.length) {
         const rest = assignCells(vaultRes.missing, cropFree.slice(cropRes.cur));
-        log('sort: vault zone too small — ' + rest.missing.length + ' groups overflow into crop area', 'warn');
+        log('sort: vault overflow ' + rest.missing.length + ' grp', 'warn');
       }
     }
     const total = plan.reduce((s, p) => s + p.cells.length, 0);
-    log('sort: ' + plan.length + ' groups, ' + total + ' items to place' +
-      ' (' + fixedCells.size + ' cells fixed — no merge chain/static families stay in place' +
-      (vaultN ? '; ' + vaultN + ' to bottom strip: ' + zone.length + ' cells' : '') + ')', 'ok');
+    log('sort: ' + plan.length + ' grp · ' + total + ' items · ' + fixedCells.size + ' fixed' +
+      (vaultN ? ' · ' + vaultN + ' vault' : ''), 'ok');
 
     const FMV = window.FMV;
     const mirror = new Map();
@@ -340,8 +339,8 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       }
     }
 
-    log('sort done: moves ' + moves + ', swaps ' + swaps + ', fails ' + fails +
-      (moves + swaps >= cap ? ' (op cap hit)' : ''));
+    log('sort: mv ' + moves + ' · sw ' + swaps + ' · fail ' + fails +
+      (moves + swaps >= cap ? ' (cap)' : ''));
   }
 
   // ── HARVEST: tap every READY harvestable via the game's own tap path ─────
@@ -385,12 +384,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       try { valid = !!S.interactionWhitelistService.isTapValid({ column: cell.column, row: cell.row }); } catch (e2) {}
       if (!valid) { blocked++; continue; }
       try { tapRouter._simulateClick(e); tapped++; } catch (e2) {
-        log('tap fail ' + cell.column + ':' + cell.row + ': ' + e2.message, 'warn');
+        log('tap fail ' + cell.column + ':' + cell.row, 'warn');
       }
       if (tapped % 20 === 0) await sleep(0);
     }
-    log('harvest: tapped ' + tapped + ' ready, skipped ' + cooling + ' cooling' +
-      (depleted ? ', ' + depleted + ' depleted' : '') + (blocked ? ', ' + blocked + ' blocked by UI' : ''));
+    log('harvest: ' + tapped + ' tap · ' + cooling + ' cd' +
+      (depleted ? ' · ' + depleted + ' dep' : '') + (blocked ? ' · ' + blocked + ' blk' : ''));
   }
 
   // ── ORDERS: claim finished orders, then start affordable orders ────────────
@@ -410,7 +409,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     let claimed = 0;
     let started = 0;
     let skipped = 0;
-    const label = (o) => o.buildingID + '/' + o.recipe;
     const claiming = () => typeof O.isClaiming === 'function' ? O.isClaiming() : !!O.isClaiming;
     const waitForClaim = async () => {
       const deadline = Date.now() + 8000;
@@ -423,7 +421,6 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       O.rewardOrder(order.buildingID);
       await waitForClaim();
       claimed++;
-      log('claimed ' + label(order), 'ok');
     }
 
     // Re-read after claims because the service may replace a claimed order.
@@ -432,15 +429,12 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       const affordable = typeof O._canAffordOrder === 'function' && O._canAffordOrder(order);
       if (!affordable) {
         skipped++;
-        log('skipped ' + label(order) + ' — missing ingredients', 'warn');
         continue;
       }
       O.startOrder(order.buildingID);
       started++;
-      log('started ' + label(order), 'ok');
     }
-    log('orders: claimed ' + claimed + ', started ' + started +
-      (skipped ? ', skipped ' + skipped : ''));
+    log('orders: +' + claimed + ' · +' + started + ' start' + (skipped ? ' · ' + skipped + ' skip' : ''));
   }
 
   // ── Board-full guard: when no empty cells are left, merge to free space ───
@@ -449,7 +443,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     const board = readBoard();
     if (board.error) throw new Error(board.error);
     if (board.empties.length > 0) return false;
-    log('board is full (' + board.items.length + ' items) — running plan+merge', 'warn');
+    log('board full — merging', 'warn');
     await phasePlanMerge();
     return true;
   }
@@ -457,7 +451,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   // ── Auto-orders loop: claim + start orders every few seconds; when the
   //    board fills up, run plan+merge to merge items and free space ─────────
   async function autoOrders() {
-    if (state.running) { state.stop = true; log('stop requested — finishing current op...'); return; }
+    if (state.running) { state.stop = true; log('stop — finishing op…'); return; }
     if (state.busy) return;
     state.running = true;
     state.stop = false;
@@ -468,20 +462,20 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     try {
       while (state.running && !state.stop) {
         cycle++;
-        log('=== orders cycle ' + cycle + ' ===', 'ok');
+        log('cyc ' + cycle, 'ok');
         await orders();
         await freeBoardSpace();
         await sleep(ORDERS_WAIT_MS);
       }
     } catch (e) {
-      log('ERROR: ' + (e && e.message ? e.message : e), 'err');
+      log('ERR: ' + (e && e.message ? e.message : e), 'err');
     }
     state.running = false;
     state.stop = false;
     state.opStart = null;
     setUI();
     refreshStatus();
-    log('auto-orders stopped');
+    log('auto off');
   }
 
   // ── one-shot op wrapper ──────────────────────────────────────────────────
@@ -492,10 +486,10 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     state.rounds = 0;
     state.opStart = Date.now();
     setUI();
-    try { await fn(); } catch (e) { log('ERROR: ' + (e && e.message ? e.message : e), 'err'); }
+    try { await fn(); } catch (e) { log('ERR: ' + (e && e.message ? e.message : e), 'err'); }
     state.busy = false;
     state.opStart = null;
-    if (state.stop) log('stopped by user', 'warn');
+    if (state.stop) log('stopped', 'warn');
     setUI();
     refreshStatus();
   }
@@ -677,7 +671,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     stop: () => {
       if (state.running || state.busy) {
         state.stop = true;
-        log('stop requested — halting after current batch', 'warn');
+        log('stop — halting', 'warn');
       }
     },
     status: refreshStatus,
@@ -685,7 +679,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     version: '1.0.0'
   };
   setUI();
-  log('menu installed — FMV ' + window.FMV.version, 'ok');
+  log('menu v' + window.FMV.version + ' installed', 'ok');
   refreshStatus();
   if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };
