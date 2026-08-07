@@ -446,6 +446,15 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     return null;
   }
 
+  // Entities WE already sent LootReceived to this session, with the send time.
+  // The game writes the cooldown (tile entry / cooldown behavior / timer) only
+  // when it processes the queued behavior (~1 tick per item; ~1s/tick in a
+  // hidden tab), so a second Harvest run within that lag window would otherwise
+  // re-harvest cooling crops — the direct LootReceived path does not gate on
+  // cooldown itself. Skip anything harvested within LAG_WINDOW ms.
+  const pendingHarvests = new Map();
+  const LAG_WINDOW = 6000;
+
   let lootReceivedCtor = null;
   function findLootReceivedCtor() {
     if (lootReceivedCtor) return true;
@@ -487,7 +496,9 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     };
 
     // phase 1: harvest every READY harvestable — no tile-model cooldown
-    // (respects the game's wait between harvests), not lootable, hp remaining.
+    // (respects the game's wait between harvests), not lootable, hp remaining,
+    // and not already sent LootReceived within the pending-harvest lag window
+    // (the game writes the cooldown only after it processes the queued add).
     let harvested = 0, cooling = 0, depleted = 0;
     if (hasHarvestTrigger) {
       for (const cell of S.mapGrid._cells.values()) {
@@ -499,11 +510,19 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
         if (tileAt(cell.column, cell.row) && tileAt(cell.column, cell.row).cooldown) { cooling++; continue; }
+        const pendingAt = pendingHarvests.get(e);
+        if (pendingAt && Date.now() - pendingAt < LAG_WINDOW) { cooling++; continue; }
         if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
-        try { e.addBehavior(new lootReceivedCtor({})); harvested++; } catch (e2) {
+        try { e.addBehavior(new lootReceivedCtor({})); pendingHarvests.set(e, Date.now()); harvested++; } catch (e2) {
           log('harvest fail ' + cell.column + ':' + cell.row, 'warn');
         }
         if (harvested % 20 === 0) await sleep(0);
+      }
+      if (pendingHarvests.size > 64) {
+        const now = Date.now();
+        for (const [k, t] of pendingHarvests) {
+          if (now - t > LAG_WINDOW) pendingHarvests.delete(k);
+        }
       }
     }
 
@@ -1587,7 +1606,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     },
     resetStats: statsReset,
     running: () => state.running,
-    version: '1.5.2'
+    version: '1.5.3'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

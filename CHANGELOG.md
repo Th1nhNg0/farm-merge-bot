@@ -5,6 +5,21 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] — 2026-08-08
+
+### Fixed
+
+- **Harvest no longer double-harvests on-cooldown crops in a quick repeat run**:
+  the game writes the cooldown (tile save model entry, `cooldown` behavior,
+  timer) only when it *processes* a queued `LootReceived` — ~1 tick per item,
+  ~1s/tick in a throttled background tab. A second Harvest click inside that
+  lag window re-sent `LootReceived` to crops the game still saw as ready, and
+  the direct path does not gate on cooldown, so the crops got harvested again
+  (hp −1, loot produced, cooldown restarted). Phase 1 now keeps a session
+  registry of entities it already sent `LootReceived` to and skips any of them
+  for a 6s pending window (counted as `cd` in the harvest log), in addition to
+  the existing tile-model cooldown check — entries are pruned lazily.
+
 ## [1.5.2] — 2026-08-08
 
 ### Fixed
