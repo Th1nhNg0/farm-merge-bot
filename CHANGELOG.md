@@ -5,6 +5,23 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-08-08
+
+### Added
+
+- **Auto Clear skips the chop cooldown**: paying a tree/rock/toolbox source
+  starts a `MapSourceCooldown:col,row` timer in
+  `FMV.root()._nonCriticalServices.timer._timerModel._timers` (a Map keyed by
+  timerId — up to ~12 minutes on large trees) that holds a worker and blocks
+  re-payment until it expires. The clear scan previously skipped cooling
+  sources and waited the timer out; it now completes the timer instantly via
+  the game's own finish path (`_remaining = 0` + `_onFinish()`), which releases
+  the worker and marks the source lootable immediately — verified live
+  (`66:61`: cooldown → instant lootable + worker freed, hp −1 on collect).
+  Sources in the async window between payment and timer materialization
+  (tile `workerData` without `cooldown`) are treated as mid-chop and skipped,
+  so a source can never be paid twice before its loot is collected.
+
 ## [1.6.0] — 2026-08-08
 
 ### Added

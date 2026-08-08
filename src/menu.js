@@ -793,7 +793,24 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
         if (!hp || typeof hp.current !== 'number' || hp.current <= 0) continue;
         let tile = null;
         if (tiles) tile = FMVUtil.tileAt(tiles, cell.column, cell.row);
-        if (tile && tile.cooldown) continue;
+        if (tile && tile.cooldown) {
+          // skip the waiting time: complete the source's cooldown timer via
+          // the game's own finish path (releases the worker, marks the
+          // source lootable) instead of waiting it out
+          try {
+            const timers = window.FMV.root()._nonCriticalServices.timer._timerModel._timers;
+            const entry = timers.get(Number(tile.cooldown.timerId));
+            if (entry && entry._state !== 'FINISHED') {
+              entry._remaining = 0;
+              entry._onFinish();
+            }
+          } catch (e2) {}
+          if (tiles) tile = FMVUtil.tileAt(tiles, cell.column, cell.row);
+          if (tile && tile.cooldown) continue;
+        }
+        // worker held but cooldown timer not written yet (async window right
+        // after payment) — mid-chop, not payable; skip until it materializes
+        if (tile && tile.workerData && !tile.cooldown) continue;
         if (tile && tile.lootable) {
           lootables.push({ entity: e, col: cell.column, row: cell.row });
           continue;

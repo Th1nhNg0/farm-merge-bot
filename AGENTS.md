@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.6.0 (see `CHANGELOG.md`).
+Project version: 1.7.0 (see `CHANGELOG.md`).
 
 ## What this is
 
@@ -54,6 +54,16 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   context has `_onInteractionAdded`) spawns the loot objects and -1 hp.
   `tapRouter._simulateClick` only works for harvestables (animals) — sources
   need the popout→confirm flow, so call `_attemptPayment` directly.
+- **Source chop = cooldown timer**: paying a source starts a
+  `MapSourceCooldown:col,row` timer in `FMV.root()._nonCriticalServices.timer.
+  _timerModel._timers` (Map keyed by timerId; entries have `_state`,
+  `_remaining`, `_onFinish` — the game's own completion path) plus a worker
+  hold (tile `workerData`). The source is only `lootable` when the timer
+  expires (worker released). Auto Clear skips the wait by setting
+  `_remaining = 0` and calling `_onFinish()` — the tile cooldown entry is
+  then cleared by the game itself. Between payment and the timer's
+  materialization (async, next game tick) the tile has `workerData` without
+  `cooldown` — those sources are mid-chop, not payable.
 - **Harvest machinery** (Harvest button): plain taps do NOT harvest crops —
   the game's harvest runs when a `LootReceived` behavior lands on the entity
   (ctor = the trigger-module export whose instance `type === 'lootReceived'`,
