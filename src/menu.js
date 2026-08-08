@@ -884,6 +884,50 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     return null;
   }
 
+  // ── HALF CRATES: shovel-remove half of the gold reward crates ───────────
+  // Uses FMV.remove() (the game's own objectRemoval chain — takes a few
+  // seconds per crate), so ops run in settle rounds and rescan between
+  // rounds to catch stragglers.
+  async function removeHalfCrates() {
+    assertFMV();
+    const S = window.FMV.services();
+    const target = 'reward_crate_gold_gazebo';
+    const find = () => {
+      const out = [];
+      for (const cell of S.mapGrid._cells.values()) {
+        if (!cell || !cell.content) continue;
+        try {
+          if (cell.content.getBlueprintID() === target) {
+            out.push({ col: cell.column, row: cell.row });
+          }
+        } catch (e) {}
+      }
+      return out;
+    };
+    const total = find().length;
+    const want = Math.floor(total / 2);
+    if (!want) { log('half-crates: no gold crates'); return null; }
+    log('half-crates: ' + total + ' gold crates — removing ' + want);
+    let removed = 0, failed = 0;
+    for (let round = 0; round < 8 && removed < want && !state.stop; round++) {
+      const cur = find();
+      for (const c of cur) {
+        if (state.stop || removed >= want) break;
+        try {
+          const res = window.FMV.remove(c.col, c.row);
+          if (res && res.ok) removed++;
+          else if (res && res.reason !== 'empty cell') failed++;
+        } catch (e) { failed++; }
+        if (removed % 5 === 0) await sleep(0);
+      }
+      await settleSleep();
+      log('half-crates r' + round + ': ' + removed + '/' + want + ' removed · ' + find().length + ' left');
+    }
+    log('half-crates done: ' + removed + '/' + want + ' removed' +
+      (failed ? ' · ' + failed + ' failed' : '') + (state.stop ? ' · stop' : ''));
+    return null;
+  }
+
   // ── VISIT: auto-collect friend-reward bubbles ─────────────────────────────
   // Two tap paths exist, depending on whose farm is loaded:
   //   visitor path (a FRIEND's farm — you are the visitor): entities carry a
@@ -1054,7 +1098,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn, visitBtn;
+  let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn, visitBtn, halfCratesBtn;
   let chkOrders, chkClear, chkTree, chkRock, chkToolbox, clearTypesRow;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
@@ -1232,6 +1276,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
       + '<button id="fmv-orders">⚑ Orders</button>'
       + '<button id="fmv-clear-once">⛏ Clear</button>'
       + '<button id="fmv-visit">☕ Visit</button>'
+      + '<button id="fmv-half-crates" title="shovel-remove half of the gold reward crates">½ Gold</button>'
       + '</div>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-auto" style="display:none">'
@@ -1403,6 +1448,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     analyzeBtn = el.querySelector('#fmv-tab-analyze');
     clearBtn = el.querySelector('#fmv-clear-once');
     visitBtn = el.querySelector('#fmv-visit');
+    halfCratesBtn = el.querySelector('#fmv-half-crates');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -1444,6 +1490,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     fillBtn.addEventListener('click', () => runOp(phaseFill));
     clearBtn.addEventListener('click', () => runOp(clearOnce));
     visitBtn.addEventListener('click', () => runOp(collectVisits));
+    halfCratesBtn.addEventListener('click', () => runOp(removeHalfCrates));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
     orderBtn.addEventListener('click', () => runOp(orders));
@@ -1498,6 +1545,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     autoOrders: () => { prefs.orders = true; prefs.clear = false; savePrefs(); return autoAll(); },
     autoClear: () => { prefs.orders = false; prefs.clear = true; savePrefs(); return autoAll(); },
     visit: () => runOp(collectVisits),
+    removeHalfCrates: () => runOp(removeHalfCrates),
     autoAll,
     stop: () => {
       if (state.running || state.busy) requestStop();
@@ -1510,7 +1558,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
     },
     resetStats: statsReset,
     running: () => state.running,
-    version: window.__FMV_version || '1.5.4'
+    version: window.__FMV_version || '1.6.0'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

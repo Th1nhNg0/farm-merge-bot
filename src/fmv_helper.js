@@ -3,6 +3,7 @@
 // Works with the Discord-embedded build (services under _nonCriticalServices).
 //   FMV.board()                        -> [{col, row, id, tier, mergeable}, ...]
 //   FMV.merge(fromCol, fromRow, toCol, toRow) -> {ok, reason|chainLen, total}
+//   FMV.remove(col, row)               -> shovel-style removal (shovelable only)
 //   FMV.move / FMV.swap / FMV.spawnCrate / FMV.services()
 //   FMV.req, FMV.I, FMV.mergeCtor, FMV.root(), FMV.rootServices()
 
@@ -14,6 +15,25 @@ export const FMV_HELPER_SOURCE = `(function(){
   const rootServices = () => root()[servicesKey];
   const I = () => window.__FMV_mapKey === 'I' ? req(window.__FMV_mapId).I : req(window.__FMV_mapId);
   const MergeTriggerCtor = () => req(window.__FMV_hcId)[window.__FMV_hcKey];
+
+  // objectRemoval behavior ctor: function export of the trigger module whose
+  // instance .type === 'objectRemoval' (same structural scan as lootReceived)
+  let _objectRemovalCtor = null;
+  function ObjectRemovalCtor() {
+    if (_objectRemovalCtor) return _objectRemovalCtor;
+    try {
+      const mod = req(window.__FMV_hcId);
+      for (const k of Object.keys(mod)) {
+        const v = mod[k];
+        if (typeof v !== 'function' || !v.prototype) continue;
+        try {
+          const inst = new v({});
+          if (inst && inst.type === 'objectRemoval') { _objectRemovalCtor = v; return v; }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return null;
+  }
 
   function services() {
     const members = rootServices().timer._updatableGroup._members;
@@ -85,6 +105,23 @@ export const FMV_HELPER_SOURCE = `(function(){
     return { ok: true, cratesLeft: rootServices().inventory.getAmount('crates') };
   }
 
+  function remove(col, row) {
+    const S = services();
+    if (!S) return { ok: false, reason: 'services not ready' };
+    const cell = S.mapGrid.getCell(col, row);
+    if (!cell) return { ok: false, reason: 'no such cell' };
+    if (!cell.content) return { ok: false, reason: 'empty cell' };
+    const entity = cell.content;
+    if (!entity.hasBehavior || !entity.hasBehavior(I().Shovelable))
+      return { ok: false, reason: 'not removable (no shovelable behavior)' };
+    const Ctor = ObjectRemovalCtor();
+    if (!Ctor) return { ok: false, reason: 'objectRemoval ctor not found' };
+    try {
+      entity.addBehavior(new Ctor({}));
+    } catch (e) { return { ok: false, reason: 'remove failed: ' + e.message }; }
+    return { ok: true, removed: entity.getBlueprintID() };
+  }
+
   function move(fromCol, fromRow, toCol, toRow) {
     const S = services();
     if (!S) return { ok: false, reason: 'services not ready' };
@@ -132,6 +169,6 @@ export const FMV_HELPER_SOURCE = `(function(){
     return { ok: true, moved: [ea.getBlueprintID(), eb.getBlueprintID()] };
   }
 
-  window.FMV = { board, merge, move, swap, spawnCrate, services, req, I, root, rootServices,
-                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.5.4' };
+  window.FMV = { board, merge, move, swap, remove, spawnCrate, services, req, I, root, rootServices,
+                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.6.0' };
 })();`;

@@ -5,6 +5,25 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-08-08
+
+### Added
+
+- **`FMV.remove(col, row)`** (`fmv_helper.js`): shovel-style removal driven by the
+  game's own `objectRemoval` behavior chain — the ctor is discovered
+  structurally (function export of the trigger module whose instance
+  `type === 'objectRemoval'`, same scan as `lootReceived`), and the entity's
+  behavior-queue drains through the game's registry chain
+  (`removeBehavior` → `world.removeGameObject` → destroy + cell clear, a few
+  seconds per item). Guards mirror the in-game shovel: only entities with the
+  `shovelable` behavior are accepted (crops, wood, stone, coins, tools, crates,
+  keys…); trees, rocks, areas, buildings and blockers are rejected.
+- **Farm tab `½ Gold` button** (`menu.js` `removeHalfCrates`): removes half
+  (`floor(count/2)`) of the gold reward crates (`reward_crate_gold_gazebo`) via
+  `FMV.remove()`, in settle rounds with rescan-between-rounds for stragglers and
+  stop support; logs per-round progress. Exposed as
+  `window.FMV.menu.removeHalfCrates`.
+
 ## [1.5.4] — 2026-08-08
 
 ### Changed
