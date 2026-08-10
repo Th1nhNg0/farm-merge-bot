@@ -29,8 +29,10 @@ async function portFallback(port = 9222) {
   return null;
 }
 
-async function defaultWsUrl() {
-  const candidates = [
+async function wsCandidates() {
+  if (process.env.FMV_WS) return [process.env.FMV_WS];
+  const urls = [];
+  const files = [
     process.env.FMV_DEVPORT_FILE,
     path.join(
       os.homedir(),
@@ -49,34 +51,62 @@ async function defaultWsUrl() {
       "DevToolsActivePort"
     ),
   ];
-  for (const file of candidates) {
+  for (const file of files) {
     if (file && existsSync(file)) {
       const [port, wsPath] = readFileSync(file, "utf8").trim().split(/\r?\n/);
-      if (port && wsPath) return `ws://127.0.0.1:${port}${wsPath}`;
+      if (port && wsPath) urls.push(`ws://127.0.0.1:${port}${wsPath}`);
     }
   }
   const fallback = await portFallback();
-  if (fallback) return fallback;
-  throw new Error(
-    "Could not find DevToolsActivePort. Start Chrome with --remote-debugging-port=9222."
-  );
+  if (fallback) urls.push(fallback);
+  if (!urls.length)
+    throw new Error(
+      "Could not find DevToolsActivePort. Start Chrome with --remote-debugging-port=9222."
+    );
+  return urls;
 }
 
-export const WS_URL = process.env.FMV_WS || await defaultWsUrl();
+const WS_CANDIDATES = await wsCandidates();
+export const WS_URL = WS_CANDIDATES[0];
 
 export class CDP {
   constructor(url = WS_URL) {
     this.url = url;
+    this.urls = [url, ...WS_CANDIDATES].filter(
+      (u, i, a) => a.indexOf(u) === i
+    );
     this.id = 0;
     this.pending = new Map();
     this.ws = null;
   }
-  connect() {
+  async connect() {
+    // DevToolsActivePort can be stale (uuid from a dead Chrome) or missing
+    // (Chrome still initializing / pipe mode) while /json/version already
+    // answers. Try every candidate, then retry the whole set a few times.
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      for (const url of this.urls) {
+        try {
+          await this._open(url);
+          return;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (attempt < 2) await sleep(750);
+    }
+    throw new Error("ws connect error — no CDP endpoint reachable: " + lastErr?.message);
+  }
+  _open(url) {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.url);
-      this.ws.onopen = () => resolve();
-      this.ws.onerror = () => reject(new Error("ws connect error"));
-      this.ws.onmessage = (ev) => {
+      const ws = new WebSocket(url);
+      ws.onopen = () => resolve();
+      ws.onerror = () => {
+        try { ws.close(); } catch (e) {}
+        reject(new Error("ws connect error: " + url));
+      };
+      ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.id && this.pending.has(msg.id)) {
           const { resolve, reject } = this.pending.get(msg.id);
@@ -85,6 +115,7 @@ export class CDP {
           else resolve(msg.result);
         }
       };
+      this.ws = ws;
     });
   }
   send(method, params = {}, sessionId = null) {

@@ -5,6 +5,23 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] — 2026-08-10
+
+### Fixed
+
+- **Launcher works from any checkout location**: `auto-farm-install.bat`
+  hardcoded `FARM_DIR` to another machine's path, so `cd /d` failed ("The
+  system cannot find the path specified.") before `install.mjs` ran. The farm
+  dir now resolves from the batch file's own location (`%~dp0`).
+- **CDP connect survives stale/missing DevToolsActivePort**: the client picked
+  the first `DevToolsActivePort` file it found and failed hard when the
+  websocket URL was stale (browser uuid from a previous/dead Chrome) or the
+  file was missing (Chrome still initializing / pipe mode) — even though
+  `http://127.0.0.1:9222/json/version` was live. `connect()` now tries every
+  candidate URL (`FMV_WS` / `FMV_DEVPORT_FILE` overrides, the
+  chrome-devtools-mcp and default Chrome profile files, the HTTP fallback)
+  with up to 3 retries before giving up.
+
 ## [1.7.0] — 2026-08-08
 
 ### Added

@@ -1,7 +1,7 @@
 @echo off
 title FMV Bot - Installer
 setlocal
-set "FARM_DIR=C:\Users\weepingangel89\Desktop\auto-farm"
+set "FARM_DIR=%~dp0"
 set "DISCORD_URL=https://discord.com/channels/1158408201344135258/1315833045814738985"
 set "PROFILE=%USERPROFILE%\.cache\chrome-devtools-mcp\chrome-profile"
 set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"

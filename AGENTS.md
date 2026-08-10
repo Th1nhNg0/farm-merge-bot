@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.7.0 (see `CHANGELOG.md`).
+Project version: 1.7.1 (see `CHANGELOG.md`).
 
 ## What this is
 
