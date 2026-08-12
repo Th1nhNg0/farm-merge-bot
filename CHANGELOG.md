@@ -5,7 +5,7 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.1] — 2026-08-10
+## [1.7.1] — 2026-08-12
 
 ### Fixed
 
@@ -18,9 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   websocket URL was stale (browser uuid from a previous/dead Chrome) or the
   file was missing (Chrome still initializing / pipe mode) — even though
   `http://127.0.0.1:9222/json/version` was live. `connect()` now tries every
-  candidate URL (`FMV_WS` / `FMV_DEVPORT_FILE` overrides, the
-  chrome-devtools-mcp and default Chrome profile files, the HTTP fallback)
-  with up to 3 retries before giving up.
+  candidate URL (`FMV_WS` / `FMV_DEVPORT_FILE` overrides, the default Chrome
+  profile file, the HTTP fallback) with up to 3 retries before giving up.
+
+### Changed
+
+- **Public-release preparation**: the README was rewritten for a public
+  audience (generic Chrome/CDP setup instructions instead of personal MCP
+  tooling, features overview, architecture table and disclaimer); the launcher
+  no longer hardcodes a personal Discord channel or the MCP profile (it opens
+  `discord.com/app` with a dedicated local Chrome profile); the CDP client
+  dropped the chrome-devtools-mcp profile candidate from port discovery; the
+  personal handle was removed from the in-game menu header. Version strings
+  synced to 1.7.1 (README / `install.mjs` were stale at 1.6.0).
 
 ## [1.7.0] — 2026-08-08
 

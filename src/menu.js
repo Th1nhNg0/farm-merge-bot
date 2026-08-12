@@ -1273,7 +1273,7 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
 
     const el = document.createElement('div');
     el.id = 'fmv-menu';
-    el.innerHTML = '<div class="head"><span class="dot" title="stop current op"></span><span class="title">FMV Bot v' + (window.FMV && window.FMV.version ? window.FMV.version : '?') + ' · weepingangel89</span>'
+    el.innerHTML = '<div class="head"><span class="dot" title="stop current op"></span><span class="title">FMV Bot v' + (window.FMV && window.FMV.version ? window.FMV.version : '?') + '</span>'
       + '<span class="fold">-</span></div>'
       + '<div class="body">'
       + '<div class="status" id="fmv-status">installing...</div>'

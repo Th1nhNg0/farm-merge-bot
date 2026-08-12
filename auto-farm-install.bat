@@ -2,8 +2,8 @@
 title FMV Bot - Installer
 setlocal
 set "FARM_DIR=%~dp0"
-set "DISCORD_URL=https://discord.com/channels/1158408201344135258/1315833045814738985"
-set "PROFILE=%USERPROFILE%\.cache\chrome-devtools-mcp\chrome-profile"
+set "DISCORD_URL=https://discord.com/app"
+set "PROFILE=%LOCALAPPDATA%\fmv-bot\chrome-profile"
 set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
 

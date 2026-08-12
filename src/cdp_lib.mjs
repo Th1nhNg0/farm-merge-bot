@@ -4,18 +4,17 @@
 // The browser WS URL is auto-detected from Chrome's DevToolsActivePort file.
 // Candidates, in order:
 //   1. FMV_DEVPORT_FILE env override
-//   2. chrome-devtools-mcp profile (.cache/chrome-devtools-mcp/chrome-profile)
-//   3. normal Chrome profile
-// The MCP-launched Chrome exposes --remote-debugging-port=9222 (see
-// ~/.config/opencode/opencode.jsonc) so the scripts can attach to the browser
-// that hosts the Discord-embedded game. Override with env FMV_WS if needed.
-// Node >= 22 (built-in WebSocket).
+//   2. normal Chrome profile
+//   3. HTTP fallback on the standard debug port (9222)
+// The launcher starts Chrome with --remote-debugging-port=9222 and
+// IsolateSandboxedIframes (needed for the Discord activity iframe). Override
+// with env FMV_WS if needed. Node >= 22 (built-in WebSocket).
 
 import { readFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Fallback: MCP Chrome runs with --remote-debugging-pipe AND
+// Fallback: Chrome may be started with --remote-debugging-pipe AND
 // --remote-debugging-port=9222; the pipe mode may skip writing
 // DevToolsActivePort, so query the HTTP endpoint directly.
 async function portFallback(port = 9222) {
@@ -34,13 +33,6 @@ async function wsCandidates() {
   const urls = [];
   const files = [
     process.env.FMV_DEVPORT_FILE,
-    path.join(
-      os.homedir(),
-      ".cache",
-      "chrome-devtools-mcp",
-      "chrome-profile",
-      "DevToolsActivePort"
-    ),
     path.join(
       os.homedir(),
       "AppData",
