@@ -18,9 +18,17 @@
 // logic as the CLI scripts) and window.FMVUtil.
 import { readFileSync } from "node:fs";
 
-export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "utf8")
-  + "\n" + readFileSync(new URL("./util.js", import.meta.url), "utf8")
-  + "\n" + `(function(){
+// The injected payload crosses CDP and is parsed in the game frame — every
+// byte costs install time. Full-line comments (the only comment style in
+// these sources: no block comments, no template literals — verified) are
+// stripped from the embedded copies only; the annotated source files stay
+// untouched.
+const stripCommentLines = (s) =>
+  s.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n");
+
+export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", import.meta.url), "utf8"))
+  + "\n" + stripCommentLines(readFileSync(new URL("./util.js", import.meta.url), "utf8"))
+  + "\n" + stripCommentLines(`(function(){
   if (window.FMV && window.FMV.menu && window.FMV.menu.running && window.FMV.menu.running()) {
     return { ok: false, reason: 'menu running' };
   }
@@ -1582,4 +1590,4 @@ export const MENU_SOURCE = readFileSync(new URL("./plan.js", import.meta.url), "
   refreshStatus();
   if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };
-})();`;
+})();`);
