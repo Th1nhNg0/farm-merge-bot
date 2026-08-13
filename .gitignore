@@ -5,3 +5,6 @@ node_modules/
 # pi + autoresearch session files
 .pi/
 .auto/
+
+# bash resolution shim for bare `bash` spawns (see .auto/bash_launcher.cs)
+bash.exe
