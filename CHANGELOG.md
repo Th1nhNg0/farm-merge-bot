@@ -5,6 +5,20 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] — 2026-08-14
+
+### Changed
+
+- **Faster install (payload −12%, less in-frame CPU)**: the injected menu
+  payload no longer carries full-line comments — they are stripped from the
+  embedded copies (plan/util/menu) at build time, while the annotated source
+  files stay untouched (no behavior change; same code, fewer bytes over CDP
+  and less to parse in the game frame).
+- **Hunter discovery restructured**: the component-map and MergeTrigger scans
+  are fused into a single pass over executed modules, and the export walk
+  carries a single `topKey` string instead of allocating a path array per
+  visited object. Same discoveries, less main-thread work during install.
+
 ## [1.7.1] — 2026-08-12
 
 ### Fixed
