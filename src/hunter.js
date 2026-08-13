@@ -64,7 +64,9 @@ export const HUNTER_SOURCE = `(async function(){
     } catch (e) {}
     const executed = [];
     for (let i = 0; i < ids.length; i += 200) {
-      for (const id of ids.slice(i, i + 200)) {
+      const end = Math.min(i + 200, ids.length);
+      for (let j = i; j < end; j++) {
+        const id = ids[j];
         try { req(id); executed.push(id); } catch (e) {
           if (!String(e.message).startsWith('FMV_STUB_')) executed.push(id);
         }
@@ -79,12 +81,14 @@ export const HUNTER_SOURCE = `(async function(){
     let boardSize = -1;
 
     const visited = new Set();
-    const walk = (obj, pathKeys, depth, srcId) => {
+    // topKey = first key taken from the top-level export (the walk only needs
+    // pathKeys[0] for rootKey — carry that one string instead of the array)
+    const walk = (obj, topKey, depth, srcId) => {
       if (depth > 3 || !obj || typeof obj !== 'object' || visited.size > 8000) return;
       if (visited.has(obj)) return;
       visited.add(obj);
       if (Array.isArray(obj)) {
-        for (const e of obj) walk(e, pathKeys, depth + 1, srcId);
+        for (const e of obj) walk(e, topKey, depth + 1, srcId);
         return;
       }
       if (!root) {
@@ -92,7 +96,7 @@ export const HUNTER_SOURCE = `(async function(){
           const c = obj[sk];
           if (c && typeof c === 'object' && isSvcColl(c)) {
             root = obj; rootId = srcId; servicesKey = sk;
-            rootKey = pathKeys.length ? pathKeys[0] : null;
+            rootKey = topKey;
             return;
           }
         }
@@ -100,20 +104,20 @@ export const HUNTER_SOURCE = `(async function(){
       const keys = Object.keys(obj).slice(0, 40);
       for (const k of keys) {
         const v = obj[k];
-        if (v && typeof v === 'object') walk(v, pathKeys.concat(k), depth + 1, srcId);
+        if (v && typeof v === 'object') walk(v, topKey === null ? k : topKey, depth + 1, srcId);
       }
     };
 
-    for (let i = 0; i < executed.length; i += 150) {
-      for (const id of executed.slice(i, i + 150)) {
+    for (let i = 0; i < executed.length && !root; i += 150) {
+      const end = Math.min(i + 150, executed.length);
+      for (let j = i; j < end; j++) {
         try {
-          const ex = req(id);
+          const ex = req(executed[j]);
           if (!ex || typeof ex !== 'object') continue;
-          walk(ex, [], 0, id);
+          walk(ex, null, 0, executed[j]);
           if (root) break;
         } catch (e) {}
       }
-      if (root) break;
       await breathe();
     }
 
@@ -127,34 +131,32 @@ export const HUNTER_SOURCE = `(async function(){
       if (farm) { try { boardSize = farm.mapGrid._cells.size; } catch (e) {} }
     }
 
-    // component map
-    for (let i = 0; i < executed.length && mapId === null; i++) {
-      try {
-        const ex = req(executed[i]);
-        const cand = (ex && ex.I !== undefined) ? ex.I : ex;
-        if (cand && typeof cand === 'object' &&
-            cand.Mergeable !== undefined && cand.GridPosition !== undefined) {
-          mapId = executed[i]; mapKey = (ex && ex.I !== undefined) ? 'I' : null;
-        }
-      } catch (e) {}
-    }
-
-    // MergeTrigger ctor
-    outer:
-    for (let i = 0; i < executed.length && hc === null; i++) {
+    // ---- component map + MergeTrigger ctor: one fused scan ----
+    // (single sync pass, like the original two scans — no added breathing,
+    //  so real install wall time is unchanged)
+    for (let i = 0; i < executed.length && (mapId === null || hc === null); i++) {
       try {
         const ex = req(executed[i]);
         if (!ex || typeof ex !== 'object') continue;
-        for (const k of Object.keys(ex)) {
-          const v = ex[k];
-          if (typeof v !== 'function' || !v.prototype) continue;
-          try {
-            const p = new v({ cell: { column: 1, row: 1 }, chain: [] });
-            if (p && typeof p === 'object' && p.cell && p.chain) {
-              hc = v; hcId = executed[i]; hcKey = k;
-              break outer;
-            }
-          } catch (e) {}
+        if (mapId === null) {
+          const cand = (ex.I !== undefined) ? ex.I : ex;
+          if (cand && typeof cand === 'object' &&
+              cand.Mergeable !== undefined && cand.GridPosition !== undefined) {
+            mapId = executed[i]; mapKey = (ex.I !== undefined) ? 'I' : null;
+          }
+        }
+        if (hc === null) {
+          for (const k of Object.keys(ex)) {
+            const v = ex[k];
+            if (typeof v !== 'function' || !v.prototype) continue;
+            try {
+              const p = new v({ cell: { column: 1, row: 1 }, chain: [] });
+              if (p && typeof p === 'object' && p.cell && p.chain) {
+                hc = v; hcId = executed[i]; hcKey = k;
+                break;
+              }
+            } catch (e) {}
+          }
         }
       } catch (e) {}
     }
