@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .env
+
+# pi + autoresearch session files
+.pi/
+.auto/
