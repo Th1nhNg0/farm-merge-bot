@@ -103,15 +103,38 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   }
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
+  // idle wait when the orders loop hits a wall and merging changed nothing
+  // (order slots can open later — keep the loop alive, never self-stop)
+  const ORDERS_IDLE_WAIT_MS = 3000;
   const ORDERS_WAIT_MS = 5000;
   const CLEAR_SOURCES = new Set(['tree', 'rock', 'toolbox']);
-  // payments per clear turn — the user asked for a controlled pace
-  const CLEAR_TAP_CAP = 10;
+  // Sources also come in tiered variants in this build (tree_small/
+  // tree_medium/tree_large, rock_small/_medium/_large — the shop's moveable
+  // builds report object ids like 'tree_small' for blueprint
+  // 'tree_small_moveable'), so match by family prefix, not exact id.
+  // Non-source entities never reach the payment path anyway (no
+  // MapSource/ResourceGate → no cost → skipped).
+  const isClearSource = (id) => CLEAR_SOURCES.has(id) || /^(tree|rock|toolbox)/.test(id);
+  // payments per clear turn. Each payment's collect is processed by the game
+  // one tick at a time (loot landing + source re-arm), so throughput is
+  // bounded by how many sources are in flight in parallel — a higher cap
+  // means more sources draining per tick window. The cap is adapted to the
+  // free cells (each payment drops ~4-6 loot items), so a big wave never
+  // floods the board into a premature 'board full' stop.
+  const CLEAR_TAP_CAP = 40;
+  // consecutive 'board full' cycles before Auto Clear gives up (the pre-sweep
+  // frees cells when collectables are on the ground; overflow loot parks in
+  // the source's tile record, so the loop can keep clearing through a full
+  // board — this only stops it when nothing frees up for a while)
+  const CLEAR_BOARD_FULL_RETRIES = 20;
   // A source can take a tick to become payable after release/collection. Keep
   // Auto Clear alive through that short idle window, but stop eventually when
   // the board genuinely has nothing left to clear.
-  const CLEAR_IDLE_RETRIES = 30;
-  const CLEAR_IDLE_WAIT_MS = 1000;
+  const CLEAR_IDLE_RETRIES = 60;
+  // idle retry cadence: sources spend seconds re-arming (loot landing), so
+  // retry fast to notice re-armed sources quickly; each retry also sweeps
+  // ground loot, so stragglers get picked up without extra settles
+  const CLEAR_IDLE_WAIT_MS = 500;
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
     const d = new Date(), p = (n) => (n < 10 ? '0' : '') + n;
@@ -717,10 +740,34 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     log('stop — halting', 'warn');
   }
 
+  // ── Auto-merge pass: run the merge planner (5/10/15 chains) to free cells
+  //    and build higher tiers. Used by the Auto Orders / Auto Clear loops
+  //    when they hit the board-full / nothing-to-do wall — the clear's loot
+  //    (wood/tools) and order products are mergeable, so merging both frees
+  //    space and makes orders affordable. Returns merges done (0 = no-op).
+  async function autoMergePass() {
+    assertFMV();
+    const board = readBoard();
+    if (board.error) return 0;
+    const { naturals, groups } = window.FMVPlan.planAll(board);
+    if (!naturals.length && !groups.length) return 0;
+    const result = await executeBatch(naturals, groups);
+    const movesOk = (result.moves || []).filter((m) => m && m.ok).length;
+    const swapsOk = (result.swaps || []).filter((m) => m && m.ok).length;
+    const mergesOk = (result.merges || []).filter((m) => m && m.ok).length;
+    stats.merged += mergesOk;
+    stats.moved += movesOk;
+    stats.swapped += swapsOk;
+    return mergesOk;
+  }
+
   // ── Auto Orders loop (toggle): claim + start orders, then INSTANTLY
   //    finish their production timers (the game's own completion path) so
-  //    orders complete immediately — no waiting. Stops when the board is
-  //    full or nothing can be claimed/started anymore. ────────────────────
+  //    orders complete immediately — no waiting. NEVER stops on its own:
+  //    on a wall (nothing claimed/started or board full) it merges chains
+  //    to free space / build tiers, and if merging changes nothing it
+  //    idle-waits and retries — order slots can open later (building
+  //    refresh, harvests, merges). The ■ STOP dot / button ends it anytime.
   async function runOrdersLoop() {
     let cycle = 0;
     while (state.running && !state.stop) {
@@ -735,15 +782,23 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         const r2 = await orders(); // claim the freshly completed orders
         r = { claimed: r.claimed + r2.claimed, started: r.started + r2.started };
       }
-      if (!r.claimed && !r.started) {
-        log('orders: nothing to do — stop', 'warn');
-        break;
-      }
       const board = readBoard();
       if (board.error) throw new Error(board.error);
-      if (board.empties.length === 0) {
-        log('orders: board full — stop', 'warn');
-        break;
+      // wall: nothing claimed/started (orders unaffordable or no free slots)
+      // or the board is full — merge chains to free cells and build the
+      // higher tiers orders may need, then retry.
+      if (!r.claimed && !r.started || board.empties.length === 0) {
+        let merged = 0;
+        try { merged = await autoMergePass(); } catch (e) { log('merge fail: ' + (e && e.message), 'warn'); }
+        if (merged > 0) {
+          log('orders wall — merged ' + merged + ' chains to free space / build tiers', 'warn');
+          await settleSleep();
+          continue;
+        }
+        // nothing mergeable and nothing claimed/started right now — keep the
+        // loop alive (orders can open later) instead of stopping
+        await sleep(ORDERS_IDLE_WAIT_MS);
+        continue;
       }
       const wait = await adaptSettle(SETTLE_MIN, SETTLE_MAX) * 2;
       const deadline = Date.now() + Math.min(2000, Math.max(800, wait));
@@ -758,10 +813,21 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   async function autoClearFast() {
     let cycle = 0;
     let idleRetries = 0;
+    let boardFullRetries = 0;
     while (state.running && !state.stop) {
       cycle++;
       log('clear cyc ' + cycle, 'ok');
       const reason = await clearOnce();
+      // every cycle merges chains — like Auto Orders does at its wall. The
+      // clear's own loot (wood/tools/stone) is mergeable, so consolidating
+      // it each cycle frees cells, keeps the board from flooding and the
+      // adaptive payment cap high. No-op fast when nothing is chainable.
+      let merged = 0;
+      try { merged = await autoMergePass(); } catch (e) { log('merge fail: ' + (e && e.message), 'warn'); }
+      if (merged > 0) {
+        log('merged ' + merged + ' chains', 'ok');
+        await settleSleep(); // let the merges settle before the next cycle
+      }
       if (reason === 'nothing ready' || reason === 'collected only') {
         idleRetries++;
         if (idleRetries >= CLEAR_IDLE_RETRIES) {
@@ -771,6 +837,17 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         await sleep(CLEAR_IDLE_WAIT_MS);
         continue;
       }
+      if (reason === 'board full') {
+        // transient — the per-cycle merge above frees cells as loot lands;
+        // keep retrying until the board genuinely can't hold more
+        boardFullRetries++;
+        if (boardFullRetries >= CLEAR_BOARD_FULL_RETRIES) {
+          log('auto clear stop: board full', 'warn');
+          break;
+        }
+        await sleep(1000);
+        continue;
+      }
       if (reason === 'not focused' || reason === 'no tap services' || reason === 'no router' ||
           reason === 'no free workers') {
         await sleep(1000); // transient — retry shortly
@@ -778,8 +855,140 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       }
       if (reason) { log('auto clear stop: ' + reason, 'warn'); break; }
       idleRetries = 0;
+      boardFullRetries = 0;
       await sleep(250); // as fast as the game's tick allows
     }
+  }
+
+  // ── BUY ALL FLASH DEALS: refresh the deals (re-roll picks + refill stock,
+  //    the game's own refresh path), then purchase every unit of stock of
+  //    each deal. SKIPPED: crate/chest/key deals (crates must never ride the
+  //    storage-bubble path — broke the game loop once) and harvest-product
+  //    deals (crops + animal produce the farm already makes — no need to
+  //    buy). Object rewards land in storage bubbles via the game's own
+  //    delivery; after buying, all bubbles are collected so the goods land
+  //    on the grid. If gems/coins run short, the deficit is granted.
+  async function buyAllMarketplace() {
+    assertFMV();
+    const S = window.FMV.services();
+    const R = window.FMV.rootServices();
+    const m = S.marketplaceService;
+    const fds = m.flashDealsService;
+    const FLASH_DEAL_IDS = ['flash_deal_ingredient', 'flash_deal_generator',
+      'flash_deal_material', 'flash_deal_chest', 'flash_deal_key', 'flash_deal_greenhouse'];
+    const CRATE_RE = /reward_crate|_crate_/;
+    // harvest/farm products (the 'ingredient' deal pool — crops + animal
+    // produce): never buy these, the farm produces them for free
+    const HARVEST_PRODUCTS = new Set(['sugarcane', 'tomato', 'sunflower', 'corn', 'soybeans',
+      'carrot', 'wheat', 'coffeebeans', 'goatmilk', 'milk', 'egg', 'fur', 'wool', 'bacon',
+      'pumpkin', 'potato', 'strawberry', 'blueberry', 'grape', 'melon', 'rice']);
+    const refillModelStock = (id) => {
+      try {
+        const e = fds.getFlashDealItem(id);
+        if (e && e.renewableStock && Number.isFinite(Number(e.renewableStock.amount))) {
+          fds._model.setStock(id, Number(e.renewableStock.amount));
+        }
+      } catch (e2) {}
+    };
+
+    // 1) refresh the deals BEFORE buying — same path the game runs when the
+    //    flash-deal timer expires (re-roll picks, reorder, re-arm the 4h
+    //    timer) plus the stock refill (both the marketplace stock items and
+    //    the flash-deals model stock)
+    log('market: refreshing flash deals', 'ok');
+    try {
+      fds._onFlashDealTimerFinished();
+      m._resetFlashDealStock();
+      for (const id of FLASH_DEAL_IDS) refillModelStock(id);
+      await settleSleep(); // let the game process the re-roll before buying
+    } catch (e) { log('market refresh fail: ' + (e && e.message), 'warn'); }
+
+    let bought = 0, failed = 0, granted = 0, skipped = 0;
+    for (const id of FLASH_DEAL_IDS) {
+      if (state.stop) break;
+      try {
+        const entry = fds.getFlashDealItem(id); // real payment/reward for the fresh pick
+        if (!entry) { skipped++; continue; }
+        const reward = entry.reward || {};
+        if (reward.type !== 'object' && reward.type !== 'inventory') { skipped++; continue; }
+        const rewardBps = Array.isArray(reward.data) ? reward.data : [reward.data];
+        if (rewardBps.some((bp) => CRATE_RE.test(String(bp)))) {
+          log('market skip ' + id + ': crate reward (' + rewardBps.join(',') + ') — bubble path unsafe', 'warn');
+          skipped++;
+          continue;
+        }
+        if (rewardBps.some((bp) => HARVEST_PRODUCTS.has(String(bp)))) {
+          log('market skip ' + id + ': harvest product (' + rewardBps.join(',') + ') — farm makes it for free', 'warn');
+          skipped++;
+          continue;
+        }
+        let stock = fds._model.getStock(id);
+        if (!Number.isFinite(stock) || stock < 0) stock = 1; // unset = single purchase
+        if (stock === 0) { skipped++; continue; }
+        const need = Number(entry.payment.amount) || 0;
+        const payKey = entry.payment.key || 'gems';
+        for (let n = 0; n < stock && !state.stop; n++) {
+          const have = R.inventory.getAmount(payKey);
+          if (have < need) {
+            const g = await window.FMV.grant([{ key: payKey, amount: need - have }]);
+            if (!g || !g.ok) { failed++; break; }
+            granted += need - have;
+          }
+          R.inventory.deductItems([{ key: payKey, amount: need }]);
+          if (reward.type === 'inventory') {
+            await window.FMV.grant(rewardBps.map((r) => (typeof r === 'object' && r.key ? r : { key: String(r), amount: 1 })));
+          } else {
+            const bubbles = [];
+            for (const bp of rewardBps) {
+              const comps = R.blueprintCollection.getBlueprint(bp).components;
+              bubbles.push({ blueprint: bp, data: comps });
+            }
+            S.storageBubble.createBubbleAndShowContent(bubbles);
+          }
+          // keep BOTH stock stores consistent (the popup reads the stock
+          // items, the flash-deals model is the other half of the book)
+          try { const si = m.getStockItem(id); if (si && Number.isFinite(si.amount) && si.amount > 0) si.amount--; } catch (e2) {}
+          try { const s2 = fds._model.getStock(id); if (Number.isFinite(s2) && s2 > 0) fds._model.setStock(id, s2 - 1); } catch (e2) {}
+          bought++;
+          // purchases are safe-fast (the freeze was the bubble-TAP step,
+          // not bubble creation): breathe between buys, settle every 5
+          await sleep(120);
+          if (bought % 5 === 0) await settleSleep();
+        }
+        log('market: ' + id + ' x' + (stock - Math.max(0, fds._model.getStock(id))) + ' (' + need + ' ' + payKey + ' each)', 'ok');
+      } catch (e2) {
+        failed++;
+        log('market fail ' + id + ': ' + (e2 && e2.message), 'warn');
+      }
+    }
+
+    // 2) the delivered goods sit in storage bubbles — NOT auto-collected
+    //    here: tapping many bubbles in a row is what froze the game (each
+    //    tap runs multiple full-grid scans + spawns every item with a move
+    //    animation; bursts stall the main thread into a watchdog restart).
+    //    Use the separate 📦 Tap Bubbles button (slow by design) or tap them
+    //    in-game at your own pace.
+    let bubblesTapped = 0;
+    const bub = (() => {
+      try {
+        const S2 = window.FMV.services();
+        const I2 = window.FMV.I();
+        let n = 0;
+        for (const e of (S2.world._gameObjects || [])) {
+          try {
+            if (!e.hasBehavior || !e.hasBehavior(I2.StorageBubble)) continue;
+            const content = e.getBehavior(I2.StorageBubble).content;
+            if (content && content.length) n++;
+          } catch (e2) {}
+        }
+        return n;
+      } catch (e) { return 0; }
+    })();
+    if (bub) log('market: ' + bub + ' storage bubbles left — tap them with 📦 Tap Bubbles or in-game', 'warn');
+
+    log('market done: ' + bought + ' bought' + (granted ? ' · +' + granted + ' granted' : '') +
+      (skipped ? ' · ' + skipped + ' skipped' : '') + (failed ? ' · ' + failed + ' failed' : ''), bought ? 'ok' : 'warn');
+    return { bought: bought, failed: failed, skipped: skipped, granted: granted, bubblesTapped: bubblesTapped };
   }
 
   // ── toggle-loop runner: click starts the loop, click again stops it ─────
@@ -865,6 +1074,22 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       e.addBehavior(new Ctor({ cost: [{ key: 'energy', amount: Math.max(1, Number(cost) || 5) }], workers: Number(workers) || 1 }));
     } catch (e2) {}
   }
+  // Delete every cooldown timer for one source cell BY LABEL. The game
+  // registers the MapSourceCooldown timer on the tick AFTER the payment's
+  // synchronous effects, so a timerId-based delete (which reads the tile
+  // record too early) leaves orphans behind; label matching catches the
+  // timer whenever it appears.
+  function dropSourceCooldownTimers(col, row) {
+    try {
+      const prefix = 'MapSourceCooldown:' + col + ':' + row;
+      const timers = window.FMV.rootServices().timer._timerModel._timers;
+      for (const [k, v] of timers.entries()) {
+        try {
+          if (String(v._label || v._type || '').indexOf(prefix) !== -1) timers.delete(k);
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
   function findTapServices() {
     const S = window.FMV.services();
     // registries are rebuilt as subsystems spawn/die / the farm changes —
@@ -901,6 +1126,18 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     const tapRouter = getTapRouter(S);
     if (!tapRouter || typeof tapRouter._simulateClick !== 'function') return 'no router';
     const tiles = FMVUtil.tileModel();
+    // hygiene: payments' cooldown timers register a tick AFTER our cleanup,
+    // so stale MapSourceCooldown timers can pile up across runs; they fire
+    // into the void (the cooldown processor finds no entity hook), but a
+    // sweep per turn keeps the timer table lean
+    try {
+      const timers = window.FMV.rootServices().timer._timerModel._timers;
+      for (const [k, v] of timers.entries()) {
+        try {
+          if (String(v._label || '').indexOf('MapSourceCooldown:') === 0) timers.delete(k);
+        } catch (e) {}
+      }
+    } catch (e) {}
     const readEnergy = () => {
       try {
         const v = window.FMV.rootServices().inventory.getAmount('energy');
@@ -919,7 +1156,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         const e = cell.content;
         let id = null;
         try { id = e.getObjectIdAndTier().id; } catch (e2) {}
-        if (!id || !CLEAR_SOURCES.has(id)) continue;
+        if (!id || !isClearSource(id)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (!hp || typeof hp.current !== 'number' || hp.current <= 0) continue;
         let tile = null;
@@ -936,11 +1173,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
           // cooldown timer — delete both directly (client-authoritative save;
           // the orphan timer would otherwise fire later and pile up).
           try {
-            const timers = window.FMV.rootServices().timer._timerModel._timers;
-            if (tile.cooldown) {
-              const tid = Number(tile.cooldown.timerId);
-              if (Number.isFinite(tid)) timers.delete(tid);
-            }
+            dropSourceCooldownTimers(cell.column, cell.row);
             delete tile.cooldown;
             delete tile.workerData;
           } catch (e2) {}
@@ -975,7 +1208,17 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     };
 
     let { cands, lootables, empties } = scan();
-    if (empties === 0) return 'board full';
+    if (empties === 0) {
+      // board looks full — unpicked ground loot (Collectable bubbles) is
+      // usually the filler; sweep it first, then recheck before bailing
+      const f0 = FMVUtil.collectablesOnBoard(S, I);
+      for (const e of f0) {
+        try { tapRouter._simulateClick(e); } catch (e2) {}
+      }
+      if (f0.length) await settleSleep();
+      ({ cands, lootables, empties } = scan());
+      if (empties === 0) return 'board full';
+    }
 
     // 1) collect pending loot first (free — frees sources for the next payment)
     let collected = 0;
@@ -1000,9 +1243,13 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     }
     let tapped = 0;
     let noWorkers = 0;
+    // wave size follows the free cells (~4-6 loot items per payment), so the
+    // board never floods into a premature stop; min 4 keeps progress on a
+    // nearly-full board (overflow parks safely in the source's tile record)
+    const tapCap = Math.max(4, Math.min(CLEAR_TAP_CAP, Math.floor(empties / 4)));
     for (const c of cands) {
       if (state.stop) break;
-      if (tapped >= CLEAR_TAP_CAP) break; // paced: max 10 payments per turn
+      if (tapped >= tapCap) break;
       energy = readEnergy();
       if (energy < c.cost) break;
       let free = true;
@@ -1027,14 +1274,15 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         try {
           const t2 = FMVUtil.tileAt(tiles, c.col, c.row);
           if (t2) {
-            if (t2.cooldown) {
-              const tid = Number(t2.cooldown.timerId);
-              if (Number.isFinite(tid)) window.FMV.rootServices().timer._timerModel._timers.delete(tid);
-            }
+            dropSourceCooldownTimers(c.col, c.row);
             delete t2.cooldown;
             delete t2.workerData;
           }
         } catch (e4) {}
+        // the game registers the cooldown timer a tick AFTER the payment's
+        // synchronous effects — the immediate drop above can run too early,
+        // so drop again once the tick has run
+        setTimeout(() => dropSourceCooldownTimers(c.col, c.row), 1500);
         // re-add the ResourceGate the payment consumed, so the source is
         // payable again on the next cycle (the game's re-arm never fires here)
         reAddResourceGate(c.entity, c.cost, c.workers);
@@ -1050,20 +1298,17 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     // 3) collect ground collectables — produced items land on empty cells as
     //    bubbles (Collectable behavior) and need a tap to be picked up; only
     //    PRODUCT bubbles (reward key is a real blueprint) — coin/gem/energy
-    //    reward bubbles are not ours to click. Guards stale references too.
-    //    Iterates with adaptive settles until none remain (the loot lands on
-    //    the game's next tick, so a single sweep can race it).
+    //    reward bubbles are not ours to click. ONE sweep after the settle:
+    //    loot that lands after the sweep is caught by the next turn's sweep
+    //    (the loop rescans every turn, so stragglers never accumulate — no
+    //    multi-round settles stalling the turn on hidden tabs).
     let ground = 0;
-    if (tapped) await settleSleep();
-    for (let round = 0; round < 4 && !state.stop; round++) {
-      const found = FMVUtil.collectablesOnBoard(S, I);
-      if (!found.length) break;
-      for (const e of found) {
-        if (state.stop) break;
-        try { tapRouter._simulateClick(e); ground++; } catch (e2) {}
-        if (ground % 20 === 0) await sleep(0);
-      }
-      await settleSleep();
+    if (tapped) await settleSleep(); // let this turn's fresh loot land
+    const found = FMVUtil.collectablesOnBoard(S, I);
+    for (const e of found) {
+      if (state.stop) break;
+      try { tapRouter._simulateClick(e); ground++; } catch (e2) {}
+      if (ground % 20 === 0) await sleep(0);
     }
 
     energy = readEnergy();
@@ -1295,7 +1540,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn, visitBtn, halfCratesBtn;
+  let dot, sortBtn, fillBtn, harvestBtn, planBtn, analyzeBtn, visitBtn;
   let autoOrdersBtn, autoClearBtn;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
@@ -1337,8 +1582,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     fillBtn.disabled = dis;
     harvestBtn.disabled = dis;
     planBtn.disabled = dis;
-    orderBtn.disabled = dis;
-    if (clearBtn) clearBtn.disabled = dis;
     if (visitBtn) visitBtn.disabled = dis;
     for (const b of document.querySelectorAll('#fmv-pane-cheat button')) b.disabled = dis;
   }
@@ -1485,15 +1728,12 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '</div>'
       + '<div class="lbl">Work</div>'
       + '<div class="btns">'
-      + '<button id="fmv-orders">⚑ Orders</button>'
       + '<button id="fmv-auto-orders" class="toggle" title="toggle: claim + start orders, finish production instantly until board full / nothing to do">▶ Auto Orders</button>'
-      + '<button id="fmv-clear-once">⛏ Clear</button>'
       + '<button id="fmv-auto-clear" class="toggle" title="toggle: clear sources fast (cooldowns skipped) until energy out / board full">⚡ Auto Clear</button>'
       + '</div>'
       + '<div class="lbl">Social</div>'
       + '<div class="btns">'
       + '<button id="fmv-visit">☕ Visit</button>'
-      + '<button id="fmv-half-crates" title="shovel-remove half of the gold reward crates">½ Gold</button>'
       + '</div>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-cheat" style="display:none">'
@@ -1503,6 +1743,11 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<button id="fmv-cheat-gems">💎 Gems +1k</button>'
       + '<button id="fmv-cheat-energy">⚡ Energy +200</button>'
       + '<button id="fmv-cheat-crates">📦 Crates +20</button>'
+      + '</div>'
+      + '<div class="lbl">Market</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-buy-all" title="refresh flash deals, buy all non-harvest stock (crate deals + harvest products skipped; goods land in storage bubbles)">🛒 Flash Deals</button>'
+      + '<button id="fmv-tap-bubbles" title="collect storage bubbles slowly — one tap per 1.5s (tapping many bubbles fast froze the game)">📦 Tap Bubbles</button>'
       + '</div>'
       + '<div class="lbl">Speed</div>'
       + '<div class="btns">'
@@ -1659,16 +1904,15 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
     planBtn = el.querySelector('#fmv-plan');
-    orderBtn = el.querySelector('#fmv-orders');
     analyzeBtn = el.querySelector('#fmv-tab-analyze');
-    clearBtn = el.querySelector('#fmv-clear-once');
     visitBtn = el.querySelector('#fmv-visit');
-    halfCratesBtn = el.querySelector('#fmv-half-crates');
     const cheatCoins = el.querySelector('#fmv-cheat-coins');
     const cheatGems = el.querySelector('#fmv-cheat-gems');
     const cheatEnergy = el.querySelector('#fmv-cheat-energy');
     const cheatCrates = el.querySelector('#fmv-cheat-crates');
     const cheatRegen = el.querySelector('#fmv-cheat-regen');
+    const buyAllBtn = el.querySelector('#fmv-buy-all');
+    const tapBubblesBtn = el.querySelector('#fmv-tap-bubbles');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -1715,18 +1959,24 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     cheatGems.addEventListener('click', cheatGrant('gems', 1000));
     cheatEnergy.addEventListener('click', cheatGrant('energy', 200));
     cheatCrates.addEventListener('click', cheatGrant('crates', 20));
+    buyAllBtn.addEventListener('click', () => runOp(buyAllMarketplace));
+    tapBubblesBtn.addEventListener('click', () => runOp(async () => {
+      try {
+        const cb = await window.FMV.collectBubbles();
+        log('bubbles: ' + ((cb && cb.tapped || 0) + (cb && cb.salvagedN || 0)) + ' tapped' +
+          (cb && cb.stuck ? ' · ' + cb.stuck + ' still spawning' : '') +
+          (cb && !cb.ok ? ' · ' + cb.reason : ''), cb && cb.ok ? 'ok' : 'warn');
+      } catch (e) { log('bubble collect fail: ' + (e && e.message), 'warn'); }
+    }));
     cheatRegen.addEventListener('click', () => runOp(() => {
       const r = window.FMV.finishTimers('regenerate_');
       log('regen: ' + (r.ok ? 'finished ' + r.finished + ' regen-timers' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
     }));
     sortBtn.addEventListener('click', () => runOp(sortBoard));
     fillBtn.addEventListener('click', () => runOp(phaseFill));
-    clearBtn.addEventListener('click', () => runOp(clearOnce));
     visitBtn.addEventListener('click', () => runOp(collectVisits));
-    halfCratesBtn.addEventListener('click', () => runOp(removeHalfCrates));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
-    orderBtn.addEventListener('click', () => runOp(orders));
     analyzeBtn.addEventListener('click', () => {
       const open = popup.style.display !== 'none';
       popup.style.display = open ? 'none' : '';
@@ -1765,6 +2015,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     planMerge: () => runOp(phasePlanMerge),
     autoOrders: () => runToggleLoop(runOrdersLoop, 'orders'),
     autoClear: () => runToggleLoop(autoClearFast, 'clear'),
+    buyAll: () => runOp(buyAllMarketplace),
     visit: () => runOp(collectVisits),
     removeHalfCrates: () => runOp(removeHalfCrates),
     stop: () => {

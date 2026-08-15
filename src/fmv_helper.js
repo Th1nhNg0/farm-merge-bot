@@ -490,7 +490,10 @@ export const FMV_HELPER_SOURCE = `(function(){
         salvagedN += n;
       }
     }
-    // rounds: tap non-crate bubbles via the game's own handler
+    // rounds: tap non-crate bubbles via the game's own handler. 0.1s per
+    // tap, no batch pause (user-tuned; note: 0.5s crashed the frame once —
+    // raise toward 1000 if it freezes again).
+    const tapDelay = 100;
     if (hasTap) {
       for (let round = 0; round < 8; round++) {
         let done = true;
@@ -507,6 +510,7 @@ export const FMV_HELPER_SOURCE = `(function(){
             tappedBubbles.set(b, Date.now());
             tapped++;
           } catch (e2) {}
+          await new Promise((r) => setTimeout(r, tapDelay));
         }
         if (done) break;
         await new Promise((r) => setTimeout(r, 1500));

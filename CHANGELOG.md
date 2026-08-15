@@ -5,6 +5,57 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] — 2026-08-15
+
+### Added
+
+- **Flash Deals buy-all** (Cheat tab → Market group): refreshes the marketplace
+  flash deals via the game's own refresh path (re-roll picks, reorder, re-arm
+  the 4h timer, refill stock in both stores), then buys every remaining unit of
+  stock of each deal. Harvest-product deals (crops + animal produce — the farm
+  makes them for free) and crate deals (crates must never ride the
+  storage-bubble path — documented freeze) are skipped; gem/coin deficits are
+  auto-granted; goods land in storage bubbles. Exposed as
+  `window.FMV.menu.buyAll`.
+- **Tap Bubbles button** (Market group): collects storage bubbles at a paced
+  rate (user-tunable `tapDelay` inside `collectBubbles`) — separated from the
+  buy flow so purchases stay fast and freeze-free.
+- **Auto-merge in Auto Clear**: every clear cycle runs a merge pass (like Auto
+  Orders at its wall), consolidating the clear's own loot (wood/tools/stone),
+  freeing cells and keeping the payment cap high.
+- **Auto-merge fallback in Auto Orders**: on the nothing-to-do / board-full
+  wall the loop merges chains; if merging changes nothing it idle-waits and
+  retries instead of stopping.
+
+### Changed
+
+- **Clear is faster**: payment cap raised 10 → 40 and made adaptive to free
+  cells (`floor(empties/4)`, min 4) so a wave never floods the board into a
+  premature stop; single ground sweep per turn (stragglers caught by the next
+  turn's sweep) instead of up to 4 settle rounds; `board full` is transient
+  with a ground pre-sweep; idle retries at 500ms.
+- **Auto Orders never self-stops** — only the ■ STOP dot/button ends it.
+
+### Fixed
+
+- **Clear missed tiered sources**: `tree_small/medium/large`, `rock_*` and
+  `_moveable` variants (e.g. the shop's `tree_small_moveable`) were skipped by
+  the exact-id scan; matching is now family-prefix based.
+- **Orphan cooldown timers piled up**: the game registers `MapSourceCooldown`
+  timers a tick AFTER the payment's synchronous effects, so the timerId-based
+  delete ran too early (~600 orphans accumulated); now label-based delete +
+  a delayed re-drop + a per-turn hygiene sweep.
+- **Bubble tapping froze the game**: `_onStorageBubbleTapped` runs several
+  full-grid scans and spawns every content item with a move animation;
+  bursts (or fast-paced tapping on a heavy board) stalled the main thread
+  into a Discord watchdog restart. Taps are now paced (`tapDelay`), and the
+  crash-prone auto-collect was removed from the buy flow.
+
+### Removed
+
+- One-shot **Orders**, **½ Gold** and **Clear** buttons from the menu (Auto
+  Orders / Auto Clear / Flash Deals / Tap Bubbles remain).
+
 ## [1.9.1] — 2026-08-15
 
 ### Changed
