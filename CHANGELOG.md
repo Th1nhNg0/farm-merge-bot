@@ -5,6 +5,20 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] — 2026-08-15
+
+### Added
+
+- **Flash Deals buys keys and chests**: the crate-family blanket skip is gone
+  — `reward_crate_*` rewards (keys like `reward_crate_key_bronze` and
+  crates/chests like `reward_crate_silver_gazebo`, verified live) are now
+  purchased and placed DIRECTLY into empty cells via the same machinery
+  `FMV.spawn` uses for crates (factory + GridPosition + `setContent` — never
+  the storage-bubble tap path that froze the game loop once). A deal is
+  skipped BEFORE paying when the board lacks free cells for its full stock,
+  so gems are never burned on unplaceable rewards. Harvest-product deals are
+  still skipped. The done-log and return value report the placed count.
+
 ## [1.12.0] — 2026-08-15
 
 ### Added

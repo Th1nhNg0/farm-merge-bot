@@ -889,12 +889,14 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
 
   // ── BUY ALL FLASH DEALS: refresh the deals (re-roll picks + refill stock,
   //    the game's own refresh path), then purchase every unit of stock of
-  //    each deal. SKIPPED: crate/chest/key deals (crates must never ride the
-  //    storage-bubble path — broke the game loop once) and harvest-product
-  //    deals (crops + animal produce the farm already makes — no need to
-  //    buy). Object rewards land in storage bubbles via the game's own
-  //    delivery; after buying, all bubbles are collected so the goods land
-  //    on the grid. If gems/coins run short, the deficit is granted.
+  //    each deal. SKIPPED: harvest-product deals (crops + animal produce the
+  //    farm already makes — no need to buy). reward_crate_* rewards (keys +
+  //    chests/crates) are bought and placed DIRECTLY into empty cells — they
+  //    must never ride the storage-bubble path (moveContentToCell never
+  //    completes for them; 40+ crates froze the game loop once). Everything
+  //    else lands in storage bubbles via the game's own delivery; after
+  //    buying, all bubbles are collected so the goods land on the grid. If
+  //    gems/coins run short, the deficit is granted.
   async function buyAllMarketplace() {
     assertFMV();
     const S = window.FMV.services();
@@ -903,7 +905,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     const fds = m.flashDealsService;
     const FLASH_DEAL_IDS = ['flash_deal_ingredient', 'flash_deal_generator',
       'flash_deal_material', 'flash_deal_chest', 'flash_deal_key', 'flash_deal_greenhouse'];
-    const CRATE_RE = /reward_crate|_crate_/;
+    // reward_crate_* family = keys (reward_crate_key_*) and crates/chests
+    // (reward_crate_bronze_gazebo, reward_crate_gold_gazebo ...) — Mergeable
+    // board items that must be placed DIRECTLY (never the bubble tap path)
+    const CRATE_FAMILY_RE = /^reward_crate_/;
     // harvest/farm products (the 'ingredient' deal pool — crops + animal
     // produce): never buy these, the farm produces them for free
     const HARVEST_PRODUCTS = new Set(['sugarcane', 'tomato', 'sunflower', 'corn', 'soybeans',
@@ -930,7 +935,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       await settleSleep(); // let the game process the re-roll before buying
     } catch (e) { log('market refresh fail: ' + (e && e.message), 'warn'); }
 
-    let bought = 0, failed = 0, granted = 0, skipped = 0;
+    let bought = 0, failed = 0, granted = 0, skipped = 0, placed = 0;
     for (const id of FLASH_DEAL_IDS) {
       if (state.stop) break;
       try {
@@ -939,19 +944,32 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         const reward = entry.reward || {};
         if (reward.type !== 'object' && reward.type !== 'inventory') { skipped++; continue; }
         const rewardBps = Array.isArray(reward.data) ? reward.data : [reward.data];
-        if (rewardBps.some((bp) => CRATE_RE.test(String(bp)))) {
-          log('market skip ' + id + ': crate reward (' + rewardBps.join(',') + ') — bubble path unsafe', 'warn');
-          skipped++;
-          continue;
-        }
         if (rewardBps.some((bp) => HARVEST_PRODUCTS.has(String(bp)))) {
           log('market skip ' + id + ': harvest product (' + rewardBps.join(',') + ') — farm makes it for free', 'warn');
           skipped++;
           continue;
         }
+        // split the reward: reward_crate_* goes to the board via direct
+        // placement, everything else rides the storage-bubble path
+        const crateBps = rewardBps.filter((bp) => CRATE_FAMILY_RE.test(String(bp)));
+        const normalBps = rewardBps.filter((bp) => !CRATE_FAMILY_RE.test(String(bp)));
         let stock = fds._model.getStock(id);
         if (!Number.isFinite(stock) || stock < 0) stock = 1; // unset = single purchase
         if (stock === 0) { skipped++; continue; }
+        if (crateBps.length) {
+          // direct placement needs free cells — check BEFORE paying so a
+          // full board never burns gems on unplaceable rewards
+          let empties = 0;
+          try {
+            for (const cell of S.mapGrid._cells.values()) if (cell && !cell.content) empties++;
+          } catch (e3) {}
+          const needCells = crateBps.length * stock;
+          if (empties < needCells) {
+            log('market skip ' + id + ': need ' + needCells + ' free cells for ' + crateBps.join(',') + ' (have ' + empties + ')', 'warn');
+            skipped++;
+            continue;
+          }
+        }
         const need = Number(entry.payment.amount) || 0;
         const payKey = entry.payment.key || 'gems';
         for (let n = 0; n < stock && !state.stop; n++) {
@@ -966,11 +984,23 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
             await window.FMV.grant(rewardBps.map((r) => (typeof r === 'object' && r.key ? r : { key: String(r), amount: 1 })));
           } else {
             const bubbles = [];
-            for (const bp of rewardBps) {
+            for (const bp of normalBps) {
               const comps = R.blueprintCollection.getBlueprint(bp).components;
               bubbles.push({ blueprint: bp, data: comps });
             }
-            S.storageBubble.createBubbleAndShowContent(bubbles);
+            if (bubbles.length) S.storageBubble.createBubbleAndShowContent(bubbles);
+            // keys/chests: direct placement — the same machinery FMV.spawn
+            // uses for crates (factory + GridPosition + setContent); never
+            // the bubble tap path (verified: moveContentToCell hangs for
+            // this family and 40+ unplaced crates froze the game loop)
+            for (const bp of crateBps) {
+              const sp = window.FMV.spawn([{ key: String(bp), amount: 1 }]);
+              if (sp && sp.ok && sp.placed && sp.placed[0] && sp.placed[0].amount > 0) placed++;
+              else {
+                failed++;
+                log('market: no free cell for ' + bp, 'warn');
+              }
+            }
           }
           // keep BOTH stock stores consistent (the popup reads the stock
           // items, the flash-deals model is the other half of the book)
@@ -1012,9 +1042,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     })();
     if (bub) log('market: ' + bub + ' storage bubbles left — tap them with 📦 Tap Bubbles or in-game', 'warn');
 
-    log('market done: ' + bought + ' bought' + (granted ? ' · +' + granted + ' granted' : '') +
+    log('market done: ' + bought + ' bought' + (placed ? ' · ' + placed + ' placed' : '') +
+      (granted ? ' · +' + granted + ' granted' : '') +
       (skipped ? ' · ' + skipped + ' skipped' : '') + (failed ? ' · ' + failed + ' failed' : ''), bought ? 'ok' : 'warn');
-    return { bought: bought, failed: failed, skipped: skipped, granted: granted, bubbles: bub };
+    return { bought: bought, failed: failed, skipped: skipped, granted: granted, placed: placed, bubbles: bub };
   }
 
   // ── toggle-loop runner: click starts the loop, click again stops it ─────
@@ -1778,7 +1809,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '</div>'
       + '<div class="lbl">Market</div>'
       + '<div class="btns">'
-      + '<button id="fmv-buy-all" title="refresh flash deals, buy all non-harvest stock (crate deals + harvest products skipped; goods land in storage bubbles)">🛒 Flash Deals</button>'
+      + '<button id="fmv-buy-all" title="refresh flash deals, buy all non-harvest stock (keys/chests placed on the board; other goods land in storage bubbles)">🛒 Flash Deals</button>'
       + '<button id="fmv-tap-bubbles" title="collect storage bubbles slowly — one tap per 1.5s (tapping many bubbles fast froze the game)">📦 Tap Bubbles</button>'
       + '</div>'
       + '<div class="lbl">Speed</div>'
@@ -1966,10 +1997,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     resetStats: statsReset,
     running: () => state.running,
     busy: () => state.busy || state.running,
-    version: window.__FMV_version || '1.12.0'
+    version: window.__FMV_version || '1.13.0'
   };
   setUI();
-  log('menu v' + (window.__FMV_version || '1.12.0') + ' installed', 'ok');
+  log('menu v' + (window.__FMV_version || '1.13.0') + ' installed', 'ok');
   refreshStatus();
   if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };
