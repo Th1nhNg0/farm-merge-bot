@@ -26,15 +26,27 @@ export const PAUSE_PROTECT_SOURCE = `(function(){
   window.__FMV_pauseProtect = true;
 
   // 1) fake visibility state — the game never sees a hidden tab
+  // (define on the instance first; fall back to the prototype so a
+  // non-configurable own property from the game build can't defeat the patch)
+  const fakeVisibility = function () { return 'visible'; };
+  const fakeHidden = function () { return false; };
   try {
     Object.defineProperty(document, 'visibilityState', {
-      configurable: true, get: function () { return 'visible'; }
+      configurable: true, get: fakeVisibility
     });
+  } catch (e) {
+    try { Object.defineProperty(Document.prototype, 'visibilityState', { get: fakeVisibility }); } catch (e2) {}
+  }
+  try {
     Object.defineProperty(document, 'hidden', {
-      configurable: true, get: function () { return false; }
+      configurable: true, get: fakeHidden
     });
-  } catch (e) {}
-  try { document.hasFocus = function () { return true; }; } catch (e) {}
+  } catch (e) {
+    try { Object.defineProperty(Document.prototype, 'hidden', { get: fakeHidden }); } catch (e2) {}
+  }
+  try { document.hasFocus = function () { return true; }; } catch (e) {
+    try { Document.prototype.hasFocus = function () { return true; }; } catch (e2) {}
+  }
 
   // 2) swallow visibilitychange listeners (document === window addEventListener)
   try {

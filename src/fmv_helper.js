@@ -47,10 +47,12 @@ export const FMV_HELPER_SOURCE = `(function(){
   }
 
   function services() {
-    const members = rootServices().timer._updatableGroup._members;
-    for (const m of members) {
-      if (m && m._services && m._services.mapGrid) return m._services;
-    }
+    try {
+      const members = rootServices().timer._updatableGroup._members;
+      for (const m of members) {
+        if (m && m._services && m._services.mapGrid) return m._services;
+      }
+    } catch (e) {}
     return null;
   }
 
@@ -58,18 +60,20 @@ export const FMV_HELPER_SOURCE = `(function(){
     const S = services();
     if (!S) return { error: 'services not ready' };
     const out = [];
-    for (const cell of S.mapGrid._cells.values()) {
-      if (!cell || !cell.content) continue;
-      const c = cell.content;
-      let info = null;
-      try { info = c.getObjectIdAndTier ? c.getObjectIdAndTier() : null; } catch (e) {}
-      out.push({
-        col: cell.column, row: cell.row,
-        id: info ? info.id : (c.getBlueprintID ? c.getBlueprintID() : null),
-        tier: info ? info.tier : null,
-        mergeable: c.hasBehavior ? c.hasBehavior(I().Mergeable) : false
-      });
-    }
+    try {
+      for (const cell of S.mapGrid._cells.values()) {
+        if (!cell || !cell.content) continue;
+        const c = cell.content;
+        let info = null;
+        try { info = c.getObjectIdAndTier ? c.getObjectIdAndTier() : null; } catch (e) {}
+        out.push({
+          col: cell.column, row: cell.row,
+          id: info ? info.id : (c.getBlueprintID ? c.getBlueprintID() : null),
+          tier: info ? info.tier : null,
+          mergeable: c.hasBehavior ? c.hasBehavior(I().Mergeable) : false
+        });
+      }
+    } catch (e) { return { error: 'board scan failed: ' + e.message }; }
     return out;
   }
 
@@ -290,13 +294,13 @@ export const FMV_HELPER_SOURCE = `(function(){
     const S = services();
     const I = window.FMV.I();
     const G = window.FMV.rootServices().gameObjectFactory;
-    if (!S || !G) return { err: 'services not ready' };
+    if (!S || !G) return { ok: false, reason: 'services not ready' };
     const cell = S.mapGrid.getCell(col, row);
-    if (!cell) return { err: 'no such cell' };
-    if (cell.content) return { err: 'cell not empty' };
+    if (!cell) return { ok: false, reason: 'no such cell' };
+    if (cell.content) return { ok: false, reason: 'cell not empty' };
     let obj = null;
     try { obj = G.createFromSerializedData({ data: {}, blueprint: blueprint }); } catch (e) {}
-    if (!obj) return { err: 'create failed for ' + blueprint };
+    if (!obj) return { ok: false, reason: 'create failed for ' + blueprint };
     let worldAdded = false;
     let gridTouched = false;
     let gp = null;
@@ -313,9 +317,9 @@ export const FMV_HELPER_SOURCE = `(function(){
         obj.addBehavior(new gridPosCtor({ column: col, row: row }));
         gp = obj.getBehavior && obj.getBehavior(I.GridPosition);
       }
-      if (!gp) return { err: 'GridPosition ctor not found' };
+      if (!gp) return { ok: false, reason: 'GridPosition ctor not found' };
       if (!obj.position || typeof obj.position.copyFrom !== 'function')
-        return { err: 'object position unavailable' };
+        return { ok: false, reason: 'object position unavailable' };
       S.world.addGameObject(obj);
       worldAdded = true;
       gridTouched = true;
@@ -328,14 +332,16 @@ export const FMV_HELPER_SOURCE = `(function(){
     } catch (e) {
       if (gridTouched) { try { S.mapGrid.setContent(col, row, null); } catch (e2) {} }
       if (worldAdded) { try { S.world.removeGameObject(obj); } catch (e2) {} }
-      return { err: 'place failed: ' + (e && e.message) };
+      return { ok: false, reason: 'place failed: ' + (e && e.message) };
     }
   }
   const isCrateBp = (bp) => typeof bp === 'string' && bp.indexOf('reward_crate') === 0;
 
   // grant inventory currency: [{key, amount}, ...] -> autosaved
   async function grant(rewards) {
-    const R = window.FMV.services().rewardService;
+    const S = services();
+    if (!S) return { ok: false, reason: 'services not ready' };
+    const R = S.rewardService;
     if (!R || typeof R._parseAndClaimRewards !== 'function')
       return { ok: false, reason: 'rewardService not found' };
     const list = [];
@@ -357,12 +363,15 @@ export const FMV_HELPER_SOURCE = `(function(){
   // spawn blueprint objects. Crates are placed DIRECTLY into empty cells;
   // other blueprints become storage bubbles (collect via collectBubbles).
   function spawn(blueprints) {
-    const R = window.FMV.services().rewardService;
+    const S = services();
+    if (!S) return { ok: false, reason: 'services not ready' };
+    const R = S.rewardService;
     const bc = window.FMV.rootServices().blueprintCollection;
     if (!R || typeof R._claimObjectRewards !== 'function')
       return { ok: false, reason: 'rewardService not found' };
     const bubbles = [];
     const placed = [];
+    let unplacedCrates = 0;
     for (const b of blueprints || []) {
       if (!b || typeof b.key !== 'string') continue;
       let has = false;
@@ -372,13 +381,14 @@ export const FMV_HELPER_SOURCE = `(function(){
       if (isCrateBp(b.key)) {
         // direct placement: fill as many empty cells as we can
         let n = 0;
-        for (const cell of services().mapGrid._cells.values()) {
+        for (const cell of S.mapGrid._cells.values()) {
           if (n >= amount) break;
           if (!cell || cell.content) continue;
           const r = placeCrate(b.key, cell.column, cell.row);
           if (r.ok) n++;
         }
         placed.push({ key: b.key, amount: n });
+        if (n < amount) unplacedCrates += amount - n;
       } else {
         bubbles.push({ key: b.key, amount: amount });
       }
@@ -389,16 +399,11 @@ export const FMV_HELPER_SOURCE = `(function(){
         return { ok: false, reason: 'spawn failed: ' + (e && e.message) };
       }
     }
-    return { ok: true, placed: placed, bubbles: spawnedBubbles };
+    const out = { ok: true, placed: placed, bubbles: spawnedBubbles };
+    if (unplacedCrates) out.note = 'no empty cells for ' + unplacedCrates + ' crate(s) — re-run after clearing space';
+    return out;
   }
 
-  // tap every storage bubble via the game's own family processors
-  // (_onStorageBubbleTapped spawns the content onto the grid, the pop
-  // destroys the bubble). tapRouter._simulateClick does NOT work here —
-  // bubbles have no valid GridPosition (off-map), so the router rejects
-  // them. The spawn animation is slow (~10s+ in hidden tabs), so we
-  // iterate settle rounds and never tap a bubble twice (double-tap spawns
-  // the same content again — duplicate items).
   // collect storage bubbles. Crates are SALVAGED (direct-placed into empty
   // cells, then the bubble's content is emptied — the bubble tap path cannot
   // place crates); everything else goes through the game's own tap handler
@@ -409,11 +414,17 @@ export const FMV_HELPER_SOURCE = `(function(){
   // bubble's own pop trigger destroys it later — do NOT call
   // _initiateBubblePop directly (its async destroy crashed the game loop).
   let bubbleTapCtx = null;
+  let bubbleTapCtxSvc = null;
   const tappedBubbles = new Map(); // entity -> tap timestamp (cross-call guard)
   const TAP_LAG_MS = 90000;
   function findBubbleTapCtx() {
     const S = services();
     if (!S) return false;
+    // behavior-family registries are rebuilt as subsystems spawn/die or the
+    // farm changes (friend visits swap the farm services) — a cached context
+    // is only valid for the services identity it was found on.
+    if (bubbleTapCtx && bubbleTapCtxSvc === S) return true;
+    bubbleTapCtx = null;
     // walk the shared onBehaviorAdded registries (no FMVUtil dependency —
     // the helper installs before the menu prepends util.js)
     let ev = null;
@@ -441,6 +452,7 @@ export const FMV_HELPER_SOURCE = `(function(){
       if (!sub) continue;
       if (types.indexOf('storageBubbleTap') !== -1 && typeof sub._onStorageBubbleTapped === 'function') {
         bubbleTapCtx = sub;
+        bubbleTapCtxSvc = S;
         return true;
       }
     }
@@ -488,6 +500,11 @@ export const FMV_HELPER_SOURCE = `(function(){
         sb.content = remaining;
         salvaged++;
         salvagedN += n;
+        // a fully-emptied bubble is a dead world object — drop it so it
+        // never lingers in the world model / storage bubble save
+        if (!remaining.length) {
+          try { S.world.removeGameObject(b); } catch (e2) {}
+        }
       }
     }
     // rounds: tap non-crate bubbles via the game's own handler. 0.1s per
@@ -541,5 +558,5 @@ export const FMV_HELPER_SOURCE = `(function(){
 
   window.FMV = { board, merge, move, swap, remove, spawnCrate, services, req, I, root, rootServices,
                  grant, spawn, collectBubbles, finishTimers,
-                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.9.0' };
+                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.12.0' };
 })();`;

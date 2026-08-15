@@ -5,6 +5,90 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-08-15
+
+### Added
+
+- **Stop feedback**: clicking ■ STOP (or the header dot) now flips the running
+  toggle to a pulsing `■ STOPPING…` immediately (`setUI()` inside
+  `requestStop()`) instead of leaving the button frozen until the loop winds
+  down (up to 8s in the claim wait).
+- **Usable stop hitbox**: the header dot keeps its 6px visual but now carries a
+  20px pointer target (`::after` pseudo-element) — it was the only stop
+  control during one-shot ops and was effectively unclickable.
+- **Menu persistence**: position + fold state survive reinstalls via
+  `localStorage` (restored in `buildUI`, saved on drag end / fold toggle).
+- **Keyboard accessibility**: tabs are a proper tablist (`role=tab`,
+  `aria-selected`, roving `tabindex`, ←/→ switching) with a gold
+  `:focus-visible` outline; every one-shot button got a `title` tooltip.
+- **Bound `not focused` retries**: Auto Clear no longer retries forever when
+  the pause protection is missing/stale — it stops after 60s with a
+  "re-run install.mjs" hint.
+
+### Changed
+
+- **Idle status is free**: the 2.5s status interval skips the full board read
+  (~1000 cells × neighbor scans) when nothing is running — a 10s cached
+  snapshot is served instead, the DOM is only rewritten when the rendered
+  text changes, and ops force a fresh read on exit.
+- **Button rows fill the width**: `.btns` switched from an auto-fit grid
+  (which left 1- and 2-button rows half-width) to flex — the 1.11.0 intent,
+  actually working.
+- **Log hygiene**: timestamps now include seconds (HH:MM:SS); the collapsed
+  log view is pure CSS (`:last-child` show) instead of O(n) per-line display
+  writes; idle order/clear cycles log heartbeats (every 5th/10th) instead of
+  flooding the 300-line buffer.
+- **One deferred cooldown-timer sweep per clear turn** (all paid cells)
+  instead of a `setTimeout` per payment.
+- **Claim counting** counts only claims that observably landed (the order
+  flipped state or was replaced/removed) instead of fire-and-forget.
+- **Tap-service cache** re-validates at most every 10s instead of a full grid
+  walk per clear turn (the registries only rebuild on farm changes).
+- **README synced**: version header, Farm/Cheat tabs, removed Analyze,
+  per-type selection and one-shot Orders, new Flash Deals / Tap Bubbles /
+  Visit / ½ Gold / cheat-grant docs.
+
+### Fixed
+
+- **Auto Orders can no longer self-stop on one exception** (violating its
+  never-self-stops contract): the cycle body is exception-safe — a transient
+  throw logs `orders cyc N fail` and retries with the idle wait. Auto Clear
+  got the same treatment (exceptions count as idle retries).
+- **CDP connect could never recover from stale endpoints**: candidates are
+  now re-resolved on every attempt (a dead `DevToolsActivePort` uuid or a
+  still-initializing Chrome used to pin the retry loop to dead URLs); the WS
+  handshake has a 5s timeout, the HTTP fallback 3s, `close()` during connect
+  rejects instead of hanging, and a per-request backstop (5 min) was added.
+- **`findGameTarget` could attach to the wrong discordsays iframe**: with
+  several candidates it now probes each for the game's webpack hook (or
+  `window.FMV`) and picks the first live one.
+- **Hunter install window**: factory stubs are restored per 200-id batch
+  instead of after the full enumeration — a game module requiring an
+  unexecuted module mid-install no longer hits a `FMV_STUB_*` throw; the
+  fused map+hc ctor scan now breathes between batches (watchdog-stall risk
+  on slow devices).
+- **Bubble taps silently no-oped after a farm change**: the
+  `storageBubbleTap` context cache is now keyed by services identity — the
+  same fix class as v1.7.3's tap-service cache, previously missed in
+  `fmv_helper.js`.
+- **`spawn()` reported success with 0 placed crates** — it now reports the
+  unplaced count (`note`); fully-emptied crate bubbles are removed from the
+  world; `placeCrate` returns the standard `{ok:false, reason}` error shape
+  instead of `{err}`.
+- **`install.mjs` masked in-frame exceptions** (`hunt.ok` on an undefined
+  `result.value`) — `unwrap()` surfaces the real error; the stage arg is
+  validated and the CDP socket is closed in `finally`; `eval.mjs` prints the
+  exception text with a non-zero exit code instead of `undefined`.
+- **pause_protect visibility fakes** fall back to `Document.prototype`
+  defines when the instance property is non-configurable.
+- **plan.js comment lied about group ordering** (claimed biggest-first,
+  sorts fewest-components-first) — comment fixed to match behavior.
+
+### Removed
+
+- Dead `bubblesTapped` counter from the Flash Deals result (the storage-
+  bubble count is returned as `bubbles`).
+
 ## [1.11.0] — 2026-08-15
 
 ### Changed

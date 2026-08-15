@@ -139,13 +139,13 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
     const d = new Date(), p = (n) => (n < 10 ? '0' : '') + n;
-    return p(d.getHours()) + ':' + p(d.getMinutes());
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
+  // collapsed log view is pure CSS now (#fmv-menu .log:not(.open) .l hidden,
+  // :last-child shown — the browser re-evaluates on append), so a scroll is
+  // all that's needed here (was O(n) per-line display writes before)
   function updateLogView() {
-    const open = logEl.current.classList.contains('open');
-    const kids = logEl.current.childNodes;
-    for (let i = 0; i < kids.length; i++) kids[i].style.display = open || i === kids.length - 1 ? '' : 'none';
-    logEl.current.scrollTop = logEl.current.scrollHeight;
+    if (logEl.current) logEl.current.scrollTop = logEl.current.scrollHeight;
   }
   function log(msg, level) {
     const line = '[' + ts() + '] ' + msg;
@@ -462,8 +462,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       }
     }
 
+    const capped = moves + swaps >= cap;
+    const unplaced = plan.reduce((s, p) => s + p.cells.length, 0) - placed.size;
     log('sort: mv ' + moves + ' · sw ' + swaps + ' · fail ' + fails +
-      (moves + swaps >= cap ? ' (cap)' : ''));
+      (capped ? ' (cap — ' + Math.max(0, unplaced) + ' unplaced)' : ''));
     stats.moved += moves;
     stats.swapped += swaps;
     stats.failed += fails;
@@ -499,19 +501,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     if (lootReceivedCtor) return true;
     // the trigger module (MergeTrigger, __FMV_hcId) also exports LootReceived /
     // LootTrigger — an instance whose type is 'lootReceived' identifies it
-    const scan = (ex) => {
-      if (!ex || typeof ex !== 'object') return null;
-      for (const k of Object.keys(ex)) {
-        const v = ex[k];
-        if (typeof v !== 'function' || !v.prototype) continue;
-        try {
-          const inst = new v({});
-          if (inst && inst.type === 'lootReceived') return v;
-        } catch (e) {}
-      }
-      return null;
-    };
-    try { lootReceivedCtor = scan(window.FMV.req(window.__FMV_hcId)); } catch (e) {}
+    try { lootReceivedCtor = FMVUtil.findCtorByType(window.FMV.req(window.__FMV_hcId), 'lootReceived'); } catch (e) {}
     return !!lootReceivedCtor;
   }
 
@@ -714,7 +704,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       if (!order || order.state !== COMPLETE) continue;
       O.rewardOrder(order.buildingID);
       await waitForClaim();
-      claimed++;
+      // count only claims that observably landed: the order flipped state or
+      // was replaced/removed (fire-and-forget counting drifted after claims)
+      const after = (O.getCurrentOrders() || []).find((o) => o && o.buildingID === order.buildingID);
+      if (!after || after.state !== COMPLETE) claimed++;
     }
 
     // Re-read after claims because the service may replace a claimed order.
@@ -739,6 +732,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   function requestStop() {
     state.stop = true;
     log('stop — halting', 'warn');
+    setUI(); // immediate 'STOPPING…' feedback — loops wind down on their own schedule
   }
 
   // ── Auto-merge pass: run the merge planner (5/10/15 chains) to free cells
@@ -773,37 +767,47 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     let cycle = 0;
     while (state.running && !state.stop) {
       cycle++;
-      log('orders cyc ' + cycle, 'ok');
-      let r = await orders();
-      // skip the production wait: complete every Order_* timer right away
-      let ff = null;
-      try { ff = window.FMV.finishTimers('Order_'); } catch (e) {}
-      if (ff && ff.ok && ff.finished > 0) {
-        await settleSleep(); // let the game process the completions
-        const r2 = await orders(); // claim the freshly completed orders
-        r = { claimed: r.claimed + r2.claimed, started: r.started + r2.started };
-      }
-      const board = readBoard();
-      if (board.error) throw new Error(board.error);
-      // wall: nothing claimed/started (orders unaffordable or no free slots)
-      // or the board is full — merge chains to free cells and build the
-      // higher tiers orders may need, then retry.
-      if (!r.claimed && !r.started || board.empties.length === 0) {
-        let merged = 0;
-        try { merged = await autoMergePass(); } catch (e) { log('merge fail: ' + (e && e.message), 'warn'); }
-        if (merged > 0) {
-          log('orders wall — merged ' + merged + ' chains to free space / build tiers', 'warn');
-          await settleSleep();
+      // exception safety: a single transient throw must never end this loop
+      // (its contract is never-self-stop) — log and retry with the idle wait
+      try {
+        let r = await orders();
+        // skip the production wait: complete every Order_* timer right away
+        let ff = null;
+        try { ff = window.FMV.finishTimers('Order_'); } catch (e) {}
+        if (ff && ff.ok && ff.finished > 0) {
+          await settleSleep(); // let the game process the completions
+          const r2 = await orders(); // claim the freshly completed orders
+          r = { claimed: r.claimed + r2.claimed, started: r.started + r2.started };
+        }
+        const board = readBoard();
+        if (board.error) throw new Error(board.error);
+        // wall: nothing claimed/started (orders unaffordable or no free slots)
+        // or the board is full — merge chains to free cells and build the
+        // higher tiers orders may need, then retry.
+        if (!r.claimed && !r.started || board.empties.length === 0) {
+          let merged = 0;
+          try { merged = await autoMergePass(); } catch (e) { log('merge fail: ' + (e && e.message), 'warn'); }
+          if (merged > 0) {
+            log('orders wall — merged ' + merged + ' chains to free space / build tiers', 'warn');
+            await settleSleep();
+            continue;
+          }
+          // nothing mergeable and nothing claimed/started right now — keep the
+          // loop alive (orders can open later) instead of stopping; log an
+          // idle heartbeat instead of a line per cycle (long hidden-tab
+          // sessions used to flood the log buffer with no-op cycles)
+          if (cycle % 5 === 0) log('orders cyc ' + cycle + ' — idle, retrying', 'ok');
+          await sleep(ORDERS_IDLE_WAIT_MS);
           continue;
         }
-        // nothing mergeable and nothing claimed/started right now — keep the
-        // loop alive (orders can open later) instead of stopping
+        log('orders cyc ' + cycle, 'ok');
+        const wait = await adaptSettle(SETTLE_MIN, SETTLE_MAX) * 2;
+        const deadline = Date.now() + Math.min(2000, Math.max(800, wait));
+        while (!state.stop && Date.now() < deadline) await sleep(250);
+      } catch (e) {
+        log('orders cyc ' + cycle + ' fail: ' + (e && e.message ? e.message : e), 'warn');
         await sleep(ORDERS_IDLE_WAIT_MS);
-        continue;
       }
-      const wait = await adaptSettle(SETTLE_MIN, SETTLE_MAX) * 2;
-      const deadline = Date.now() + Math.min(2000, Math.max(800, wait));
-      while (!state.stop && Date.now() < deadline) await sleep(250);
     }
   }
 
@@ -815,19 +819,28 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     let cycle = 0;
     let idleRetries = 0;
     let boardFullRetries = 0;
+    let notFocusedRetries = 0;
     while (state.running && !state.stop) {
       cycle++;
-      log('clear cyc ' + cycle, 'ok');
-      const reason = await clearOnce();
-      // every cycle merges chains — like Auto Orders does at its wall. The
-      // clear's own loot (wood/tools/stone) is mergeable, so consolidating
-      // it each cycle frees cells, keeps the board from flooding and the
-      // adaptive payment cap high. No-op fast when nothing is chainable.
-      let merged = 0;
-      try { merged = await autoMergePass(); } catch (e) { log('merge fail: ' + (e && e.message), 'warn'); }
-      if (merged > 0) {
-        log('merged ' + merged + ' chains', 'ok');
-        await settleSleep(); // let the merges settle before the next cycle
+      let reason;
+      try {
+        reason = await clearOnce();
+        // every cycle merges chains — like Auto Orders does at its wall. The
+        // clear's own loot (wood/tools/stone) is mergeable, so consolidating
+        // it each cycle frees cells, keeps the board from flooding and the
+        // adaptive payment cap high. No-op fast when nothing is chainable.
+        let merged = 0;
+        try { merged = await autoMergePass(); } catch (e) { log('merge fail: ' + (e && e.message), 'warn'); }
+        if (merged > 0) {
+          log('merged ' + merged + ' chains', 'ok');
+          await settleSleep(); // let the merges settle before the next cycle
+        }
+      } catch (e) {
+        // transient throws must not kill the loop — retry like an idle gap
+        log('clear cyc ' + cycle + ' fail: ' + (e && e.message ? e.message : e), 'warn');
+        idleRetries++;
+        await sleep(CLEAR_IDLE_WAIT_MS);
+        continue;
       }
       if (reason === 'nothing ready' || reason === 'collected only') {
         idleRetries++;
@@ -835,6 +848,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
           log('auto clear stop: nothing ready after ' + idleRetries + ' retries', 'warn');
           break;
         }
+        if (cycle % 10 === 0) log('clear cyc ' + cycle + ' — waiting (' + reason + ')', 'ok');
         await sleep(CLEAR_IDLE_WAIT_MS);
         continue;
       }
@@ -849,7 +863,18 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         await sleep(1000);
         continue;
       }
-      if (reason === 'not focused' || reason === 'no tap services' || reason === 'no router' ||
+      if (reason === 'not focused') {
+        // only reachable when the pause protection is missing/stale — retry
+        // a while (Chrome may just be slow to unfreeze), then stop with a hint
+        notFocusedRetries++;
+        if (notFocusedRetries >= CLEAR_IDLE_RETRIES) {
+          log('auto clear stop: not focused (pause protection missing?) — re-run install.mjs', 'warn');
+          break;
+        }
+        await sleep(1000);
+        continue;
+      }
+      if (reason === 'no tap services' || reason === 'no router' ||
           reason === 'no free workers') {
         await sleep(1000); // transient — retry shortly
         continue;
@@ -857,6 +882,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       if (reason) { log('auto clear stop: ' + reason, 'warn'); break; }
       idleRetries = 0;
       boardFullRetries = 0;
+      notFocusedRetries = 0;
       await sleep(250); // as fast as the game's tick allows
     }
   }
@@ -969,7 +995,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     //    animation; bursts stall the main thread into a watchdog restart).
     //    Use the separate 📦 Tap Bubbles button (slow by design) or tap them
     //    in-game at your own pace.
-    let bubblesTapped = 0;
     const bub = (() => {
       try {
         const S2 = window.FMV.services();
@@ -989,7 +1014,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
 
     log('market done: ' + bought + ' bought' + (granted ? ' · +' + granted + ' granted' : '') +
       (skipped ? ' · ' + skipped + ' skipped' : '') + (failed ? ' · ' + failed + ' failed' : ''), bought ? 'ok' : 'warn');
-    return { bought: bought, failed: failed, skipped: skipped, granted: granted, bubblesTapped: bubblesTapped };
+    return { bought: bought, failed: failed, skipped: skipped, granted: granted, bubbles: bub };
   }
 
   // ── toggle-loop runner: click starts the loop, click again stops it ─────
@@ -1012,7 +1037,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     state.stop = false;
     state.opStart = null;
     setUI();
-    refreshStatus();
+    refreshStatus(true);
     log(mode + ' loop off');
   }
 
@@ -1030,9 +1055,14 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   // objects and damages hp). Both are reachable through the entity
   // behavior-family registries on onBehaviorAdded; calling them directly IS
   // the game's own tap action (no popouts, no click simulation).
-  let paySvc = null, lootSvc = null, paySvcFor = null;
+  let paySvc = null, lootSvc = null, paySvcFor = null, tapSvcValidatedAt = 0;
+  const TAP_SVC_VALID_MS = 10000;
   function cachedTapServicesValid(S) {
     if (!paySvc || !lootSvc || paySvcFor !== S) return false;
+    // the registries only rebuild when subsystems spawn/die or the farm
+    // changes — re-validating with a full grid walk on EVERY call (once per
+    // clear turn) doubled the per-turn scan cost; check at most every 10s
+    if (Date.now() - tapSvcValidatedAt < TAP_SVC_VALID_MS) return true;
     let payFound = false;
     let lootFound = false;
     FMVUtil.forEachCell(S, (cell) => {
@@ -1046,6 +1076,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       });
       if (payFound && lootFound) return false;
     });
+    tapSvcValidatedAt = Date.now();
     return payFound && lootFound;
   }
   // ResourceGate ctor (module 10295 'sh' in this build, discovered
@@ -1054,18 +1085,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   let rgCtorCache = null;
   function resourceGateCtor() {
     if (rgCtorCache) return rgCtorCache;
-    try {
-      const mod = window.FMV.req(window.__FMV_hcId);
-      for (const k of Object.keys(mod)) {
-        const v = mod[k];
-        if (typeof v !== 'function' || !v.prototype) continue;
-        try {
-          const inst = new v({});
-          if (inst && inst.type === 'resourceGate') { rgCtorCache = v; return v; }
-        } catch (e) {}
-      }
-    } catch (e) {}
-    return null;
+    try { rgCtorCache = FMVUtil.findCtorByType(window.FMV.req(window.__FMV_hcId), 'resourceGate'); } catch (e) {}
+    return rgCtorCache;
   }
   function reAddResourceGate(e, cost, workers) {
     try {
@@ -1087,6 +1108,19 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       for (const [k, v] of timers.entries()) {
         try {
           if (String(v._label || v._type || '').indexOf(prefix) !== -1) timers.delete(k);
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  // sweep EVERY MapSourceCooldown timer (hygiene: payments register their
+  // timer a tick AFTER the cleanup, so stale ones pile up across runs; they
+  // fire into the void — the cooldown processor finds no entity hook)
+  function dropAllSourceCooldownTimers() {
+    try {
+      const timers = window.FMV.rootServices().timer._timerModel._timers;
+      for (const [k, v] of timers.entries()) {
+        try {
+          if (String(v._label || v._type || '').indexOf('MapSourceCooldown:') === 0) timers.delete(k);
         } catch (e) {}
       }
     } catch (e) {}
@@ -1113,6 +1147,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     paySvc = pay;
     lootSvc = loot;
     paySvcFor = S;
+    tapSvcValidatedAt = Date.now();
     return !!(pay && loot);
   }
 
@@ -1131,14 +1166,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     // so stale MapSourceCooldown timers can pile up across runs; they fire
     // into the void (the cooldown processor finds no entity hook), but a
     // sweep per turn keeps the timer table lean
-    try {
-      const timers = window.FMV.rootServices().timer._timerModel._timers;
-      for (const [k, v] of timers.entries()) {
-        try {
-          if (String(v._label || '').indexOf('MapSourceCooldown:') === 0) timers.delete(k);
-        } catch (e) {}
-      }
-    } catch (e) {}
+    dropAllSourceCooldownTimers();
     const readEnergy = () => {
       try {
         const v = window.FMV.rootServices().inventory.getAmount('energy');
@@ -1244,6 +1272,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     }
     let tapped = 0;
     let noWorkers = 0;
+    const paidCells = []; // deferred cooldown-timer re-drop for this turn
     // wave size follows the free cells (~4-6 loot items per payment), so the
     // board never floods into a premature stop; min 4 keeps progress on a
     // nearly-full board (overflow parks safely in the source's tile record)
@@ -1282,8 +1311,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         } catch (e4) {}
         // the game registers the cooldown timer a tick AFTER the payment's
         // synchronous effects — the immediate drop above can run too early,
-        // so drop again once the tick has run
-        setTimeout(() => dropSourceCooldownTimers(c.col, c.row), 1500);
+        // so queue this cell for the turn's single deferred re-drop
+        paidCells.push(c.col + ':' + c.row);
         // re-add the ResourceGate the payment consumed, so the source is
         // payable again on the next cycle (the game's re-arm never fires here)
         reAddResourceGate(c.entity, c.cost, c.workers);
@@ -1295,6 +1324,17 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       if (tapped % 10 === 0) await sleep(0);
     }
     if (tapped === 0 && noWorkers > 0) return 'no free workers';
+
+    // one deferred sweep for every cell paid this turn (a setTimeout per
+    // payment used to pile up unbounded timers in long clear sessions)
+    if (paidCells.length) {
+      setTimeout(() => {
+        for (const ck of paidCells) {
+          const sep = ck.indexOf(':');
+          dropSourceCooldownTimers(+ck.slice(0, sep), +ck.slice(sep + 1));
+        }
+      }, 1500);
+    }
 
     // 3) collect ground collectables — produced items land on empty cells as
     //    bubbles (Collectable behavior) and need a tap to be picked up; only
@@ -1537,46 +1577,76 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     state.opStart = null;
     if (state.stop) log('stopped', 'warn');
     setUI();
-    refreshStatus();
+    refreshStatus(true);
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
   let dot, sortBtn, fillBtn, harvestBtn, planBtn, visitBtn;
   let autoOrdersBtn, autoClearBtn;
-  function refreshStatus() {
+  let cheatBtns = [];
+  // idle status is served from a short-lived cache: the full board read
+  // (~1000 cells × neighbor scans) used to run on every 2.5s interval tick
+  // even when nothing was happening, competing with the farm's own loop in
+  // throttled tabs. Ops still read live, and force a fresh read on exit.
+  let statusCache = null, statusCacheAt = 0;
+  function refreshStatus(force) {
     const el = document.getElementById('fmv-status');
     if (!el) return;
+    let text;
+    let cls = 'status';
     try {
       assertFMV();
-      const b = readBoard();
-      const crates = cratesLeft();
-      const items = b.error ? '-' : b.items.length;
-      const empty = b.error ? '-' : b.empties.length;
+      let items, empty, crates, err = false;
+      const active = state.running || state.busy;
+      if (!active && !force && statusCache && Date.now() - statusCacheAt < 10000) {
+        items = statusCache.items; empty = statusCache.empty;
+        crates = statusCache.crates; err = statusCache.err;
+      } else {
+        const b = readBoard();
+        crates = cratesLeft();
+        items = b.error ? '-' : b.items.length;
+        empty = b.error ? '-' : b.empties.length;
+        err = !!b.error;
+        statusCache = { items: items, empty: empty, crates: crates, err: err };
+        statusCacheAt = Date.now();
+      }
       let extra = '';
-      if (state.running || state.busy) {
+      if (active) {
         if (state.rounds) extra += ' · r' + state.rounds;
         if (state.opStart) extra += ' · ' + Math.floor((Date.now() - state.opStart) / 1000) + 's';
       }
-      el.textContent = 'items ' + items + ' · empty ' + empty + ' · crates ' + crates + extra;
-      el.className = 'status' + (b.error ? ' err' : '');
+      text = 'items ' + items + ' · empty ' + empty + ' · crates ' + crates + extra;
+      cls = 'status' + (err ? ' err' : '');
     } catch (e) {
-      el.textContent = 'FMV not ready — re-run install.mjs';
-      el.className = 'status err';
+      text = 'FMV not ready — re-run install.mjs';
+      cls = 'status err';
+    }
+    // only touch the DOM when the rendered state actually changed
+    if (el.textContent !== text || el.className !== cls) {
+      el.textContent = text;
+      el.className = cls;
     }
   }
   function setUI() {
     if (!dot) return;
     dot.className = 'dot' + (state.running || state.busy ? ' busy' : '');
     const dis = state.busy || state.running;
+    const stopping = state.stop;
     // toggle buttons: stay clickable while THEIR loop runs (click = STOP)
     if (autoOrdersBtn) {
-      autoOrdersBtn.textContent = state.mode === 'orders' ? '■ STOP' : '▶ Auto Orders';
+      autoOrdersBtn.textContent = state.mode === 'orders'
+        ? (stopping ? '■ STOPPING…' : '■ STOP')
+        : '▶ Auto Orders';
       autoOrdersBtn.classList.toggle('on', state.mode === 'orders');
+      autoOrdersBtn.classList.toggle('stopping', stopping && state.mode === 'orders');
       autoOrdersBtn.disabled = state.busy || (state.running && state.mode !== 'orders');
     }
     if (autoClearBtn) {
-      autoClearBtn.textContent = state.mode === 'clear' ? '■ STOP' : '⚡ Auto Clear';
+      autoClearBtn.textContent = state.mode === 'clear'
+        ? (stopping ? '■ STOPPING…' : '■ STOP')
+        : '⚡ Auto Clear';
       autoClearBtn.classList.toggle('on', state.mode === 'clear');
+      autoClearBtn.classList.toggle('stopping', stopping && state.mode === 'clear');
       autoClearBtn.disabled = state.busy || (state.running && state.mode !== 'clear');
     }
     sortBtn.disabled = dis;
@@ -1584,7 +1654,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     harvestBtn.disabled = dis;
     planBtn.disabled = dis;
     if (visitBtn) visitBtn.disabled = dis;
-    for (const b of document.querySelectorAll('#fmv-pane-cheat button')) b.disabled = dis;
+    for (const b of cheatBtns) b.disabled = dis;
   }
 
   function buildUI() {
@@ -1610,14 +1680,15 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '#fmv-menu .fold{color:#5a6a5a;font-size:10px;width:14px;height:14px;display:flex;align-items:center;'
       + '  justify-content:center;border:1px solid transparent;border-radius:3px;cursor:pointer;}'
       + '#fmv-menu .fold:hover{color:#b8c4b8;border-color:#2a362a;}'
-      + '#fmv-menu .dot{width:6px;height:6px;border-radius:50%;background:#ffd700;}'
+      + '#fmv-menu .dot{width:6px;height:6px;border-radius:50%;background:#ffd700;position:relative;cursor:pointer;}'
+      + '#fmv-menu .dot::after{content:"";position:absolute;left:-7px;top:-7px;width:20px;height:20px;}' // hitbox: 6px visual, 20px target
       + '#fmv-menu .dot.busy{background:#ff5a4e;animation:pulse 1s infinite;}'
       + '@keyframes pulse{50%{opacity:.3}}'
       + '#fmv-menu .body{padding:5px 6px 6px;}'
       + '#fmv-menu .status{padding:3px 6px;background:#0c0f0c;border:1px solid #1a221a;border-radius:4px;'
       + '  margin-bottom:5px;color:#8aa08a;font-size:9px;}'
       + '#fmv-menu .status.err{color:#ff7a6e;border-color:#3a2018;}'
-      + '#fmv-menu .btns{display:grid;grid-template-columns:repeat(auto-fit,minmax(42px,1fr));gap:3px;margin-bottom:5px;}'
+      + '#fmv-menu .btns{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:5px;}' // flex: 1-2 button rows fill the full width (auto-fit grid left half-width dead space)
       + '#fmv-menu .btns:last-of-type{margin-bottom:0;}'
       + '#fmv-menu .tabs{display:flex;gap:2px;margin-bottom:5px;border-bottom:1px solid #1f2a1f;}'
       + '#fmv-menu .tabs button{flex:1;font:inherit;padding:2px 0 4px;border:none;background:none;color:#5f6f5f;'
@@ -1651,6 +1722,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '  border:1px solid #1a221a;border-radius:4px;padding:1px 18px 1px 5px;font-size:8.5px;line-height:1.35;'
       + '  white-space:pre-wrap;word-break:break-word;margin-top:5px;}'
       + '#fmv-menu .log.open{height:96px;overflow:auto;padding:2px 18px 2px 5px;}'
+      + '#fmv-menu .log:not(.open) .l{display:none;}#fmv-menu .log:not(.open) .l:last-child{display:block;}' // collapsed view = last line only, pure CSS
       + '#fmv-menu .log::-webkit-scrollbar{width:6px;}'
       + '#fmv-menu .log::-webkit-scrollbar-thumb{background:#223022;border-radius:3px;}'
       + '#fmv-menu #fmv-log-toggle{position:absolute;top:1px;right:1px;width:16px;height:13px;padding:0;'
@@ -1660,6 +1732,9 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '#fmv-menu .l{color:#9aa89a;}#fmv-menu .l.warn{color:#d8c46a;}'
       + '#fmv-menu .l.ok{color:#ffd700;}#fmv-menu .l.err{color:#ff6a5e;}'
       + '#fmv-menu button.on{color:#ffd700;border-color:#2a4a2a;}'
+      + '#fmv-menu button.toggle.stopping{animation:pulse 1s infinite;}' // stop requested, loop winding down
+      + '#fmv-menu button:focus-visible{outline:1px solid #ffd700;outline-offset:1px;}'
+      + '/* why: the game renders an #input-field text-entry overlay that can cover the menu — keep it hidden */'
       + '#input-field{display:none !important;}';
 
 
@@ -1671,17 +1746,17 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<span class="fold">-</span></div>'
       + '<div class="body">'
       + '<div class="status" id="fmv-status">installing...</div>'
-      + '<div class="tabs">'
-      + '<button id="fmv-tab-farm" class="tab on">Farm</button>'
-      + '<button id="fmv-tab-cheat" class="tab">Cheat</button>'
+      + '<div class="tabs" role="tablist">'
+      + '<button id="fmv-tab-farm" class="tab on" role="tab" aria-selected="true">Farm</button>'
+      + '<button id="fmv-tab-cheat" class="tab" role="tab" aria-selected="false" tabindex="-1">Cheat</button>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-farm">'
       + '<div class="lbl">Board</div>'
       + '<div class="btns">'
-      + '<button id="fmv-plan">◆ Merge</button>'
-      + '<button id="fmv-sort">⇅ Sort</button>'
-      + '<button id="fmv-harvest">✦ Harvest</button>'
-      + '<button id="fmv-fill">▦ Fill</button>'
+      + '<button id="fmv-plan" title="plan + merge all 5/10/15 chains (moves only families with mergeable members)">◆ Merge</button>'
+      + '<button id="fmv-sort" title="regroup items by family; money/energy/gems to the bottom strip">⇅ Sort</button>'
+      + '<button id="fmv-harvest" title="harvest ready crops/animals + collect drops (game machinery)">✦ Harvest</button>'
+      + '<button id="fmv-fill" title="spawn crates on every empty cell until the map is full">▦ Fill</button>'
       + '</div>'
       + '<div class="lbl">Work</div>'
       + '<div class="btns">'
@@ -1690,16 +1765,16 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '</div>'
       + '<div class="lbl">Social</div>'
       + '<div class="btns">'
-      + '<button id="fmv-visit">☕ Visit</button>'
+      + '<button id="fmv-visit" title="collect friend-reward bubbles (own farm or friend farm)">☕ Visit</button>'
       + '</div>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-cheat" style="display:none">'
       + '<div class="lbl">Currency</div>'
       + '<div class="btns">'
-      + '<button id="fmv-cheat-coins">💰 Coins +100k</button>'
-      + '<button id="fmv-cheat-gems">💎 Gems +1k</button>'
-      + '<button id="fmv-cheat-energy">⚡ Energy +1000</button>'
-      + '<button id="fmv-cheat-crates">📦 Crates +1000</button>'
+      + '<button id="fmv-cheat-coins" title="grant +100k coins (client-authoritative — persists)">💰 Coins +100k</button>'
+      + '<button id="fmv-cheat-gems" title="grant +1k gems">💎 Gems +1k</button>'
+      + '<button id="fmv-cheat-energy" title="grant +1000 energy">⚡ Energy +1000</button>'
+      + '<button id="fmv-cheat-crates" title="grant +1000 crates">📦 Crates +1000</button>'
       + '</div>'
       + '<div class="lbl">Market</div>'
       + '<div class="btns">'
@@ -1741,12 +1816,29 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     const cheatRegen = el.querySelector('#fmv-cheat-regen');
     const buyAllBtn = el.querySelector('#fmv-buy-all');
     const tapBubblesBtn = el.querySelector('#fmv-tap-bubbles');
+    cheatBtns = [...el.querySelectorAll('#fmv-pane-cheat button')];
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
     const head = el.querySelector('.head');
+    // persist position + fold across reinstalls (localStorage on the
+    // activity origin — the game never touches our keys)
+    let savedMenu = null;
+    try { savedMenu = JSON.parse(localStorage.getItem('fmv-menu-state') || 'null'); } catch (e) {}
+    if (savedMenu) {
+      if (typeof savedMenu.left === 'number') {
+        el.style.left = savedMenu.left + 'px';
+        el.style.top = savedMenu.top + 'px';
+        el.style.right = 'auto';
+      }
+      if (savedMenu.folded) {
+        body.style.display = 'none';
+        fold.textContent = '+';
+      }
+    }
     let dragMoved = false;
     head.addEventListener('pointerdown', (e) => {
+      if (state.running || state.busy) return; // no yanking the panel mid-op
       dragMoved = false;
       const r = el.getBoundingClientRect();
       el.style.left = r.left + 'px';
@@ -1765,10 +1857,20 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       el.style.left = (e.clientX - el.__offX) + 'px';
       el.style.top = (e.clientY - el.__offY) + 'px';
     });
+    const saveMenuState = () => {
+      try {
+        const r = el.getBoundingClientRect();
+        localStorage.setItem('fmv-menu-state', JSON.stringify({
+          left: r.left, top: r.top,
+          folded: body.style.display === 'none'
+        }));
+      } catch (e2) {}
+    };
     const endDrag = (e) => {
       if (!el.__dragging) return;
       el.__dragging = false;
       try { head.releasePointerCapture(e.pointerId); } catch (e2) {}
+      saveMenuState();
     };
     head.addEventListener('pointerup', endDrag);
     head.addEventListener('pointercancel', endDrag);
@@ -1776,6 +1878,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       if (dragMoved) return;
       body.style.display = body.style.display === 'none' ? '' : 'none';
       fold.textContent = body.style.display === 'none' ? '+' : '-';
+      saveMenuState();
     });
     autoOrdersBtn.addEventListener('click', () => runToggleLoop(runOrdersLoop, 'orders'));
     autoClearBtn.addEventListener('click', () => runToggleLoop(autoClearFast, 'clear'));
@@ -1822,9 +1925,20 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       paneCheat.style.display = isCheat ? '' : 'none';
       tabFarm.classList.toggle('on', !isCheat);
       tabCheat.classList.toggle('on', isCheat);
+      tabFarm.setAttribute('aria-selected', isCheat ? 'false' : 'true');
+      tabCheat.setAttribute('aria-selected', isCheat ? 'true' : 'false');
+      tabFarm.tabIndex = isCheat ? -1 : 0;
+      tabCheat.tabIndex = isCheat ? 0 : -1;
     };
     tabFarm.addEventListener('click', () => selectTab('farm'));
     tabCheat.addEventListener('click', () => selectTab('cheat'));
+    el.querySelector('.tabs').addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const go = e.key === 'ArrowRight' ? 'cheat' : 'farm';
+      selectTab(go);
+      (go === 'cheat' ? tabCheat : tabFarm).focus();
+    });
   }
 
   // ── install ──────────────────────────────────────────────────────────────
@@ -1852,10 +1966,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     resetStats: statsReset,
     running: () => state.running,
     busy: () => state.busy || state.running,
-    version: window.__FMV_version || '1.9.0'
+    version: window.__FMV_version || '1.12.0'
   };
   setUI();
-  log('menu v' + window.FMV.version + ' installed', 'ok');
+  log('menu v' + (window.__FMV_version || '1.12.0') + ' installed', 'ok');
   refreshStatus();
   if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };

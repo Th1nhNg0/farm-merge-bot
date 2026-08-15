@@ -190,7 +190,9 @@ globalThis.FMVPlan = (function () {
       }
     }
 
-    // 2) grouped plans: biggest groups first (15 > 10 > 5), many per key
+    // 2) grouped plans: fewest connected components first (a chain of 2-3
+    // separate blobs needs move/swap ops to connect — one blob is free), then
+    // most items first (biggest groups: 15 > 10 > 5)
     const groups = [];
     const keys = Object.entries(counts)
       .filter(([, n]) => n >= 5)

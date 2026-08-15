@@ -102,6 +102,22 @@ globalThis.FMVUtil = (function () {
     } catch (err) { return false; }
   }
 
+  // walk a module's exports for a constructor whose instance matches
+  // instance.type === type (structural — survives obfuscation; used for the
+  // LootReceived / ResourceGate / objectRemoval trigger ctors)
+  function findCtorByType(ex, type) {
+    if (!ex || typeof ex !== 'object') return null;
+    for (const k of Object.keys(ex)) {
+      const v = ex[k];
+      if (typeof v !== 'function' || !v.prototype) continue;
+      try {
+        const inst = new v({});
+        if (inst && inst.type === type) return v;
+      } catch (e) {}
+    }
+    return null;
+  }
+
   // live ground collectables on the board (stale references guarded)
   function collectablesOnBoard(S, I) {
     const out = [];
@@ -117,5 +133,6 @@ globalThis.FMVUtil = (function () {
   }
 
   return { forEachCell, readBoard, tileModel, tileAt, getTapRouter,
-           walkBehaviorRegistries, isProductCollectable, collectablesOnBoard };
+           walkBehaviorRegistries, isProductCollectable, collectablesOnBoard,
+           findCtorByType };
 })();

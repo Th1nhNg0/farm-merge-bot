@@ -16,7 +16,7 @@ import { PAUSE_PROTECT_SOURCE } from "./pause_protect.js";
 export const POLLER_SOURCE = PAUSE_PROTECT_SOURCE + `(function(){
   if (window.__FMV_poller) return;
   window.__FMV_poller = true;
-  window.__FMV_rt = [];
+  if (!window.__FMV_rt) window.__FMV_rt = [];
   const h = self['webpackChunkfarm_merge_game'] || (self['webpackChunkfarm_merge_game'] = []);
   let n = 0;
   const timer = setInterval(function(){

@@ -6,10 +6,12 @@ set "DISCORD_URL=https://discord.com/app"
 set "PROFILE=%LOCALAPPDATA%\fmv-bot\chrome-profile"
 set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
 
 echo [1/3] Launching Chrome with CDP on port 9222...
 if exist "%CHROME%" (
-    start "" "%CHROME%" --remote-debugging-port=9222 --enable-features=IsolateSandboxedIframes ^
+    start "" "%CHROME%" --remote-debugging-port=9222 --no-first-run --no-default-browser-check ^
+        --enable-features=IsolateSandboxedIframes ^
         --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows ^
         --user-data-dir="%PROFILE%" "%DISCORD_URL%"
 ) else (
@@ -22,7 +24,7 @@ echo [2/3] Waiting for CDP on port 9222...
 set /a tries=0
 :waitloop
 set /a tries+=1
-curl -s -o nul http://127.0.0.1:9222/json/version && goto cdp_ok
+curl -s -f -o nul http://127.0.0.1:9222/json/version && goto cdp_ok
 if %tries% geq 20 goto cdp_fail
 timeout /t 1 /nobreak >nul
 goto waitloop
@@ -45,6 +47,14 @@ pause >nul
 echo [3/3] Running src\install.mjs...
 cd /d "%FARM_DIR%"
 node src\install.mjs
+set "INSTALL_EXIT=%ERRORLEVEL%"
+
+if not "%INSTALL_EXIT%"=="0" (
+    echo.
+    echo Install failed with exit code %INSTALL_EXIT% - see the messages above.
+    pause
+    exit /b %INSTALL_EXIT%
+)
 
 echo.
 echo Done - close this window or press any key.

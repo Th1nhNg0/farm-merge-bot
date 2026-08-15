@@ -11,16 +11,30 @@ if (!EXPR) {
 }
 
 const cdp = new CDP(WS_URL);
-await cdp.connect();
 
-const target = await findGameTarget(cdp);
-if (!target) throw new Error("game iframe target not found — open the Discord activity first");
+try {
+  await cdp.connect();
 
-const sid = await attach(cdp, target.targetId);
-const res = await evalIn(cdp, sid, EXPR);
-if (res.exceptionDetails) {
-  console.error("EXCEPTION:", JSON.stringify(res.exceptionDetails, null, 2));
-} else {
-  console.log(JSON.stringify(res.result.value, null, 2));
+  const target = await findGameTarget(cdp);
+  if (!target) throw new Error("game iframe target not found — open the Discord activity first");
+
+  const sid = await attach(cdp, target.targetId);
+  const res = await evalIn(cdp, sid, EXPR);
+  if (res.exceptionDetails) {
+    const ex =
+      res.exceptionDetails.exception?.description ||
+      res.exceptionDetails.text ||
+      JSON.stringify(res.exceptionDetails);
+    console.error("EXCEPTION:", ex);
+    process.exitCode = 1;
+  } else if (res.result.value === undefined) {
+    console.log("undefined");
+  } else {
+    console.log(JSON.stringify(res.result.value, null, 2));
+  }
+} catch (e) {
+  console.error("EVAL FAILED:", e.message);
+  process.exitCode = 1;
+} finally {
+  cdp.close();
 }
-cdp.close();

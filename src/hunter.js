@@ -47,32 +47,36 @@ export const HUNTER_SOURCE = `(async function(){
   let best = null, bestScore = -Infinity;
 
   for (const { r: req, n } of cands) {
-    // enumerate executed modules in batches (stub factories -> no re-execution)
-    const orig = {};
+    // enumerate executed modules in batches: factories are stubbed only
+    // INSIDE each batch and restored before the next one, so the game's own
+    // async code requiring an unexecuted module never hits a stale stub
+    // (webpack can leave modules in an error state / trip the watchdog).
     const ids = [];
     try {
       for (const k of Object.keys(req.m || {})) {
         const id = Number(k);
         if (!Number.isFinite(id)) continue;
-        ids.push(id);
-        const f = req.m[id];
-        if (typeof f !== 'function') continue;
-        orig[id] = f;
-        req.m[id] = function(){ throw new Error('FMV_STUB_' + id); };
+        if (typeof req.m[id] === 'function') ids.push(id);
       }
     } catch (e) {}
     const executed = [];
     for (let i = 0; i < ids.length; i += 200) {
       const end = Math.min(i + 200, ids.length);
+      const orig = {};
+      for (let j = i; j < end; j++) {
+        const id = ids[j];
+        orig[id] = req.m[id];
+        req.m[id] = function(){ throw new Error('FMV_STUB_' + id); };
+      }
       for (let j = i; j < end; j++) {
         const id = ids[j];
         try { req(id); executed.push(id); } catch (e) {
           if (!String(e.message).startsWith('FMV_STUB_')) executed.push(id);
         }
       }
+      for (const id of Object.keys(orig)) req.m[id] = orig[id];
       await breathe();
     }
-    for (const id of Object.keys(orig)) req.m[id] = orig[id];
 
     // ---- root container: walk executed exports ----
     let root = null, rootId = null, rootPath = null, servicesKey = null;
@@ -88,7 +92,9 @@ export const HUNTER_SOURCE = `(async function(){
       if (visited.has(obj)) return;
       visited.add(obj);
       if (Array.isArray(obj)) {
-        for (const e of obj) walk(e, path, depth + 1, srcId);
+        // carry array indices in the path so root() can resolve containers
+        // that sit inside arrays (o[k] works for numeric keys on arrays)
+        for (let i = 0; i < obj.length; i++) walk(obj[i], path.concat(i), depth + 1, srcId);
         return;
       }
       if (!root) {
@@ -132,33 +138,38 @@ export const HUNTER_SOURCE = `(async function(){
     }
 
     // ---- component map + MergeTrigger ctor: one fused scan ----
-    // (single sync pass, like the original two scans — no added breathing,
-    //  so real install wall time is unchanged)
-    for (let i = 0; i < executed.length && (mapId === null || hc === null); i++) {
-      try {
-        const ex = req(executed[i]);
-        if (!ex || typeof ex !== 'object') continue;
-        if (mapId === null) {
-          const cand = (ex.I !== undefined) ? ex.I : ex;
-          if (cand && typeof cand === 'object' &&
-              cand.Mergeable !== undefined && cand.GridPosition !== undefined) {
-            mapId = executed[i]; mapKey = (ex.I !== undefined) ? 'I' : null;
+    // Batched with breathing like the root walk: instantiating obfuscated
+    // class ctors (new v({cell, chain})) is the heaviest step and a single
+    // sync pass could stall the main thread into a watchdog restart.
+    for (let i = 0; i < executed.length && (mapId === null || hc === null); i += 150) {
+      const end = Math.min(i + 150, executed.length);
+      for (let j = i; j < end; j++) {
+        try {
+          const ex = req(executed[j]);
+          if (!ex || typeof ex !== 'object') continue;
+          if (mapId === null) {
+            const cand = (ex.I !== undefined) ? ex.I : ex;
+            if (cand && typeof cand === 'object' &&
+                cand.Mergeable !== undefined && cand.GridPosition !== undefined) {
+              mapId = executed[j]; mapKey = (ex.I !== undefined) ? 'I' : null;
+            }
           }
-        }
-        if (hc === null) {
-          for (const k of Object.keys(ex)) {
-            const v = ex[k];
-            if (typeof v !== 'function' || !v.prototype) continue;
-            try {
-              const p = new v({ cell: { column: 1, row: 1 }, chain: [] });
-              if (p && typeof p === 'object' && p.cell && p.chain) {
-                hc = v; hcId = executed[i]; hcKey = k;
-                break;
-              }
-            } catch (e) {}
+          if (hc === null) {
+            for (const k of Object.keys(ex)) {
+              const v = ex[k];
+              if (typeof v !== 'function' || !v.prototype) continue;
+              try {
+                const p = new v({ cell: { column: 1, row: 1 }, chain: [] });
+                if (p && typeof p === 'object' && p.cell && p.chain) {
+                  hc = v; hcId = executed[j]; hcKey = k;
+                  break;
+                }
+              } catch (e) {}
+            }
           }
-        }
-      } catch (e) {}
+        } catch (e) {}
+      }
+      await breathe();
     }
 
     const score = (farm ? 1000 : 0) + Math.max(0, Math.min(999, boardSize)) +

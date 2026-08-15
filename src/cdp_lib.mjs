@@ -9,17 +9,33 @@
 // The launcher starts Chrome with --remote-debugging-port=9222 and
 // IsolateSandboxedIframes (needed for the Discord activity iframe). Override
 // with env FMV_WS if needed. Node >= 22 (built-in WebSocket).
+//
+// Fail-fast contract: every connection path is bounded — the WS handshake has
+// a timeout, the HTTP fallback has a timeout, the candidate list is refreshed
+// per retry (a stale DevToolsActivePort uuid or a Chrome that is still
+// initializing can recover), and a dropped socket rejects all pending
+// requests instead of hanging the caller.
 
 import { readFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const CONNECT_ATTEMPTS = 3;
+const CONNECT_RETRY_MS = 750;
+const HANDSHAKE_TIMEOUT_MS = 5000;
+const FETCH_TIMEOUT_MS = 3000;
+// Backstop for a request the browser accepted but never answers (normally
+// replies are prompt; long Runtime.evaluate calls stay far below this).
+const SEND_TIMEOUT_MS = 300000;
 
 // Fallback: Chrome may be started with --remote-debugging-pipe AND
 // --remote-debugging-port=9222; the pipe mode may skip writing
 // DevToolsActivePort, so query the HTTP endpoint directly.
 async function portFallback(port = 9222) {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/version`);
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
     if (res.ok) {
       const { webSocketDebuggerUrl } = await res.json();
       if (webSocketDebuggerUrl) return webSocketDebuggerUrl;
@@ -28,8 +44,8 @@ async function portFallback(port = 9222) {
   return null;
 }
 
-async function wsCandidates() {
-  if (process.env.FMV_WS) return [process.env.FMV_WS];
+// Synchronous file-based candidates (safe at import time — no network).
+function fileCandidates() {
   const urls = [];
   const files = [
     process.env.FMV_DEVPORT_FILE,
@@ -49,36 +65,43 @@ async function wsCandidates() {
       if (port && wsPath) urls.push(`ws://127.0.0.1:${port}${wsPath}`);
     }
   }
-  const fallback = await portFallback();
-  if (fallback) urls.push(fallback);
-  if (!urls.length)
-    throw new Error(
-      "Could not find DevToolsActivePort. Start Chrome with --remote-debugging-port=9222."
-    );
   return urls;
 }
 
-const WS_CANDIDATES = await wsCandidates();
+// Full candidate list (files + live HTTP fallback). Called fresh on every
+// connect attempt so retries can recover from stale files / late-starting
+// Chrome. Never throws — an empty list just means "retry later".
+async function wsCandidates() {
+  if (process.env.FMV_WS) return [process.env.FMV_WS];
+  const urls = fileCandidates();
+  const fallback = await portFallback();
+  if (fallback) urls.push(fallback);
+  return urls;
+}
+
+const WS_CANDIDATES = fileCandidates();
 export const WS_URL = WS_CANDIDATES[0];
 
 export class CDP {
   constructor(url = WS_URL) {
     this.url = url;
-    this.urls = [url, ...WS_CANDIDATES].filter(
-      (u, i, a) => a.indexOf(u) === i
-    );
     this.id = 0;
     this.pending = new Map();
     this.ws = null;
+    this._openReject = null;
   }
   async connect() {
-    // DevToolsActivePort can be stale (uuid from a dead Chrome) or missing
-    // (Chrome still initializing / pipe mode) while /json/version already
-    // answers. Try every candidate, then retry the whole set a few times.
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     let lastErr = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      for (const url of this.urls) {
+    for (let attempt = 0; attempt < CONNECT_ATTEMPTS; attempt++) {
+      // DevToolsActivePort can be stale (uuid from a dead Chrome) or missing
+      // (Chrome still initializing / pipe mode) while /json/version already
+      // answers. Re-resolve every attempt instead of retrying dead URLs.
+      const fresh = await wsCandidates().catch(() => []);
+      const urls = [this.url, ...WS_CANDIDATES, ...fresh].filter(
+        (u, i, a) => u && a.indexOf(u) === i
+      );
+      for (const url of urls) {
         try {
           await this._open(url);
           return;
@@ -86,15 +109,26 @@ export class CDP {
           lastErr = e;
         }
       }
-      if (attempt < 2) await sleep(750);
+      if (attempt < CONNECT_ATTEMPTS - 1) await sleep(CONNECT_RETRY_MS);
     }
     throw new Error("ws connect error — no CDP endpoint reachable: " + lastErr?.message);
   }
   _open(url) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
-      ws.onopen = () => resolve();
+      this._openReject = reject; // lets close() abort an in-flight handshake
+      const timer = setTimeout(() => {
+        try { ws.close(); } catch (e) {}
+        reject(new Error("ws connect timeout (" + HANDSHAKE_TIMEOUT_MS + "ms): " + url));
+      }, HANDSHAKE_TIMEOUT_MS);
+      const done = () => clearTimeout(timer);
+      ws.onopen = () => {
+        done();
+        this._openReject = null;
+        resolve();
+      };
       ws.onerror = () => {
+        done();
         try { ws.close(); } catch (e) {}
         reject(new Error("ws connect error: " + url));
       };
@@ -113,6 +147,7 @@ export class CDP {
       // Only the CURRENT socket may touch pending — a late close from a
       // failed candidate attempt must not reject live requests.
       ws.onclose = () => {
+        done();
         if (this.ws !== ws) return;
         const err = new Error('CDP websocket closed');
         for (const [, p] of this.pending) p.reject(err);
@@ -128,14 +163,27 @@ export class CDP {
         reject(new Error('CDP websocket not open'));
         return;
       }
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error('CDP request timeout: ' + method));
+      }, SEND_TIMEOUT_MS);
+      const done = () => clearTimeout(timer);
+      // wrap resolve/reject so the backstop timer stops once settled
+      this.pending.set(id, {
+        resolve: (v) => { done(); resolve(v); },
+        reject: (e) => { done(); reject(e); },
+      });
       const msg = { id, method, params };
       if (sessionId) msg.sessionId = sessionId;
       try { this.ws.send(JSON.stringify(msg)); }
-      catch (e) { this.pending.delete(id); reject(e); }
+      catch (e) { done(); this.pending.delete(id); reject(e); }
     });
   }
   close() {
+    // A pending handshake must not leave connect() hanging forever.
+    if (this._openReject) {
+      this._openReject(new Error("CDP close() called during connect"));
+      this._openReject = null;
+    }
     try { if (this.ws) this.ws.close(); } catch (e) {}
   }
 }
@@ -158,14 +206,29 @@ export async function evalIn(cdp, sessionId, expression, opts = {}) {
 
 // Finds the live game frame target (only one game session should be open).
 // The game runs directly in the Discord Activities iframe (discordsays.com
-// origin, served by the CrazyGames proxy).
+// origin, served by the CrazyGames proxy). When several discordsays iframes
+// exist, each candidate is probed for the game's webpack hook and the first
+// live one wins — attaching to a shell iframe would otherwise fail silently.
 export async function findGameTarget(cdp) {
   const { targetInfos } = await cdp.send("Target.getTargets");
-  return (
-    targetInfos.find(
-      (t) =>
-        (t.type === "iframe" || t.type === "page") &&
-        t.url.includes("discordsays.com")
-    ) || null
+  const candidates = targetInfos.filter(
+    (t) =>
+      (t.type === "iframe" || t.type === "page") &&
+      t.url.includes("discordsays.com")
   );
+  if (!candidates.length) return null;
+  if (candidates.length === 1) return candidates[0];
+  for (const t of candidates) {
+    try {
+      const sid = await attach(cdp, t.targetId);
+      const res = await evalIn(
+        cdp,
+        sid,
+        "!!(self.webpackChunkfarm_merge_game || window.FMV)"
+      );
+      await cdp.send("Target.detachFromTarget", { sessionId: sid }).catch(() => {});
+      if (res && res.result && res.result.value) return t;
+    } catch (e) {}
+  }
+  return candidates[0];
 }
