@@ -92,5 +92,21 @@ export const PAUSE_PROTECT_SOURCE = `(function(){
     }
   } catch (e) {}
 
+  // 5) visibility watchdog: the game's own (un-swallowed) listeners can set
+  // its pageVisibility service back to hidden after a blur — which pauses
+  // ALL game systems (timers stop, the screen freezes). Re-apply the repair
+  // every few seconds so a hidden/blurred tab never freezes the farm.
+  try {
+    setInterval(function () {
+      try {
+        const pv = window.FMV && window.FMV.rootServices && window.FMV.rootServices().pageVisibility;
+        if (pv && pv._hidden) {
+          pv._hidden = false;
+          if (pv.onPageFocused && typeof pv.onPageFocused.fire === 'function') pv.onPageFocused.fire();
+        }
+      } catch (e) {}
+    }, 5000);
+  } catch (e) {}
+
   return true;
 })();`;

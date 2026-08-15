@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.8.0 (see `CHANGELOG.md`).
+Project version: 1.9.0 (see `CHANGELOG.md`).
 
 ## What this is
 
@@ -18,7 +18,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 | `src/poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt`; prepends the pause-protection patch so fresh game loads are covered |
 | `src/hunter.js` | In-frame module hunter; picks the main runtime and re-discovers root container / farm services / component map / MergeTrigger ctor structurally (no hardcoded ids) |
 | `src/fmv_helper.js` | `window.FMV` v4: `board` / `merge` / `move` / `swap` / `spawnCrate` / `services` / `req` / `I` / `root` / `rootServices` |
-| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Auto/Cheat tabs — Sort / Fill / Harvest / Plan+Merge / Orders / Clear (Farm), Auto Orders (Auto), exploit buttons (Cheat) + log panel; exposes `window.FMV.menu`; prepends `plan.js` + `util.js` sources |
+| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Cheat tabs — Farm groups: Board (Merge/Sort/Harvest/Fill), Work (Orders / Auto Orders with instant production finish / Clear / Auto Clear), Social (Visit/½ Gold); Cheat groups: Currency grants + Speed (Finish Regen/FF Free); toggle loops show ■ STOP; exposes `window.FMV.menu`; prepends `plan.js` + `util.js` sources |
 | `src/util.js` | In-frame shared game-access helpers (`window.FMVUtil`): `readBoard` / `tileModel` / `tileAt` / `getTapRouter` / `walkBehaviorRegistries` / `isProductCollectable` / `collectablesOnBoard` / `forEachCell` |
 | `src/install.mjs` | One-shot installer — poller → hunter → FMV → menu, evaluated live in the frame; exports `VERSION` |
 | `src/eval.mjs` | One-off `Runtime.evaluate` in the game frame |
@@ -42,15 +42,28 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   via `storageBubble.createBubble`; blueprint keys verified: `reward_crate_gold`,
   `reward_crate_gold_gazebo`, `cow_1..3`, `wood_1`, `stone_1`, `coin_1`,
   `gem_1`, `energy_1`, `ticket`. Bubbles are SAVED (`StorageBubbleModel`) and
-  restored on reload; collecting = the `storageBubbleTap` family (tap router
-  `_simulateClick` on the entity — queues while tab hidden; the
-  `storageBubbleShowContent` trigger behavior does NOT auto-fire). Wrapped as
-  `FMV.spawn` / `FMV.collectBubbles`.
-- **Crate content rig**: `crateContent.queueContent(blueprint, n)` pushes onto
-  `CrateContentModel._queue` (persisted); the next crate open pops it. Wrapped
-  as `FMV.rigCrates`. Note: RewardCrateCooldown timer finish does NOT pop the
-  queue in this build (crate entities have no `Cooldown` behavior — the open
-  hook is elsewhere, unresolved).
+  restored on reload. **Collect (verified)**: `tapRouter._simulateClick` does
+  NOT work (bubbles have no valid GridPosition — off-map, the router
+  rejects them). The correct path is the `storageBubbleTap` family processor
+  `_onStorageBubbleTapped(bubble)` (spawns each content item via
+  `_spawnObject` → world + `moveContentToCell` behaviors; items land on the
+  grid after ~6-20s in hidden tabs). Never tap a bubble twice — the content
+  is consumed only when the pop completes, so double-taps duplicate the
+  items. Do NOT call `_initiateBubblePop` directly (its async destroy
+  crashed the game loop once). Wrapped as `FMV.spawn` / `FMV.collectBubbles`
+  (settle rounds + 90s cross-call double-tap guard).
+- **CRATE SPAWN CAVEAT (verified, caused a freeze)**: crate blueprints must
+  NEVER go through the bubble path — `_onStorageBubbleTapped` adds them to
+  the world but `moveContentToCell` never completes for crates, so they pile
+  up as broken world objects with Cooldown behaviors (40+ of them froze the
+  game loop). Crates are placed DIRECTLY instead: factory object +
+  GridPosition ctor (`new gpCtor({column,row})`, ctor obtained from any
+  board entity's `getBehavior(I.GridPosition).constructor`) + world.addGameObject
+  + mapGrid.setContent + position.copyFrom. Produces real crates
+  (crateReward + cooldown + RewardCrateCooldown timer). The farm's gold
+  crates are the GAZEBO family (`reward_crate_gold_gazebo` → object id
+  `reward_crate_gold:gazebo` — what the ½ Gold button targets), NOT the
+  plain `reward_crate_gold` (`reward_crate:gold`).
 - **Free fast-forward**: `rootServices().fastForward.setFreeTrackerStatus(true)`
   sets `_alwaysReturnFreeTracker` — all fast-forward buttons free (session
   flag only). Wrapped as `FMV.freeFastForward`.
@@ -91,15 +104,21 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   `tapRouter._simulateClick` only works for harvestables (animals) — sources
   need the popout→confirm flow, so call `_attemptPayment` directly.
 - **Source chop = cooldown timer**: paying a source starts a
-  `MapSourceCooldown:col,row` timer in `FMV.root()._nonCriticalServices.timer.
+  `MapSourceCooldown:col,row` timer in `FMV.rootServices().timer.
   _timerModel._timers` (Map keyed by timerId; entries have `_state`,
   `_remaining`, `_onFinish` — the game's own completion path) plus a worker
-  hold (tile `workerData`). The source is only `lootable` when the timer
-  expires (worker released). Clear skips the wait by setting
-  `_remaining = 0` and calling `_onFinish()` — the tile cooldown entry is
-  then cleared by the game itself. Between payment and the timer's
-  materialization (async, next game tick) the tile has `workerData` without
-  `cooldown` — those sources are mid-chop, not payable.
+  hold (tile `workerData` + entity `WorkerData` behavior). The source is only
+  `lootable` when the timer expires (worker released). **VERIFIED 2026-08-15:
+  finishing the timer alone (`_remaining=0; _onFinish()`) does NOT release
+  the worker or clear the tile in this build** — the cooldown processor
+  (`_getContentByTimerID`) finds no entity with a matching `Cooldown`
+  behavior, so the tile stays stuck with `workerData`+`cooldown` and the
+  farm's ~6 workers block every payment ('no free workers' stall loops).
+  The working skip is `gameWorkers.releaseForObject(entity)`: it removes the
+  entity's `WorkerData` behavior and the game then clears the tile and marks
+  the source `lootable` WITH its loot (e.g. `tool_2 x3 + tool_1`). Clear
+  calls release right after each payment, so workers are instantly free and
+  the loop pays continuously until energy out / board full.
 - **Harvest machinery** (Harvest button): plain taps do NOT harvest crops —
   the game's harvest runs when a `LootReceived` behavior lands on the entity
   (ctor = the trigger-module export whose instance `type === 'lootReceived'`,

@@ -208,6 +208,47 @@ export const FMV_HELPER_SOURCE = `(function(){
   // (world entities) that the game collects via the storageBubbleTap family.
   const VALID_INV_KEYS = ['coins', 'gems', 'energy', 'crates', 'wood', 'stone'];
 
+  // CRATE caveat (verified): crate blueprints must NEVER go through the
+  // bubble path — the tap handler spawns them into the world but the
+  // moveContentToCell placement never completes for crates, so they
+  // pile up as broken world objects (40+ of them froze the game loop).
+  // Crates are placed DIRECTLY into a cell instead: factory object +
+  // GridPosition behavior + mapGrid.setContent (the same machinery the
+  // move/swap ops use), which the game saves and processes normally.
+  let gridPosCtor = null;
+  function placeCrate(blueprint, col, row) {
+    const S = services();
+    const I = window.FMV.I();
+    const G = window.FMV.rootServices().gameObjectFactory;
+    if (!S || !G) return { err: 'services not ready' };
+    const cell = S.mapGrid.getCell(col, row);
+    if (!cell) return { err: 'no such cell' };
+    if (cell.content) return { err: 'cell not empty' };
+    let obj = null;
+    try { obj = G.createFromSerializedData({ data: {}, blueprint: blueprint }); } catch (e) {}
+    if (!obj) return { err: 'create failed for ' + blueprint };
+    try {
+      if (!gridPosCtor) {
+        for (const c of S.mapGrid._cells.values()) {
+          if (!c || !c.content) continue;
+          const gp = c.content.getBehavior && c.content.getBehavior(I.GridPosition);
+          if (gp && gp.constructor) { gridPosCtor = gp.constructor; break; }
+        }
+      }
+      if (gridPosCtor) obj.addBehavior(new gridPosCtor({ column: col, row: row }));
+      S.world.addGameObject(obj);
+      S.mapGrid.setContent(col, row, obj);
+      const gp = obj.getBehavior && obj.getBehavior(I.GridPosition);
+      if (gp) {
+        if (!gp._data) gp._data = {};
+        gp._data.column = col; gp._data.row = row;
+      }
+      obj.position.copyFrom(S.axonometricProjection.getWorldPosition(col, row));
+      return { ok: true };
+    } catch (e) { return { err: 'place failed: ' + (e && e.message) }; }
+  }
+  const isCrateBp = (bp) => typeof bp === 'string' && bp.indexOf('reward_crate') === 0;
+
   // grant inventory currency: [{key, amount}, ...] -> autosaved
   async function grant(rewards) {
     const R = window.FMV.services().rewardService;
@@ -229,47 +270,156 @@ export const FMV_HELPER_SOURCE = `(function(){
     }
   }
 
-  // spawn blueprint objects as storage bubbles: [{key, amount}, ...]
+  // spawn blueprint objects. Crates are placed DIRECTLY into empty cells;
+  // other blueprints become storage bubbles (collect via collectBubbles).
   function spawn(blueprints) {
     const R = window.FMV.services().rewardService;
     const bc = window.FMV.rootServices().blueprintCollection;
     if (!R || typeof R._claimObjectRewards !== 'function')
       return { ok: false, reason: 'rewardService not found' };
-    const list = [];
+    const bubbles = [];
+    const placed = [];
     for (const b of blueprints || []) {
       if (!b || typeof b.key !== 'string') continue;
       let has = false;
       try { has = bc.hasBlueprint(b.key); } catch (e) {}
       if (!has) return { ok: false, reason: 'not a blueprint: ' + b.key };
-      list.push({ key: b.key, amount: Math.max(1, Math.floor(Number(b.amount) || 1)) });
+      const amount = Math.max(1, Math.floor(Number(b.amount) || 1));
+      if (isCrateBp(b.key)) {
+        // direct placement: fill as many empty cells as we can
+        let n = 0;
+        for (const cell of services().mapGrid._cells.values()) {
+          if (n >= amount) break;
+          if (!cell || cell.content) continue;
+          const r = placeCrate(b.key, cell.column, cell.row);
+          if (r.ok) n++;
+        }
+        placed.push({ key: b.key, amount: n });
+      } else {
+        bubbles.push({ key: b.key, amount: amount });
+      }
     }
-    if (!list.length) return { ok: false, reason: 'no blueprints' };
-    try {
-      R._claimObjectRewards(list);
-      return { ok: true, spawned: list };
-    } catch (e) { return { ok: false, reason: 'spawn failed: ' + (e && e.message) }; }
+    let spawnedBubbles = 0;
+    if (bubbles.length) {
+      try { R._claimObjectRewards(bubbles); spawnedBubbles = bubbles.length; } catch (e) {
+        return { ok: false, reason: 'spawn failed: ' + (e && e.message) };
+      }
+    }
+    return { ok: true, placed: placed, bubbles: spawnedBubbles };
   }
 
-  // tap every storage bubble (the game's own tap path; queues while hidden)
-  function collectBubbles() {
+  // tap every storage bubble via the game's own family processors
+  // (_onStorageBubbleTapped spawns the content onto the grid, the pop
+  // destroys the bubble). tapRouter._simulateClick does NOT work here —
+  // bubbles have no valid GridPosition (off-map), so the router rejects
+  // them. The spawn animation is slow (~10s+ in hidden tabs), so we
+  // iterate settle rounds and never tap a bubble twice (double-tap spawns
+  // the same content again — duplicate items).
+  // collect storage bubbles. Crates are SALVAGED (direct-placed into empty
+  // cells, then the bubble's content is emptied — the bubble tap path cannot
+  // place crates); everything else goes through the game's own tap handler
+  // (_onStorageBubbleTapped — tapRouter._simulateClick does NOT work on
+  // bubbles: they have no valid GridPosition, the router rejects them). The
+  // spawn animation is slow (~10s+ in hidden tabs), so we iterate settle
+  // rounds and never tap a bubble twice (double-tap spawns duplicates). The
+  // bubble's own pop trigger destroys it later — do NOT call
+  // _initiateBubblePop directly (its async destroy crashed the game loop).
+  let bubbleTapCtx = null;
+  const tappedBubbles = new Map(); // entity -> tap timestamp (cross-call guard)
+  const TAP_LAG_MS = 90000;
+  function findBubbleTapCtx() {
+    const S = services();
+    if (!S) return false;
+    // walk the shared onBehaviorAdded registries (no FMVUtil dependency —
+    // the helper installs before the menu prepends util.js)
+    let ev = null;
+    try {
+      for (const cell of S.mapGrid._cells.values()) {
+        if (cell && cell.content && cell.content.onBehaviorAdded) { ev = cell.content.onBehaviorAdded; break; }
+      }
+    } catch (e) {}
+    if (!ev) {
+      try {
+        for (const e of (S.world._gameObjects || [])) {
+          if (e.onBehaviorAdded) { ev = e.onBehaviorAdded; break; }
+        }
+      } catch (e2) {}
+    }
+    if (!ev || !ev._subscribers) return false;
+    for (let i = 0; i < ev._subscribers.length; i++) {
+      const reg = ev._subscribers[i].context;
+      if (!reg || !reg.onGameObjectAdded || !reg._filter) continue;
+      let types = null;
+      try { types = reg._filter._behaviorTypes; } catch (e) {}
+      if (!types || !Array.isArray(types)) continue;
+      let sub = null;
+      try { sub = reg.onGameObjectAdded._subscribers[0].context; } catch (e) { continue; }
+      if (!sub) continue;
+      if (types.indexOf('storageBubbleTap') !== -1 && typeof sub._onStorageBubbleTapped === 'function') {
+        bubbleTapCtx = sub;
+        return true;
+      }
+    }
+    return false;
+  }
+  async function collectBubbles() {
     const S = services();
     const I = window.FMV.I();
     if (!S) return { ok: false, reason: 'services not ready' };
-    let router = null;
-    try {
-      const subs = S.interactionService.onGestureTap._subscribers;
-      for (const s of subs || []) {
-        if (s && s.context && typeof s.context._simulateClick === 'function') { router = s.context; break; }
+    const hasTap = findBubbleTapCtx();
+    const scan = () => {
+      const out = [];
+      for (const e of (S.world._gameObjects || [])) {
+        try {
+          if (!e.hasBehavior || !e.hasBehavior(I.StorageBubble)) continue;
+          const content = e.getBehavior(I.StorageBubble).content;
+          if (!content || !content.length) continue;
+          out.push(e);
+        } catch (e2) {}
       }
-    } catch (e) {}
-    if (!router) return { ok: false, reason: 'no tap router' };
-    let tapped = 0;
-    for (const e of (S.world._gameObjects || [])) {
-      try {
-        if (e.hasBehavior && e.hasBehavior(I.StorageBubble)) { router._simulateClick(e); tapped++; }
-      } catch (e2) {}
+      return out;
+    };
+    let tapped = 0, salvaged = 0, salvagedN = 0;
+    // round 0: salvage crate bubbles (direct placement — no tap, no pop)
+    for (const b of scan()) {
+      const sb = b.getBehavior(I.StorageBubble);
+      const crates = (sb.content || []).filter((c) => c && isCrateBp(c.blueprint));
+      if (!crates.length) continue;
+      let n = 0;
+      for (const cell of S.mapGrid._cells.values()) {
+        if (n >= crates.length) break;
+        if (!cell || cell.content) continue;
+        const r = placeCrate(crates[n].blueprint, cell.column, cell.row);
+        if (r.ok) n++;
+      }
+      sb.content = []; // drained — leave the husk, the game cleans it up
+      salvaged++;
+      salvagedN += n;
     }
-    return { ok: true, tapped };
+    // rounds: tap non-crate bubbles via the game's own handler
+    if (hasTap) {
+      for (let round = 0; round < 8; round++) {
+        let done = true;
+        for (const b of scan()) {
+          const last = tappedBubbles.get(b);
+          if (last && Date.now() - last < TAP_LAG_MS) continue; // already tapped, spawn in progress
+          done = false;
+          try {
+            bubbleTapCtx._onStorageBubbleTapped(b);
+            tappedBubbles.set(b, Date.now());
+            tapped++;
+          } catch (e2) {}
+        }
+        if (done) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    if (tappedBubbles.size > 32) {
+      const now = Date.now();
+      for (const [k, t] of tappedBubbles) if (now - t > TAP_LAG_MS * 2) tappedBubbles.delete(k);
+    }
+    const stuck = scan().length;
+    return { ok: true, tapped, salvaged, salvagedN, stuck };
   }
 
   // instantly finish every ACTIVE timer whose label starts with the prefix
@@ -287,19 +437,7 @@ export const FMV_HELPER_SOURCE = `(function(){
     } catch (e) { return { ok: false, reason: e.message }; }
   }
 
-  // rig the crate-open queue: the next N crates open into the given blueprint
-  function rigCrates(blueprint, n) {
-    try {
-      const C = window.FMV.services().crateContent;
-      const bc = window.FMV.rootServices().blueprintCollection;
-      if (!C || typeof C.queueContent !== 'function') return { ok: false, reason: 'crateContent not found' };
-      if (!bc.hasBlueprint(blueprint)) return { ok: false, reason: 'not a blueprint: ' + blueprint };
-      C.queueContent(blueprint, Math.max(1, Math.floor(Number(n) || 1)));
-      return { ok: true, rigged: blueprint + ' x' + n };
-    } catch (e) { return { ok: false, reason: e.message }; }
-  }
-
-  // make the game's fast-forward buttons free (dev flag the game ships with)
+  // instant-finish timers + free fast-forward flag (the game ships a dev flag)
   function freeFastForward(on) {
     try {
       const F = window.FMV.rootServices().fastForward;
@@ -310,6 +448,6 @@ export const FMV_HELPER_SOURCE = `(function(){
   }
 
   window.FMV = { board, merge, move, swap, remove, spawnCrate, services, req, I, root, rootServices,
-                 grant, spawn, collectBubbles, finishTimers, rigCrates, freeFastForward,
-                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.8.0' };
+                 grant, spawn, collectBubbles, finishTimers, freeFastForward,
+                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.9.0' };
 })();`;

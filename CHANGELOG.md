@@ -5,6 +5,62 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — 2026-08-15
+
+### Added
+
+- **Auto Orders toggle with instant production finish**: the Farm-tab toggle
+  now claims + starts orders AND immediately finishes their `Order_*`
+  production timers via the game's own completion path (verified: order
+  state 2 → 3 instantly), so orders complete with no waiting (+5 start →
+  +5 claim in the same cycle). Stops when the board is full or nothing can
+  be claimed/started.
+- **Auto Clear toggle (one-shot fast)**: clears tree/rock/toolbox as fast as
+  possible (cooldowns skipped) until energy out / board full / nothing
+  ready, paced at max 10 payments per turn (`CLEAR_TAP_CAP`).
+- **Toggle UI**: running loops show ■ STOP with a red active state; the two
+  loops exclude each other; labels + grouped rows (Board/Work/Social on
+  Farm, Currency/Speed on Cheat).
+
+### Fixed
+
+- **Bubble collect was completely broken**: `tapRouter._simulateClick`
+  cannot tap storage bubbles (no valid GridPosition — the router rejects
+  them). Collect now uses the game's own `storageBubbleTap` family
+  processor `_onStorageBubbleTapped` with settle rounds and a 90s
+  double-tap guard (double-taps would duplicate the items).
+- **Crate spawn froze the game loop**: crates spawned through the bubble
+  path were added to the world but never placed (moveContentToCell never
+  completes for crates), piling up as broken world objects with Cooldown
+  behaviors — 40+ of them crashed the game's async loop. Crates are now
+  placed DIRECTLY into cells (factory + GridPosition ctor + setContent),
+  and `collectBubbles` salvages leftover crate bubbles by direct placement.
+- **Auto Clear stalled ~20s per batch**: finishing the cooldown timer
+  (`_remaining=0; _onFinish()`) removes the timer but never releases the
+  worker in this build (the cooldown processor finds no entity hook), so
+  the farm's ~6 workers stayed held and every payment blocked. Clear now
+  calls the game's own `gameWorkers.releaseForObject(entity)` right after
+  each payment (releases the worker, clears the tile, marks the source
+  lootable WITH its loot) and deletes stale tile cooldown/workerData +
+  orphan timers directly. Result: 50+ continuous taps per turn instead of
+  6 taps + 20s stalls.
+- **Sources lost their ResourceGate forever**: `_attemptPayment` consumes
+  the gate and the game's re-arm never fires in this build — sources
+  became unpayable ('nothing ready'). Clear now re-adds the gate
+  (`req(__FMV_hcId).sh` ctor, discovered structurally, config from the
+  mapSource steps) after each payment and for any hp>0 gate-less source.
+- **Hidden/blurred tab could freeze the farm**: the game's own visibility
+  listeners can reset its pageVisibility service to hidden (pausing ALL
+  systems); pause_protect now re-applies the repair every 5s.
+- **Direct `_initiateBubblePop` calls removed** (its async destroy crashed
+  the game loop once); the game's own pop trigger handles bubble cleanup.
+
+### Removed
+
+- Gold ×5 / Open Crates cheat buttons (crate spawn/open via the Cheat tab),
+  the Auto tab (Auto Orders + Auto Clear moved to Farm as toggles), and the
+  old autoAll/prefs machinery.
+
 ## [1.8.0] — 2026-08-15
 
 ### Added
