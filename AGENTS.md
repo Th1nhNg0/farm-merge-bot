@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.13.0 (see `CHANGELOG.md`).
+Project version: 1.14.0 (see `CHANGELOG.md`).
 
 ## What this is
 
@@ -18,7 +18,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 | `src/poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt`; prepends the pause-protection patch so fresh game loads are covered |
 | `src/hunter.js` | In-frame module hunter; picks the main runtime and re-discovers root container / farm services / component map / MergeTrigger ctor structurally (no hardcoded ids) |
 | `src/fmv_helper.js` | `window.FMV` v4: `board` / `merge` / `move` / `swap` / `spawnCrate` / `services` / `req` / `I` / `root` / `rootServices` |
-| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Cheat tabs — Farm groups: Board (Merge/Sort/Harvest/Fill), Work (Orders / Auto Orders with instant production finish / Clear / Auto Clear), Social (Visit/½ Gold); Cheat groups: Currency grants + Speed (Finish Regen); toggle loops show ■ STOP; exposes `window.FMV.menu`; prepends `plan.js` + `util.js` sources |
+| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Cheat tabs — Farm groups: Board (Merge/Sort/Harvest/Fill), Work (Orders / Auto Orders with instant production finish / Clear / Auto Clear), Social (Visit/½ Gold); Cheat groups: Currency grants + Market (Flash Deals buy-all, Auto Flash Deals toggle with per-type selection, Tap Bubbles) + Speed (Finish Regen); toggle loops show ■ STOP; exposes `window.FMV.menu`; prepends `plan.js` + `util.js` sources |
 | `src/util.js` | In-frame shared game-access helpers (`window.FMVUtil`): `readBoard` / `tileModel` / `tileAt` / `getTapRouter` / `walkBehaviorRegistries` / `isProductCollectable` / `collectablesOnBoard` / `forEachCell` |
 | `src/install.mjs` | One-shot installer — poller → hunter → FMV → menu, evaluated live in the frame; exports `VERSION` |
 | `src/eval.mjs` | One-off `Runtime.evaluate` in the game frame |

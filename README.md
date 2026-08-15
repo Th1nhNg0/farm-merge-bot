@@ -5,7 +5,7 @@ harvests, sorts, fills, handles orders and clears sources by calling the game's 
 webpack modules directly over the Chrome DevTools Protocol — **no pixel automation, no
 mouse/keyboard simulation**.
 
-Version: 1.13.0 · Discord Activity build (served from `<app-id>.discordsays.com`)
+Version: 1.14.0 · Discord Activity build (served from `<app-id>.discordsays.com`)
 
 > **Disclaimer**: unofficial fan project. Not affiliated with or endorsed by the
 > game's developers or Discord. Automation may violate the game's terms of

@@ -5,6 +5,27 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] — 2026-08-15
+
+### Added
+
+- **Auto Flash Deals toggle** (Cheat tab → Market): a toggle loop that every
+  cycle refreshes the flash deals (re-roll picks + refill stock — the game's
+  own refresh path) and buys the stock of the deal types selected in the menu
+  checkboxes, forever until stopped (■ STOP / header dot, like Auto Orders /
+  Auto Clear; status line shows the cycle count). Because each refresh
+  re-rolls picks and refills renewable stock, the loop keeps buying
+  effectively indefinitely. Mid-run checkbox changes apply on the next cycle.
+- **Per-type deal selection**: six checkboxes (Ingred / Gen / Mat / Chest /
+  Key / Greenhouse) filter which deals the toggle buys — `buyAllMarketplace`
+  now accepts an optional deal-id filter (the one-shot 🛒 Flash Deals button
+  is unchanged: no filter = buy all non-harvest). Keys/chests still go to the
+  board via direct placement, everything else to storage bubbles, currency
+  deficits auto-granted. Defaults mirror the one-shot (all except the
+  harvest-product ingredient pool); the selection persists across reinstalls
+  via `localStorage` (`fmv-market-filter`) and is locked only while a
+  different op runs. Exposed as `window.FMV.menu.autoMarket`.
+
 ## [1.13.0] — 2026-08-15
 
 ### Added

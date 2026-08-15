@@ -9,9 +9,13 @@
 //   [Auto Clear]   toggle loop: clear tree/rock/toolbox as fast as possible
 //                  (cooldowns skipped) until energy out / board full; click
 //                  again (or the dot) to stop
+//   [Auto Flash Deals] toggle loop: every cycle refresh the flash deals +
+//                  buy the stock of the deal types ticked in the Cheat tab
+//                  (ingredient/generator/material/chest/key/greenhouse);
+//                  click again (or the dot) to stop
 //   [Refresh]      update the items/empty/crates status line
 // Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, autoClear,
-//                             stop, status, running }.
+//                             autoMarket, stop, status, running }.
 
 // Shared planner (plan.js) and game-access helpers (util.js) are prepended to
 // the injected source, so the menu IIFE below can use window.FMVPlan (same
@@ -89,6 +93,17 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     };
   };
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null, mode: null };
+  // flash-deal ids, shared by the one-shot buy-all and the auto toggle
+  const FLASH_DEAL_IDS = ['flash_deal_ingredient', 'flash_deal_generator',
+    'flash_deal_material', 'flash_deal_chest', 'flash_deal_key', 'flash_deal_greenhouse'];
+  // which deal types the Auto Flash Deals toggle buys. Defaults mirror the
+  // one-shot: everything except harvest products (ingredient pool = crops +
+  // animal produce — the farm makes them for free). Persisted per install
+  // in localStorage 'fmv-market-filter'.
+  const MARKET_DEAL_DEFAULT = { flash_deal_ingredient: false, flash_deal_generator: true,
+    flash_deal_material: true, flash_deal_chest: true, flash_deal_key: true,
+    flash_deal_greenhouse: true };
+  let marketDealFilter = null;
   const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
     lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
     ordersClaimed: 0, ordersStarted: 0, friendRewards: 0, failed: 0, startedAt: Date.now(),
@@ -896,15 +911,15 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   //    completes for them; 40+ crates froze the game loop once). Everything
   //    else lands in storage bubbles via the game's own delivery; after
   //    buying, all bubbles are collected so the goods land on the grid. If
-  //    gems/coins run short, the deficit is granted.
-  async function buyAllMarketplace() {
+  //    gems/coins run short, the deficit is granted. filterIds (Set of
+  //    flash-deal ids) restricts the purchase to selected deal types — the
+  //    auto toggle passes the menu's checkbox selection; omitted = buy all.
+  async function buyAllMarketplace(filterIds) {
     assertFMV();
     const S = window.FMV.services();
     const R = window.FMV.rootServices();
     const m = S.marketplaceService;
     const fds = m.flashDealsService;
-    const FLASH_DEAL_IDS = ['flash_deal_ingredient', 'flash_deal_generator',
-      'flash_deal_material', 'flash_deal_chest', 'flash_deal_key', 'flash_deal_greenhouse'];
     // reward_crate_* family = keys (reward_crate_key_*) and crates/chests
     // (reward_crate_bronze_gazebo, reward_crate_gold_gazebo ...) — Mergeable
     // board items that must be placed DIRECTLY (never the bubble tap path)
@@ -938,6 +953,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     let bought = 0, failed = 0, granted = 0, skipped = 0, placed = 0;
     for (const id of FLASH_DEAL_IDS) {
       if (state.stop) break;
+      if (filterIds && !filterIds.has(id)) continue; // deselected deal type
       try {
         const entry = fds.getFlashDealItem(id); // real payment/reward for the fresh pick
         if (!entry) { skipped++; continue; }
@@ -1046,6 +1062,38 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       (granted ? ' · +' + granted + ' granted' : '') +
       (skipped ? ' · ' + skipped + ' skipped' : '') + (failed ? ' · ' + failed + ' failed' : ''), bought ? 'ok' : 'warn');
     return { bought: bought, failed: failed, skipped: skipped, granted: granted, placed: placed, bubbles: bub };
+  }
+
+  // ── AUTO FLASH DEALS (toggle): every cycle refreshes the deals (re-roll
+  //    picks + refill stock — the game's own refresh path) and buys the
+  //    stock of the deal types selected in the menu checkboxes. Because the
+  //    refresh re-rolls picks and refills renewable stock each cycle, the
+  //    loop keeps buying effectively forever — the ■ STOP dot / button ends
+  //    it anytime. Mid-run checkbox changes apply on the next cycle.
+  function selectedMarketDealIds() {
+    const f = marketDealFilter || MARKET_DEAL_DEFAULT;
+    const ids = new Set();
+    for (const id of FLASH_DEAL_IDS) if (f[id]) ids.add(id);
+    return ids;
+  }
+  async function runAutoMarketplaceLoop() {
+    if (!selectedMarketDealIds().size) {
+      log('auto market stop: no deal types selected — tick a checkbox first', 'warn');
+      return;
+    }
+    let cycle = 0;
+    while (state.running && !state.stop) {
+      cycle++;
+      state.rounds = cycle;
+      try {
+        await buyAllMarketplace(selectedMarketDealIds());
+      } catch (e) {
+        log('auto market fail: ' + (e && e.message), 'warn');
+      }
+      // breathe between cycles: let the game settle so the delivered goods
+      // (bubbles + board placements) land before the next refresh
+      for (let i = 0; i < 10 && state.running && !state.stop; i++) await sleep(200);
+    }
   }
 
   // ── toggle-loop runner: click starts the loop, click again stops it ─────
@@ -1613,7 +1661,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
 
   // ── UI ───────────────────────────────────────────────────────────────────
   let dot, sortBtn, fillBtn, harvestBtn, planBtn, visitBtn;
-  let autoOrdersBtn, autoClearBtn;
+  let autoOrdersBtn, autoClearBtn, autoMarketBtn;
+  let marketChecks = [];
   let cheatBtns = [];
   // idle status is served from a short-lived cache: the full board read
   // (~1000 cells × neighbor scans) used to run on every 2.5s interval tick
@@ -1680,6 +1729,18 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       autoClearBtn.classList.toggle('stopping', stopping && state.mode === 'clear');
       autoClearBtn.disabled = state.busy || (state.running && state.mode !== 'clear');
     }
+    if (autoMarketBtn) {
+      autoMarketBtn.textContent = state.mode === 'market'
+        ? (stopping ? '■ STOPPING…' : '■ STOP')
+        : '▶ Auto Flash Deals';
+      autoMarketBtn.classList.toggle('on', state.mode === 'market');
+      autoMarketBtn.classList.toggle('stopping', stopping && state.mode === 'market');
+      autoMarketBtn.disabled = state.busy || (state.running && state.mode !== 'market');
+    }
+    // deal-type checkboxes: locked while a DIFFERENT op runs (the market
+    // loop itself re-reads them every cycle, so they stay editable mid-run)
+    const marketLocked = state.busy || (state.running && state.mode !== 'market');
+    for (const cb of marketChecks) cb.disabled = marketLocked;
     sortBtn.disabled = dis;
     fillBtn.disabled = dis;
     harvestBtn.disabled = dis;
@@ -1812,6 +1873,19 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<button id="fmv-buy-all" title="refresh flash deals, buy all non-harvest stock (keys/chests placed on the board; other goods land in storage bubbles)">🛒 Flash Deals</button>'
       + '<button id="fmv-tap-bubbles" title="collect storage bubbles slowly — one tap per 1.5s (tapping many bubbles fast froze the game)">📦 Tap Bubbles</button>'
       + '</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-auto-market" class="toggle" title="toggle: every cycle refresh flash deals + buy the stock of the deal types ticked below (keys/chests placed on the board; other goods land in storage bubbles)">▶ Auto Flash Deals</button>'
+      + '</div>'
+      + '<div class="chkrow">'
+      + '<label class="chkmini" title="crops + animal produce — the farm makes these for free"><input type="checkbox" data-deal="flash_deal_ingredient"><span>Ingred</span></label>'
+      + '<label class="chkmini" title="generators (seed bags, tools, animals…)"><input type="checkbox" data-deal="flash_deal_generator"><span>Gen</span></label>'
+      + '<label class="chkmini" title="materials (wood, stone, building goods…)"><input type="checkbox" data-deal="flash_deal_material"><span>Mat</span></label>'
+      + '</div>'
+      + '<div class="chkrow">'
+      + '<label class="chkmini" title="chests/crates — placed directly on the board"><input type="checkbox" data-deal="flash_deal_chest"><span>Chest</span></label>'
+      + '<label class="chkmini" title="keys — placed directly on the board"><input type="checkbox" data-deal="flash_deal_key"><span>Key</span></label>'
+      + '<label class="chkmini" title="greenhouse goods"><input type="checkbox" data-deal="flash_deal_greenhouse"><span>Greenhouse</span></label>'
+      + '</div>'
       + '<div class="lbl">Speed</div>'
       + '<div class="btns">'
       + '<button id="fmv-cheat-regen" title="instantly finish energy/gems/crates regen timers">⏩ Finish Regen</button>'
@@ -1835,6 +1909,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     });
     autoOrdersBtn = el.querySelector('#fmv-auto-orders');
     autoClearBtn = el.querySelector('#fmv-auto-clear');
+    autoMarketBtn = el.querySelector('#fmv-auto-market');
     sortBtn = el.querySelector('#fmv-sort');
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
@@ -1847,7 +1922,29 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     const cheatRegen = el.querySelector('#fmv-cheat-regen');
     const buyAllBtn = el.querySelector('#fmv-buy-all');
     const tapBubblesBtn = el.querySelector('#fmv-tap-bubbles');
-    cheatBtns = [...el.querySelectorAll('#fmv-pane-cheat button')];
+    // the auto-market toggle is handled like the other toggle loops (stays
+    // clickable while its own loop runs = STOP) — exclude it from the
+    // generic cheat-button lock
+    cheatBtns = [...el.querySelectorAll('#fmv-pane-cheat button')]
+      .filter((b) => b.id !== 'fmv-auto-market');
+    marketChecks = [...el.querySelectorAll('#fmv-pane-cheat .chkmini input[type=checkbox]')];
+    // restore the persisted deal-type selection (defaults on first run)
+    marketDealFilter = { ...MARKET_DEAL_DEFAULT };
+    try {
+      const saved = JSON.parse(localStorage.getItem('fmv-market-filter') || 'null');
+      if (saved && typeof saved === 'object') {
+        for (const id of FLASH_DEAL_IDS) {
+          if (typeof saved[id] === 'boolean') marketDealFilter[id] = saved[id];
+        }
+      }
+    } catch (e) {}
+    for (const cb of marketChecks) {
+      cb.checked = !!marketDealFilter[cb.dataset.deal];
+      cb.addEventListener('change', () => {
+        marketDealFilter[cb.dataset.deal] = cb.checked;
+        try { localStorage.setItem('fmv-market-filter', JSON.stringify(marketDealFilter)); } catch (e) {}
+      });
+    }
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -1922,6 +2019,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     cheatEnergy.addEventListener('click', cheatGrant('energy', 1000));
     cheatCrates.addEventListener('click', cheatGrant('crates', 1000));
     buyAllBtn.addEventListener('click', () => runOp(buyAllMarketplace));
+    autoMarketBtn.addEventListener('click', () => runToggleLoop(runAutoMarketplaceLoop, 'market'));
     tapBubblesBtn.addEventListener('click', () => runOp(async () => {
       try {
         const cb = await window.FMV.collectBubbles();
@@ -1983,6 +2081,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     autoOrders: () => runToggleLoop(runOrdersLoop, 'orders'),
     autoClear: () => runToggleLoop(autoClearFast, 'clear'),
     buyAll: () => runOp(buyAllMarketplace),
+    autoMarket: () => runToggleLoop(runAutoMarketplaceLoop, 'market'),
     visit: () => runOp(collectVisits),
     removeHalfCrates: () => runOp(removeHalfCrates),
     stop: () => {
@@ -1997,10 +2096,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     resetStats: statsReset,
     running: () => state.running,
     busy: () => state.busy || state.running,
-    version: window.__FMV_version || '1.13.0'
+    version: window.__FMV_version || '1.14.0'
   };
   setUI();
-  log('menu v' + (window.__FMV_version || '1.13.0') + ' installed', 'ok');
+  log('menu v' + (window.__FMV_version || '1.14.0') + ' installed', 'ok');
   refreshStatus();
   if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };
