@@ -5,6 +5,26 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-08-15
+
+### Changed
+
+- **Menu restyled (hacker-terminal theme)**: compact dark monospace panel with a
+  single gold accent (`#ffd700`) — flat surfaces, thin borders, minimal color;
+  tabs use a proper underline for the active state; button rows now auto-fit
+  (`repeat(auto-fit, minmax(42px, 1fr))`) so 1- and 2-button rows fill the full
+  width instead of leaving dead space.
+- **Auto Clear pacing**: max 5 payments per cycle (`CLEAR_TAP_CAP` 40 → 5) so
+  clearing no longer lags the game.
+- **Cheat amounts**: Coins +50k → +100k, Energy +200 → +1000, Crates +20 →
+  +1000.
+
+### Removed
+
+- **Analyze feature**: the Analyze tab, session popup, sprite-capture item grid
+  and 2s refresh timer are gone (session counters remain available via
+  `FMV.menu.stats()`).
+
 ## [1.10.0] — 2026-08-15
 
 ### Added

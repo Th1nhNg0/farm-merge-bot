@@ -121,7 +121,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   // means more sources draining per tick window. The cap is adapted to the
   // free cells (each payment drops ~4-6 loot items), so a big wave never
   // floods the board into a premature 'board full' stop.
-  const CLEAR_TAP_CAP = 40;
+  // max payments per clear cycle — 5 at a time keeps the game light
+  const CLEAR_TAP_CAP = 5;
   // consecutive 'board full' cycles before Auto Clear gives up (the pre-sweep
   // frees cells when collectables are on the ground; overflow loot parks in
   // the source's tile record, so the loop can keep clearing through a full
@@ -1540,7 +1541,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   }
 
   // ── UI ───────────────────────────────────────────────────────────────────
-  let dot, sortBtn, fillBtn, harvestBtn, planBtn, analyzeBtn, visitBtn;
+  let dot, sortBtn, fillBtn, harvestBtn, planBtn, visitBtn;
   let autoOrdersBtn, autoClearBtn;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
@@ -1599,112 +1600,69 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     }
     const style = document.createElement('style');
     style.id = 'fmv-menu-style';
-    style.textContent = '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:244px;'
-      + 'background:rgba(13,14,22,.82);color:#d7d7e0;font:10px/1.35 ui-monospace,Consolas,monospace;'
-      + 'border:1px solid rgba(130,150,255,.18);border-radius:9px;box-shadow:0 8px 32px rgba(0,0,0,.55);'
-      + 'user-select:none;overflow:hidden;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);}'
-      + '#fmv-menu .head{display:flex;align-items:center;gap:5px;padding:4px 8px;cursor:move;touch-action:none;'
-      + 'background:linear-gradient(180deg,rgba(255,255,255,.05),transparent);}'
-      + '#fmv-menu .title{font-weight:700;font-size:10.5px;color:#9ad0ff;flex:1;letter-spacing:.3px;}'
-      + '#fmv-menu .fold{color:#7a7a88;font-size:10px;}'
-      + '#fmv-menu .dot{width:6px;height:6px;border-radius:50%;background:#3d3;box-shadow:0 0 6px #3d3;}'
-      + '#fmv-menu .dot.busy{background:#fa0;animation:pulse 1s infinite;}'
-      + '@keyframes pulse{50%{opacity:.35}}'
+    style.textContent = 
+      '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:244px;'
+      + '  background:rgba(9,11,9,.94);color:#b8c4b8;font:10px/1.4 ui-monospace,Consolas,Menlo,monospace;'
+      + '  border:1px solid #1f2a1f;border-radius:6px;user-select:none;overflow:hidden;}'
+      + '#fmv-menu .head{display:flex;align-items:center;gap:6px;padding:5px 8px;cursor:move;touch-action:none;'
+      + '  border-bottom:1px solid #1f2a1f;}'
+      + '#fmv-menu .title{font-weight:700;font-size:10.5px;color:#ffd700;flex:1;letter-spacing:.5px;}'
+      + '#fmv-menu .fold{color:#5a6a5a;font-size:10px;width:14px;height:14px;display:flex;align-items:center;'
+      + '  justify-content:center;border:1px solid transparent;border-radius:3px;cursor:pointer;}'
+      + '#fmv-menu .fold:hover{color:#b8c4b8;border-color:#2a362a;}'
+      + '#fmv-menu .dot{width:6px;height:6px;border-radius:50%;background:#ffd700;}'
+      + '#fmv-menu .dot.busy{background:#ff5a4e;animation:pulse 1s infinite;}'
+      + '@keyframes pulse{50%{opacity:.3}}'
       + '#fmv-menu .body{padding:5px 6px 6px;}'
-      + '#fmv-menu .status{padding:2px 5px;background:rgba(255,255,255,.04);border-radius:5px;'
-      + 'margin-bottom:5px;color:#9a9aa8;font-size:9px;}'
-      + '#fmv-menu .status.err{color:#ff9a9a;}'
-      + '#fmv-menu .btns{display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-bottom:5px;}'
-      + '#fmv-menu .btns > *:only-child{grid-column:1 / -1;}'
+      + '#fmv-menu .status{padding:3px 6px;background:#0c0f0c;border:1px solid #1a221a;border-radius:4px;'
+      + '  margin-bottom:5px;color:#8aa08a;font-size:9px;}'
+      + '#fmv-menu .status.err{color:#ff7a6e;border-color:#3a2018;}'
+      + '#fmv-menu .btns{display:grid;grid-template-columns:repeat(auto-fit,minmax(42px,1fr));gap:3px;margin-bottom:5px;}'
       + '#fmv-menu .btns:last-of-type{margin-bottom:0;}'
-      + '#fmv-menu .tabs{display:flex;gap:10px;margin-bottom:5px;padding:0 2px;'
-      + 'border-bottom:1px solid rgba(130,150,255,.12);}'
-      + '#fmv-menu .tabs button{flex:1;font:inherit;padding:2px 0 4px;border:none;border-radius:0;'
-      + 'background:none;color:#8a8a99;cursor:pointer;transition:color .15s;}'
-      + '#fmv-menu .tabs button:hover:not(:disabled){background:none;color:#b8c8e8;}'
-      + '#fmv-menu .tabs button.on{color:#9ad0ff;box-shadow:inset 0 -2px 0 #9ad0ff;}'
-      + '#fmv-menu button{flex:1;font:inherit;padding:3px 0;border:1px solid rgba(130,150,255,.14);'
-      + 'border-radius:5px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
-      + 'transition:background .15s,transform .05s;}'
-      + '#fmv-menu button.toggle{background:rgba(90,220,140,.06);border-color:rgba(90,220,140,.22);'
-      + 'font-weight:600;}'
-      + '#fmv-menu button.toggle:hover:not(:disabled){background:rgba(90,220,140,.14);}'
-      + '#fmv-menu .lbl{padding:3px 5px 1px;font-size:8.5px;color:#6f6f82;letter-spacing:.6px;text-transform:uppercase;}'
-      + '#fmv-menu button.toggle.on{background:rgba(255,140,120,.14);border-color:rgba(255,140,120,.5);color:#ffd9d0;}'
+      + '#fmv-menu .tabs{display:flex;gap:2px;margin-bottom:5px;border-bottom:1px solid #1f2a1f;}'
+      + '#fmv-menu .tabs button{flex:1;font:inherit;padding:2px 0 4px;border:none;background:none;color:#5f6f5f;'
+      + '  cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;'
+      + '  transition:color .12s,border-color .12s;}'
+      + '#fmv-menu .tabs button:hover:not(:disabled){color:#b8c4b8;}'
+      + '#fmv-menu .tabs button.on{color:#ffd700;border-bottom-color:#ffd700;}'
+      + '#fmv-menu button{flex:1;font:inherit;padding:3px 0;border:1px solid #223022;border-radius:3px;'
+      + '  background:#101410;color:#b8c4b8;cursor:pointer;transition:color .12s,border-color .12s,background .12s;}'
+      + '#fmv-menu button.toggle{color:#ffd700;border-color:#2a4a2a;}'
+      + '#fmv-menu button.toggle:hover:not(:disabled){background:#0f1a0f;}'
+      + '#fmv-menu button.toggle.on{color:#ff5a4e;border-color:#5a2a26;background:#1a0f0e;}'
+      + '#fmv-menu .lbl{padding:3px 4px 1px;font-size:8px;color:#5f6f5f;letter-spacing:1px;text-transform:uppercase;}'
       + '#fmv-menu .chks{display:flex;flex-direction:column;gap:2px;margin-bottom:5px;}'
-      + '#fmv-menu .chk{display:flex;align-items:center;gap:6px;padding:2px 5px;border-radius:5px;'
-      + 'cursor:pointer;color:#c8c8d4;user-select:none;}'
-      + '#fmv-menu .chk:hover{background:rgba(255,255,255,.05);}'
-      + '#fmv-menu .chk input{accent-color:#5adc8c;margin:0;cursor:pointer;}'
+      + '#fmv-menu .chk{display:flex;align-items:center;gap:6px;padding:1px 4px;border-radius:3px;'
+      + '  cursor:pointer;color:#9aab9a;user-select:none;}'
+      + '#fmv-menu .chk:hover{background:#101410;}'
+      + '#fmv-menu .chk input{accent-color:#ffd700;margin:0;cursor:pointer;}'
       + '#fmv-menu .chk input:disabled{cursor:default;opacity:.5;}'
       + '#fmv-menu .chk input:disabled + span{opacity:.5;}'
-      + '#fmv-menu .chkrow{display:flex;align-items:center;gap:8px;padding:1px 5px 4px 23px;}'
-      + '#fmv-menu .chkmini{display:flex;align-items:center;gap:3px;font-size:9px;color:#9a9aa8;'
-      + 'cursor:pointer;user-select:none;}'
-      + '#fmv-menu .chkmini input{accent-color:#5adc8c;margin:0;cursor:pointer;}'
+      + '#fmv-menu .chkrow{display:flex;align-items:center;gap:8px;padding:1px 4px 3px 22px;}'
+      + '#fmv-menu .chkmini{display:flex;align-items:center;gap:3px;font-size:8.5px;color:#7a8a7a;'
+      + '  cursor:pointer;user-select:none;}'
+      + '#fmv-menu .chkmini input{accent-color:#ffd700;margin:0;cursor:pointer;}'
       + '#fmv-menu .chkmini input:disabled{cursor:default;opacity:.5;}'
-      + '#fmv-menu button:hover:not(:disabled){background:rgba(130,150,255,.16);}'
+      + '#fmv-menu button:hover:not(:disabled){border-color:#3a4a3a;color:#d8e4d8;}'
       + '#fmv-menu button:active:not(:disabled){transform:translateY(1px);}'
-      + '#fmv-menu button:disabled{opacity:.4;cursor:default;}'
+      + '#fmv-menu button:disabled{opacity:.35;cursor:default;}'
       + '#fmv-menu .logwrap{position:relative;}'
-      + '#fmv-menu .log{height:16px;overflow:hidden;scrollbar-width:thin;background:rgba(0,0,0,.32);'
-      + 'border:1px solid rgba(255,255,255,.06);border-radius:5px;padding:1px 20px 1px 5px;'
-      + 'font-size:8.5px;line-height:1.3;white-space:pre-wrap;word-break:break-word;margin-top:5px;}'
-      + '#fmv-menu .log.open{height:90px;overflow:auto;padding:2px 20px 2px 5px;}'
+      + '#fmv-menu .log{height:16px;overflow:hidden;scrollbar-width:thin;background:#080a08;'
+      + '  border:1px solid #1a221a;border-radius:4px;padding:1px 18px 1px 5px;font-size:8.5px;line-height:1.35;'
+      + '  white-space:pre-wrap;word-break:break-word;margin-top:5px;}'
+      + '#fmv-menu .log.open{height:96px;overflow:auto;padding:2px 18px 2px 5px;}'
       + '#fmv-menu .log::-webkit-scrollbar{width:6px;}'
-      + '#fmv-menu .log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px;}'
-      + '#fmv-menu #fmv-log-toggle{position:absolute;top:2px;right:2px;width:16px;height:14px;padding:0;'
-      + 'font-size:9px;line-height:1;border-radius:4px;background:rgba(255,255,255,.06);'
-      + 'border:1px solid rgba(130,150,255,.15);color:#8a8a99;cursor:pointer;z-index:2;}'
-      + '#fmv-menu .log.open + #fmv-log-toggle{right:10px;}'
-      + '#fmv-menu #fmv-log-toggle:hover{background:rgba(130,150,255,.22);color:#e8e8f0;}'
-      + '#fmv-menu .l{color:#b8b8c8;}#fmv-menu .l.warn{color:#ffd479;}'
-      + '#fmv-menu .l.ok{color:#7ed67e;}#fmv-menu .l.err{color:#ff8f8f;}'
-      + '#fmv-menu button.on{color:#9ad0ff;border-color:rgba(130,150,255,.35);}'
-      + '#fmv-analyze{position:fixed;top:12px;right:264px;z-index:2147483647;width:700px;'
-      + 'background:rgba(15,17,28,.9);color:#d7d7e0;font:11px/1.5 ui-monospace,Consolas,monospace;'
-      + 'border:1px solid rgba(130,150,255,.22);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);'
-      + 'user-select:none;overflow:hidden;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);}'
-      + '#fmv-analyze .head{display:flex;align-items:center;gap:8px;padding:10px 12px 8px;cursor:move;touch-action:none;'
-      + 'background:linear-gradient(180deg,rgba(130,150,255,.08),transparent);}'
-      + '#fmv-analyze .title{font-weight:700;font-size:13px;color:#9ad0ff;flex:1;letter-spacing:.3px;}'
-      + '#fmv-analyze .sub{color:#6f6f82;font-size:10px;letter-spacing:.4px;}'
-      + '#fmv-analyze .close{flex:none;width:20px;height:20px;padding:0;font-size:12px;line-height:1;'
-      + 'border:1px solid rgba(130,150,255,.18);border-radius:6px;background:rgba(255,255,255,.06);'
-      + 'color:#8a8a99;cursor:pointer;transition:background .15s;}'
-      + '#fmv-analyze .close:hover{background:rgba(130,150,255,.22);color:#e8e8f0;}'
-      + '#fmv-analyze .sec{color:#7c7c92;font-size:9.5px;padding:10px 12px 4px;letter-spacing:1px;text-transform:uppercase;}'
-      + '#fmv-analyze .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:2px 12px 4px;}'
-      + '#fmv-analyze .stat{display:flex;flex-direction:column;gap:2px;background:rgba(255,255,255,.04);'
-      + 'border:1px solid rgba(130,150,255,.1);border-radius:8px;padding:7px 10px;}'
-      + '#fmv-analyze .stat span{color:#8a8a99;font-size:9px;letter-spacing:.5px;text-transform:uppercase;}'
-      + '#fmv-analyze .stat b{color:#eef0ff;font-size:15px;font-weight:700;line-height:1.2;}'
-      + '#fmv-analyze .stat.fail{border-color:rgba(255,120,120,.25);}'
-      + '#fmv-analyze .stat.fail b{color:#ff8f8f;}'
-      + '#fmv-analyze .stat.warn b{color:#ffd479;}'
-      + '#fmv-analyze .row{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 12px;}'
-      + '#fmv-analyze .row .dim{color:#8a8a99;font-size:10px;}'
-      + '#fmv-analyze .tile{position:relative;aspect-ratio:1;display:flex;align-items:center;justify-content:center;'
-      + 'border:1px solid rgba(130,150,255,.12);border-radius:8px;background:rgba(255,255,255,.04);'
-      + 'transition:border-color .15s,background .15s;cursor:pointer;}'
-      + '#fmv-analyze .tile:hover{border-color:rgba(130,150,255,.4);background:rgba(130,150,255,.1);}'
-      + '#fmv-analyze .tile img.px{width:46px;height:46px;object-fit:contain;image-rendering:auto;pointer-events:none;}'
-      + '#fmv-analyze .tile b{position:absolute;right:4px;bottom:3px;font-size:9.5px;font-weight:700;color:#fff;'
-      + 'background:rgba(10,12,20,.8);border-radius:5px;padding:0 4px;line-height:1.6;pointer-events:none;}'
-      + '#fmv-analyze .igrid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:4px 12px 10px;}'
-      + '#fmv-analyze .atabs{display:flex;gap:4px;padding:8px 12px 4px;}'
-      + '#fmv-analyze .atab{flex:1;width:auto;padding:5px 0;font-size:10.5px;border:none;border-radius:7px;'
-      + 'background:rgba(255,255,255,.04);color:#8a8a99;cursor:pointer;transition:background .15s,color .15s;}'
-      + '#fmv-analyze .atab:hover{background:rgba(255,255,255,.08);color:#c8c8d5;}'
-      + '#fmv-analyze .atab.on{background:rgba(130,150,255,.2);color:#cfe3ff;}'
-      + '#fmv-analyze .apane{max-height:400px;overflow:auto;scrollbar-width:thin;padding-bottom:4px;}'
-      + '#fmv-analyze .foot{padding:8px 12px 10px;}'
-      + '#fmv-analyze button{font:inherit;width:100%;padding:6px 0;border:1px solid rgba(130,150,255,.16);'
-      + 'border-radius:8px;background:rgba(255,255,255,.05);color:#e8e8f0;cursor:pointer;'
-      + 'transition:background .15s,transform .05s;}'
-      + '#fmv-analyze button:hover{background:rgba(130,150,255,.16);}'
-      + '#fmv-analyze button:active{transform:translateY(1px);}'
+      + '#fmv-menu .log::-webkit-scrollbar-thumb{background:#223022;border-radius:3px;}'
+      + '#fmv-menu #fmv-log-toggle{position:absolute;top:1px;right:1px;width:16px;height:13px;padding:0;'
+      + '  font-size:9px;line-height:1;border:1px solid #223022;border-radius:3px;background:#101410;'
+      + '  color:#5f6f5f;cursor:pointer;z-index:2;}'
+      + '#fmv-menu #fmv-log-toggle:hover{color:#ffd700;}'
+      + '#fmv-menu .l{color:#9aa89a;}#fmv-menu .l.warn{color:#d8c46a;}'
+      + '#fmv-menu .l.ok{color:#ffd700;}#fmv-menu .l.err{color:#ff6a5e;}'
+      + '#fmv-menu button.on{color:#ffd700;border-color:#2a4a2a;}'
       + '#input-field{display:none !important;}';
+
+
     document.head.appendChild(style);
 
     const el = document.createElement('div');
@@ -1716,7 +1674,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<div class="tabs">'
       + '<button id="fmv-tab-farm" class="tab on">Farm</button>'
       + '<button id="fmv-tab-cheat" class="tab">Cheat</button>'
-      + '<button id="fmv-tab-analyze" class="tab">Analyze</button>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-farm">'
       + '<div class="lbl">Board</div>'
@@ -1739,10 +1696,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<div class="tabpane" id="fmv-pane-cheat" style="display:none">'
       + '<div class="lbl">Currency</div>'
       + '<div class="btns">'
-      + '<button id="fmv-cheat-coins">💰 Coins +50k</button>'
+      + '<button id="fmv-cheat-coins">💰 Coins +100k</button>'
       + '<button id="fmv-cheat-gems">💎 Gems +1k</button>'
-      + '<button id="fmv-cheat-energy">⚡ Energy +200</button>'
-      + '<button id="fmv-cheat-crates">📦 Crates +20</button>'
+      + '<button id="fmv-cheat-energy">⚡ Energy +1000</button>'
+      + '<button id="fmv-cheat-crates">📦 Crates +1000</button>'
       + '</div>'
       + '<div class="lbl">Market</div>'
       + '<div class="btns">'
@@ -1761,134 +1718,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '</div>';
     document.body.appendChild(el);
 
-    const oldPopup = document.getElementById('fmv-analyze');
-    if (oldPopup) oldPopup.remove();
-    if (window.__FMV_analyzeTimer) { clearInterval(window.__FMV_analyzeTimer); window.__FMV_analyzeTimer = null; }
-    const popup = document.createElement('div');
-    popup.id = 'fmv-analyze';
-    popup.style.display = 'none';
-    popup.innerHTML = '<div class="head"><span class="title">Analysis</span><span class="sub">session</span><button class="close" title="close">×</button></div>'
-      + '<div class="atabs">'
-      + '<button class="atab on" data-at="summary">Summary</button>'
-      + '<button class="atab" data-at="items">Items</button>'
-      + '</div>'
-      + '<div class="apane" data-ap="summary">'
-      + '<div class="sec">Production</div>'
-      + '<div class="stats">'
-      + '<div class="stat"><span>merges</span><b data-k="merged">0</b></div>'
-      + '<div class="stat"><span>moves</span><b data-k="moved">0</b></div>'
-      + '<div class="stat"><span>swaps</span><b data-k="swapped">0</b></div>'
-      + '<div class="stat"><span>crates</span><b data-k="crates">0</b></div>'
-      + '<div class="stat"><span>harvests</span><b data-k="harvested">0</b></div>'
-      + '<div class="stat"><span>loot picked</span><b data-k="lootCollected">0</b></div>'
-      + '<div class="stat"><span>ground picked</span><b data-k="groundCollected">0</b></div>'
-      + '<div class="stat"><span>visits</span><b data-k="friendRewards">0</b></div>'
-      + '</div>'
-      + '<div class="sec">Orders</div>'
-      + '<div class="stats">'
-      + '<div class="stat"><span>claimed</span><b data-k="ordersClaimed">0</b></div>'
-      + '<div class="stat"><span>started</span><b data-k="ordersStarted">0</b></div>'
-      + '</div>'
-      + '<div class="sec">Clear</div>'
-      + '<div class="stats">'
-      + '<div class="stat"><span>sources</span><b data-k="sourcesCleared">0</b></div>'
-      + '<div class="stat"><span>energy spent</span><b data-k="energySpent">0</b></div>'
-      + '</div>'
-      + '<div class="sec">Misc</div>'
-      + '<div class="stats">'
-      + '<div class="stat fail"><span>failures</span><b data-k="failed">0</b></div>'
-      + '<div class="stat"><span>elapsed</span><b data-k="elapsed">0s</b></div>'
-      + '</div>'
-      + '</div>'
-      + '<div class="apane" data-ap="items" style="display:none">'
-      + '<div class="sec">Merges by item</div>'
-      + '<div id="fmv-an-mrg" class="igrid"></div>'
-      + '</div>'
-      + '<div class="foot"><button id="fmv-analyze-reset">Reset</button></div>';
-    document.body.appendChild(popup);
-    const spriteUrlCache = new Map();
-    const spriteURL = (k) => {
-      if (spriteUrlCache.has(k)) return spriteUrlCache.get(k);
-      let url = null;
-      try {
-        const tex = stats.mergedBy[k] && stats.mergedBy[k].tex;
-        if (tex && tex.baseTexture && tex.baseTexture.resource && tex._frame) {
-          const res = tex.baseTexture.resolution || 1;
-          const f = tex._frame;
-          const src = tex.baseTexture.resource.source;
-          const cv = document.createElement('canvas');
-          cv.width = Math.max(1, Math.round(f.width * res));
-          cv.height = Math.max(1, Math.round(f.height * res));
-          const ctx = cv.getContext('2d');
-          ctx.drawImage(src, f.x * res, f.y * res, f.width * res, f.height * res, 0, 0, cv.width, cv.height);
-          url = cv.toDataURL();
-        }
-      } catch (e2) {}
-      spriteUrlCache.set(k, url);
-      return url;
-    };
-    const renderItemList = (el, map) => {
-      const entries = Object.entries(map).sort((a, b) => b[1].n - a[1].n);
-      if (!entries.length) {
-        el.innerHTML = '<div class="row"><span class="dim">— none yet —</span></div>';
-        return;
-      }
-      el.innerHTML = entries.map(([k, v]) => {
-        const url = spriteURL(k);
-        const img = url ? '<img class="px" src="' + url + '" alt="' + k + '">' : '';
-        return '<div class="tile" title="' + k + '">' + img + '<b>' + v.n + '</b></div>';
-      }).join('');
-    };
-    const analyzeTick = () => {
-      if (popup.style.display === 'none') return;
-      for (const b of popup.querySelectorAll('b[data-k]')) {
-        const k = b.getAttribute('data-k');
-        if (k === 'elapsed') {
-          const s = Math.floor((Date.now() - stats.startedAt) / 1000);
-          b.textContent = Math.floor(s / 60) + ':' + ((s % 60) < 10 ? '0' : '') + (s % 60);
-        } else {
-          b.textContent = stats[k];
-        }
-      }
-      renderItemList(popup.querySelector('#fmv-an-mrg'), stats.mergedBy);
-    };
-    window.__FMV_analyzeTimer = setInterval(analyzeTick, 2000);
-    popup.querySelectorAll('.atab').forEach((t) => t.addEventListener('click', () => {
-      popup.querySelectorAll('.atab').forEach((x) => x.classList.toggle('on', x === t));
-      popup.querySelectorAll('.apane').forEach((p) => { p.style.display = p.getAttribute('data-ap') === t.getAttribute('data-at') ? '' : 'none'; });
-    }));
-    const closePopup = () => {
-      popup.style.display = 'none';
-      if (analyzeBtn) analyzeBtn.classList.remove('on');
-    };
-    const popupHead = popup.querySelector('.head');
-    const popupClose = popup.querySelector('.close');
-    popupClose.addEventListener('pointerdown', (e) => e.stopPropagation());
-    popupClose.addEventListener('click', closePopup);
-    popup.querySelector('#fmv-analyze-reset').addEventListener('click', () => { statsReset(); spriteUrlCache.clear(); analyzeTick(); });
-    let popupDrag = false;
-    popupHead.addEventListener('pointerdown', (e) => {
-      popupDrag = true;
-      const r = popup.getBoundingClientRect();
-      popup.style.left = r.left + 'px';
-      popup.style.top = r.top + 'px';
-      popup.style.right = 'auto';
-      popup.__offX = e.clientX - r.left;
-      popup.__offY = e.clientY - r.top;
-      try { popupHead.setPointerCapture(e.pointerId); } catch (e2) {}
-    });
-    popupHead.addEventListener('pointermove', (e) => {
-      if (!popupDrag) return;
-      e.preventDefault();
-      popup.style.left = (e.clientX - popup.__offX) + 'px';
-      popup.style.top = (e.clientY - popup.__offY) + 'px';
-    });
-    const endPopupDrag = (e) => {
-      popupDrag = false;
-      try { popupHead.releasePointerCapture(e.pointerId); } catch (e2) {}
-    };
-    popupHead.addEventListener('pointerup', endPopupDrag);
-    popupHead.addEventListener('pointercancel', endPopupDrag);
 
     dot = el.querySelector('.dot');
     dot.title = 'stop current op';
@@ -1904,7 +1733,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
     planBtn = el.querySelector('#fmv-plan');
-    analyzeBtn = el.querySelector('#fmv-tab-analyze');
     visitBtn = el.querySelector('#fmv-visit');
     const cheatCoins = el.querySelector('#fmv-cheat-coins');
     const cheatGems = el.querySelector('#fmv-cheat-gems');
@@ -1955,10 +1783,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       const r = await window.FMV.grant([{ key: key, amount: amount }]);
       log('cheat ' + key + ': ' + (r.ok ? 'granted +' + amount : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
     });
-    cheatCoins.addEventListener('click', cheatGrant('coins', 50000));
+    cheatCoins.addEventListener('click', cheatGrant('coins', 100000));
     cheatGems.addEventListener('click', cheatGrant('gems', 1000));
-    cheatEnergy.addEventListener('click', cheatGrant('energy', 200));
-    cheatCrates.addEventListener('click', cheatGrant('crates', 20));
+    cheatEnergy.addEventListener('click', cheatGrant('energy', 1000));
+    cheatCrates.addEventListener('click', cheatGrant('crates', 1000));
     buyAllBtn.addEventListener('click', () => runOp(buyAllMarketplace));
     tapBubblesBtn.addEventListener('click', () => runOp(async () => {
       try {
@@ -1977,12 +1805,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     visitBtn.addEventListener('click', () => runOp(collectVisits));
     harvestBtn.addEventListener('click', () => runOp(harvestAll));
     planBtn.addEventListener('click', () => runOp(phasePlanMerge));
-    analyzeBtn.addEventListener('click', () => {
-      const open = popup.style.display !== 'none';
-      popup.style.display = open ? 'none' : '';
-      analyzeBtn.classList.toggle('on', !open);
-      analyzeTick();
-    });
     const logToggle = el.querySelector('#fmv-log-toggle');
     logToggle.addEventListener('click', () => {
       const open = logEl.current.classList.toggle('open');
