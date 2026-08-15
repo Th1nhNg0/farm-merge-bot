@@ -2,7 +2,7 @@
 
 Guide for AI agents and maintainers working on this codebase.
 
-Project version: 1.7.3 (see `CHANGELOG.md`).
+Project version: 1.8.0 (see `CHANGELOG.md`).
 
 ## What this is
 
@@ -18,7 +18,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 | `src/poller.js` | In-frame poller; captures every webpack runtime require into `window.__FMV_rt`; prepends the pause-protection patch so fresh game loads are covered |
 | `src/hunter.js` | In-frame module hunter; picks the main runtime and re-discovers root container / farm services / component map / MergeTrigger ctor structurally (no hardcoded ids) |
 | `src/fmv_helper.js` | `window.FMV` v4: `board` / `merge` / `move` / `swap` / `spawnCrate` / `services` / `req` / `I` / `root` / `rootServices` |
-| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Auto tabs — Sort / Fill / Harvest / Plan+Merge / Orders (Farm) and Auto Orders / Auto Clear toggles (Auto) + log panel; exposes `window.FMV.menu`; prepends `plan.js` + `util.js` sources |
+| `src/menu.js` | In-game FMV Bot overlay (top-right): Farm/Auto/Cheat tabs — Sort / Fill / Harvest / Plan+Merge / Orders / Clear (Farm), Auto Orders (Auto), exploit buttons (Cheat) + log panel; exposes `window.FMV.menu`; prepends `plan.js` + `util.js` sources |
 | `src/util.js` | In-frame shared game-access helpers (`window.FMVUtil`): `readBoard` / `tileModel` / `tileAt` / `getTapRouter` / `walkBehaviorRegistries` / `isProductCollectable` / `collectablesOnBoard` / `forEachCell` |
 | `src/install.mjs` | One-shot installer — poller → hunter → FMV → menu, evaluated live in the frame; exports `VERSION` |
 | `src/eval.mjs` | One-off `Runtime.evaluate` in the game frame |
@@ -29,6 +29,42 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
 | `CHANGELOG.md` | Version history |
 
 ## Key facts (Discord build, verified 2026-08-06)
+
+## Exploit surfaces (verified live 2026-08-15, client-authoritative backend)
+
+- **Currency print**: `rewardService._parseAndClaimRewards([{key,amount},...])`
+  (farm service `window.FMV.services().rewardService`) grants inventory
+  currency and calls `autosave.forceSave()`. Verified keys: `coins`, `gems`,
+  `energy`, `crates`, `wood`, `stone`. Grants persist through game restarts
+  (server stores the client's save as-is). Wrapped as `FMV.grant(rewards)`.
+- **Object spawn**: `rewardService._claimObjectRewards([{key,amount},...])`
+  creates a storage bubble (world entity, `id='__UNIQUE__'`, NOT a grid cell)
+  via `storageBubble.createBubble`; blueprint keys verified: `reward_crate_gold`,
+  `reward_crate_gold_gazebo`, `cow_1..3`, `wood_1`, `stone_1`, `coin_1`,
+  `gem_1`, `energy_1`, `ticket`. Bubbles are SAVED (`StorageBubbleModel`) and
+  restored on reload; collecting = the `storageBubbleTap` family (tap router
+  `_simulateClick` on the entity — queues while tab hidden; the
+  `storageBubbleShowContent` trigger behavior does NOT auto-fire). Wrapped as
+  `FMV.spawn` / `FMV.collectBubbles`.
+- **Crate content rig**: `crateContent.queueContent(blueprint, n)` pushes onto
+  `CrateContentModel._queue` (persisted); the next crate open pops it. Wrapped
+  as `FMV.rigCrates`. Note: RewardCrateCooldown timer finish does NOT pop the
+  queue in this build (crate entities have no `Cooldown` behavior — the open
+  hook is elsewhere, unresolved).
+- **Free fast-forward**: `rootServices().fastForward.setFreeTrackerStatus(true)`
+  sets `_alwaysReturnFreeTracker` — all fast-forward buttons free (session
+  flag only). Wrapped as `FMV.freeFastForward`.
+- **Timer finishing**: `timer._timerModel._timers` entries with `_state==='ACTIVE'`
+  → `_remaining=0; _onFinish()` fires the game's own completion path. Labels:
+  `RewardCrateCooldown` (3-day crates), `Order_*` (productions), `regenerate_*`
+  (energy/gems/crates), `Cooldown:col,row` (source chops, used by Clear).
+  Wrapped as `FMV.finishTimers(labelPrefix)`.
+- **Misc**: `cheats.allowSave` defaults true; `gameObjectFactory` has
+  `createById/createFromBlueprint/createFromSerializedData` (no grid-placement
+  helper — placement must reuse the move/swap machinery); storage slots are
+  serialized `{data, blueprint}` (removeFromStorage does NOT spawn);
+  `detachedObjects` model `_store` is empty in normal play; `IAP` service
+  exists but is off-limits (real money).
 
 - Build is heavily obfuscated: runtime requires are `_0x552fd9`/`_0x34ae8b`; string
   literals and some property names are mangled. Everything is discovered
@@ -43,7 +79,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   `getObjectIdAndTier()`, `getBlueprintID()`, `hasBehavior(I.Mergeable)`,
   `getBehavior(I.Mergeable)`.
 - Crate spawn event: `rootServices().hudServiceRegistry._activeService._commonEvents.spawnCrates`.
-- **Source tap machinery** (Auto Clear uses this, no click simulation): every
+- **Source tap machinery** (Clear button uses this, no click simulation): every
   entity's `onBehaviorAdded` is a shared event with ~177 behavior-family
   registries; each registry (`_filter._behaviorTypes`) exposes
   `onGameObjectAdded._subscribers[0].context`. The resource-gate payment
@@ -59,7 +95,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   _timerModel._timers` (Map keyed by timerId; entries have `_state`,
   `_remaining`, `_onFinish` — the game's own completion path) plus a worker
   hold (tile `workerData`). The source is only `lootable` when the timer
-  expires (worker released). Auto Clear skips the wait by setting
+  expires (worker released). Clear skips the wait by setting
   `_remaining = 0` and calling `_onFinish()` — the tile cooldown entry is
   then cleared by the game itself. Between payment and the timer's
   materialization (async, next game tick) the tile has `workerData` without
@@ -73,7 +109,7 @@ logic runs IN-FRAME by calling the game's own webpack modules — no pixel autom
   cells) then tap those Collectables to pick them up. The Harvest button does
   all three in iterative rounds (the ~1 fps background loop needs settle time).
 - **Game pauses while the tab is hidden** (`document.visibilityState`): taps
-  queue in the entity `_behaviorQueue` and all fire on refocus — Auto Clear
+  queue in the entity `_behaviorQueue` and all fire on refocus — Clear
   refuses to tap while hidden. The pause-protection patch (`pause_protect.js`,
   installed first by install.mjs and embedded in the poller) fakes the
   visibility state and bridges `requestAnimationFrame` with a timer watchdog,

@@ -4,14 +4,12 @@
 //   [Merge]        plan ALL groups (natural 5/10/15 + move/swap grouping)
 //                  from one snapshot, then execute them in one batched pass
 //   [Orders]       claim completed orders, then start every affordable order
-//   Auto tab: checkboxes select which automations run — [Auto Orders] claim +
+//   Auto tab: checkbox selects which automation runs — [Auto Orders] claim +
 //                  start affordable orders in a loop (plan+merge when the board
-//                  fills up), [Auto Clear] spend energy clearing tree/rock/
-//                  toolbox via the game's own payment/collect tap functions —
-//                  and [Auto All] starts every checked loop in parallel.
+//                  fills up) — and [Auto All] starts the checked loop.
 //   [Refresh]      update the items/empty/crates status line
-// Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, autoClear,
-//                             autoAll, stop, status, running }.
+// Exposes window.FMV.menu = { orders, fill, planMerge, autoOrders, autoAll,
+//                             stop, status, running }.
 
 // Shared planner (plan.js) and game-access helpers (util.js) are prepended to
 // the injected source, so the menu IIFE below can use window.FMVPlan (same
@@ -92,7 +90,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   const MAX_FILL_ROUNDS = 40;
   const MAX_PLAN_ROUNDS = 60;
   const ORDERS_WAIT_MS = 5000;
-  const CLEAR_WAIT_MS = 4000;
   const CLEAR_SOURCES = new Set(['tree', 'rock', 'toolbox']);
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
@@ -645,27 +642,19 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     return true;
   }
 
-  // ── Auto All: runs every SELECTED automation loop in parallel. The checkboxes
-  //    on the Auto tab choose which loops the master button starts; each loop
-  //    stops on its own (clear: energy out etc.) or on the shared STOP.
-  const prefs = { orders: true, clear: true, clearTree: true, clearRock: true, clearToolbox: true };
+  // ── Auto All: runs every SELECTED automation loop in parallel. The
+  //    checkbox on the Auto tab chooses which loop the master button starts;
+  //    the loop stops on the shared STOP.
+  const prefs = { orders: true };
   try {
     const p = window.__FMV_prefs;
     if (p && typeof p === 'object') {
       prefs.orders = p.orders !== false;
-      prefs.clear = p.clear !== false;
-      prefs.clearTree = p.clearTree !== false;
-      prefs.clearRock = p.clearRock !== false;
-      prefs.clearToolbox = p.clearToolbox !== false;
     }
   } catch (e) {}
   function savePrefs() {
     try {
-      window.__FMV_prefs = {
-        orders: !!prefs.orders, clear: !!prefs.clear,
-        clearTree: !!prefs.clearTree, clearRock: !!prefs.clearRock,
-        clearToolbox: !!prefs.clearToolbox
-      };
+      window.__FMV_prefs = { orders: !!prefs.orders };
     } catch (e) {}
   }
 
@@ -683,73 +672,11 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     }
   }
 
-  // ── auto-clear loop body: one pass per cycle. Transient blockers (energy
-  //    out, no free workers — both recover over time) only pause the loop;
-  //    it waits and retries until energy regenerates / workers free up.
-  //    Permanent blockers (board full, nothing ready) auto-off.
-  async function runClearLoop() {
-    let cycle = 0;
-    let waiting = false;
-    let idleWaits = 0;
-    let svcRetries = 0;
-    while (state.running && !state.stop) {
-      cycle++;
-      log('clear cyc ' + cycle, 'ok');
-      const reason = await clearOnce();
-      if (reason === 'not focused' || reason === 'no tap services' || reason === 'no router') {
-        // game paused (background tab) or tap services mid-rebuild — wait and
-        // retry. Service absence gets a cap: if the game updated and the tap
-        // services never come back, auto-off instead of retrying forever
-        // ('not focused' never caps — under pause_protect it is unreachable).
-        waiting = false;
-        if (reason !== 'not focused' && ++svcRetries >= 60) {
-          log('clear stop: tap services unavailable for a while', 'warn');
-          break;
-        }
-        await sleep(1000);
-        continue;
-      }
-      svcRetries = 0;
-      if (reason === 'energy out' || reason === 'collected only' || reason === 'no free workers' ||
-          reason === 'nothing ready') {
-        // transient blockers recover over time: energy regenerates, workers free
-        // up, sources regrow. 'nothing ready' gets a stall cap so a map without
-        // any selected source type eventually auto-offs instead of waiting forever.
-        if (reason === 'nothing ready' && ++idleWaits >= 8) {
-          log('clear stop: nothing ready for a while', 'warn');
-          break;
-        }
-        if (reason !== 'nothing ready') idleWaits = 0;
-        if (!waiting) log('clear: ' + reason + ' — waiting', 'warn');
-        waiting = true;
-        const deadline = Date.now() + CLEAR_WAIT_MS * 3;
-        while (!state.stop && Date.now() < deadline) await sleep(1000);
-        continue;
-      }
-      waiting = false;
-      idleWaits = 0;
-      if (reason) {
-        log('clear stop: ' + reason, 'warn');
-        break;
-      }
-      const wait = await adaptSettle(SETTLE_MIN, SETTLE_MAX) * 4;
-      const deadline = Date.now() + Math.min(CLEAR_WAIT_MS, Math.max(1000, wait));
-      while (!state.stop && Date.now() < deadline) await sleep(250);
-    }
-  }
-
   async function autoAll() {
     if (state.running) { requestStop(); return; }
     if (state.busy) return;
     const selected = [];
     if (prefs.orders) selected.push(runOrdersLoop);
-    if (prefs.clear) {
-      if (!prefs.clearTree && !prefs.clearRock && !prefs.clearToolbox) {
-        log('clear: no source types selected — tick Tree/Rock/Toolbox', 'warn');
-      } else {
-        selected.push(runClearLoop);
-      }
-    }
     if (!selected.length) { log('no automation selected — tick the boxes', 'warn'); return; }
     state.running = true;
     state.mode = 'auto-all';
@@ -840,9 +767,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         const e = cell.content;
         let id = null;
         try { id = e.getObjectIdAndTier().id; } catch (e2) {}
-        if (!id || !(prefs.clearTree && id === 'tree' ||
-                     prefs.clearRock && id === 'rock' ||
-                     prefs.clearToolbox && id === 'toolbox')) continue;
+        if (!id || !CLEAR_SOURCES.has(id)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (!hp || typeof hp.current !== 'number' || hp.current <= 0) continue;
         let tile = null;
@@ -1179,7 +1104,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
 
   // ── UI ───────────────────────────────────────────────────────────────────
   let dot, autoBtn, sortBtn, fillBtn, harvestBtn, planBtn, orderBtn, analyzeBtn, clearBtn, visitBtn, halfCratesBtn;
-  let chkOrders, chkClear, chkTree, chkRock, chkToolbox, clearTypesRow;
+  let chkOrders;
   function refreshStatus() {
     const el = document.getElementById('fmv-status');
     if (!el) return;
@@ -1208,10 +1133,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     const dis = state.busy || state.running;
     autoBtn.disabled = dis && state.mode !== 'auto-all';
     if (chkOrders) chkOrders.disabled = dis;
-    if (chkClear) chkClear.disabled = dis;
-    if (chkTree) chkTree.disabled = dis;
-    if (chkRock) chkRock.disabled = dis;
-    if (chkToolbox) chkToolbox.disabled = dis;
     sortBtn.disabled = dis;
     fillBtn.disabled = dis;
     harvestBtn.disabled = dis;
@@ -1219,6 +1140,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     orderBtn.disabled = dis;
     if (clearBtn) clearBtn.disabled = dis;
     if (visitBtn) visitBtn.disabled = dis;
+    for (const b of document.querySelectorAll('#fmv-pane-cheat button')) b.disabled = dis;
   }
 
   function buildUI() {
@@ -1349,6 +1271,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<div class="tabs">'
       + '<button id="fmv-tab-farm" class="tab on">Farm</button>'
       + '<button id="fmv-tab-auto" class="tab">Auto</button>'
+      + '<button id="fmv-tab-cheat" class="tab">Cheat</button>'
       + '<button id="fmv-tab-analyze" class="tab">Analyze</button>'
       + '</div>'
       + '<div class="tabpane" id="fmv-pane-farm">'
@@ -1368,15 +1291,27 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '<div class="tabpane" id="fmv-pane-auto" style="display:none">'
       + '<div class="chks">'
       + '<label class="chk" title="claim + start orders in a loop"><input type="checkbox" id="fmv-chk-orders"' + (prefs.orders ? ' checked' : '') + '><span>Auto Orders</span></label>'
-      + '<label class="chk" title="spend energy clearing sources"><input type="checkbox" id="fmv-chk-clear"' + (prefs.clear ? ' checked' : '') + '><span>Auto Clear</span></label>'
-      + '</div>'
-      + '<div class="chkrow" id="fmv-clear-types"' + (prefs.clear ? '' : ' style="display:none"') + '>'
-      + '<label class="chkmini"><input type="checkbox" id="fmv-chk-tree"' + (prefs.clearTree ? ' checked' : '') + '><span>Tree</span></label>'
-      + '<label class="chkmini"><input type="checkbox" id="fmv-chk-rock"' + (prefs.clearRock ? ' checked' : '') + '><span>Rock</span></label>'
-      + '<label class="chkmini"><input type="checkbox" id="fmv-chk-toolbox"' + (prefs.clearToolbox ? ' checked' : '') + '><span>Toolbox</span></label>'
       + '</div>'
       + '<div class="btns">'
       + '<button id="fmv-auto-all" class="toggle">▶ Auto All</button>'
+      + '</div>'
+      + '</div>'
+      + '<div class="tabpane" id="fmv-pane-cheat" style="display:none">'
+      + '<div class="btns">'
+      + '<button id="fmv-cheat-coins">💰 Coins +50k</button>'
+      + '<button id="fmv-cheat-gems">💎 Gems +1k</button>'
+      + '<button id="fmv-cheat-energy">⚡ Energy +200</button>'
+      + '<button id="fmv-cheat-crates">📦 Crates +20</button>'
+      + '</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-cheat-gold" title="spawn 5 gold reward crates as bubbles">★ Gold ×5</button>'
+      + '<button id="fmv-cheat-rig" title="queue the next 3 crates to open into gold crates">🎲 Rig Gold ×3</button>'
+      + '<button id="fmv-cheat-open" title="instantly finish every crate-opening timer">⏩ Open Crates</button>'
+      + '<button id="fmv-cheat-ff" title="make fast-forward buttons free (session flag)">⚡ FF Free</button>'
+      + '</div>'
+      + '<div class="btns">'
+      + '<button id="fmv-cheat-prod" title="instantly finish production/order timers">⏩ Finish Prod</button>'
+      + '<button id="fmv-cheat-regen" title="instantly finish energy/gems/crates regen timers">⏩ Finish Regen</button>'
       + '</div>'
       + '</div>'
       + '<div class="logwrap">'
@@ -1521,11 +1456,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     dot.addEventListener('click', () => { if (window.FMV && window.FMV.menu) window.FMV.menu.stop(); });
     autoBtn = el.querySelector('#fmv-auto-all');
     chkOrders = el.querySelector('#fmv-chk-orders');
-    chkClear = el.querySelector('#fmv-chk-clear');
-    chkTree = el.querySelector('#fmv-chk-tree');
-    chkRock = el.querySelector('#fmv-chk-rock');
-    chkToolbox = el.querySelector('#fmv-chk-toolbox');
-    clearTypesRow = el.querySelector('#fmv-clear-types');
     sortBtn = el.querySelector('#fmv-sort');
     fillBtn = el.querySelector('#fmv-fill');
     harvestBtn = el.querySelector('#fmv-harvest');
@@ -1535,6 +1465,16 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     clearBtn = el.querySelector('#fmv-clear-once');
     visitBtn = el.querySelector('#fmv-visit');
     halfCratesBtn = el.querySelector('#fmv-half-crates');
+    const cheatCoins = el.querySelector('#fmv-cheat-coins');
+    const cheatGems = el.querySelector('#fmv-cheat-gems');
+    const cheatEnergy = el.querySelector('#fmv-cheat-energy');
+    const cheatCrates = el.querySelector('#fmv-cheat-crates');
+    const cheatGold = el.querySelector('#fmv-cheat-gold');
+    const cheatRig = el.querySelector('#fmv-cheat-rig');
+    const cheatOpen = el.querySelector('#fmv-cheat-open');
+    const cheatFF = el.querySelector('#fmv-cheat-ff');
+    const cheatProd = el.querySelector('#fmv-cheat-prod');
+    const cheatRegen = el.querySelector('#fmv-cheat-regen');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
     const fold = el.querySelector('.fold');
@@ -1572,6 +1512,42 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       fold.textContent = body.style.display === 'none' ? '+' : '-';
     });
     autoBtn.addEventListener('click', autoAll);
+    const cheatGrant = (key, amount) => () => runOp(async () => {
+      const r = await window.FMV.grant([{ key: key, amount: amount }]);
+      log('cheat ' + key + ': ' + (r.ok ? 'granted +' + amount : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
+    });
+    cheatCoins.addEventListener('click', cheatGrant('coins', 50000));
+    cheatGems.addEventListener('click', cheatGrant('gems', 1000));
+    cheatEnergy.addEventListener('click', cheatGrant('energy', 200));
+    cheatCrates.addEventListener('click', cheatGrant('crates', 20));
+    cheatGold.addEventListener('click', () => runOp(async () => {
+      const r = window.FMV.spawn([{ key: 'reward_crate_gold', amount: 5 }]);
+      if (r.ok) {
+        log('spawned gold bubbles x5 — collecting…', 'ok');
+        const c = window.FMV.collectBubbles();
+        log('bubble collect: ' + (c.tapped ? c.tapped + ' tapped' : c.reason), c.ok ? 'ok' : 'warn');
+      } else log('spawn FAIL: ' + r.reason, 'warn');
+    }));
+    cheatRig.addEventListener('click', () => runOp(() => {
+      const r = window.FMV.rigCrates('reward_crate_gold', 3);
+      log('rig: ' + (r.ok ? 'next crates open into gold x3' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
+    }));
+    cheatOpen.addEventListener('click', () => runOp(() => {
+      const r = window.FMV.finishTimers('RewardCrateCooldown');
+      log('crates: ' + (r.ok ? 'finished ' + r.finished + ' open-timers' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
+    }));
+    cheatFF.addEventListener('click', () => runOp(() => {
+      const r = window.FMV.freeFastForward(true);
+      log('FF: ' + (r.ok ? 'fast-forward now free (session)' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
+    }));
+    cheatProd.addEventListener('click', () => runOp(() => {
+      const r = window.FMV.finishTimers('Order_');
+      log('prod: ' + (r.ok ? 'finished ' + r.finished + ' order-timers' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
+    }));
+    cheatRegen.addEventListener('click', () => runOp(() => {
+      const r = window.FMV.finishTimers('regenerate_');
+      log('regen: ' + (r.ok ? 'finished ' + r.finished + ' regen-timers' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
+    }));
     sortBtn.addEventListener('click', () => runOp(sortBoard));
     fillBtn.addEventListener('click', () => runOp(phaseFill));
     clearBtn.addEventListener('click', () => runOp(clearOnce));
@@ -1595,29 +1571,24 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     });
     const tabFarm = el.querySelector('#fmv-tab-farm');
     const tabAuto = el.querySelector('#fmv-tab-auto');
+    const tabCheat = el.querySelector('#fmv-tab-cheat');
     const paneFarm = el.querySelector('#fmv-pane-farm');
     const paneAuto = el.querySelector('#fmv-pane-auto');
+    const paneCheat = el.querySelector('#fmv-pane-cheat');
     const selectTab = (name) => {
       const isAuto = name === 'auto';
-      paneFarm.style.display = isAuto ? 'none' : '';
+      const isCheat = name === 'cheat';
+      paneFarm.style.display = (isAuto || isCheat) ? 'none' : '';
       paneAuto.style.display = isAuto ? '' : 'none';
-      tabFarm.classList.toggle('on', !isAuto);
+      paneCheat.style.display = isCheat ? '' : 'none';
+      tabFarm.classList.toggle('on', !isAuto && !isCheat);
       tabAuto.classList.toggle('on', isAuto);
+      tabCheat.classList.toggle('on', isCheat);
     };
     tabFarm.addEventListener('click', () => selectTab('farm'));
     tabAuto.addEventListener('click', () => selectTab('auto'));
-    const syncClearTypes = () => {
-      clearTypesRow.style.display = chkClear.checked ? '' : 'none';
-    };
+    tabCheat.addEventListener('click', () => selectTab('cheat'));
     chkOrders.addEventListener('change', function () { prefs.orders = chkOrders.checked; savePrefs(); });
-    chkClear.addEventListener('change', function () {
-      prefs.clear = chkClear.checked;
-      syncClearTypes();
-      savePrefs();
-    });
-    chkTree.addEventListener('change', function () { prefs.clearTree = chkTree.checked; savePrefs(); });
-    chkRock.addEventListener('change', function () { prefs.clearRock = chkRock.checked; savePrefs(); });
-    chkToolbox.addEventListener('change', function () { prefs.clearToolbox = chkToolbox.checked; savePrefs(); });
   }
 
   // ── install ──────────────────────────────────────────────────────────────
@@ -1628,8 +1599,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     harvest: () => runOp(harvestAll),
     fill: () => runOp(phaseFill),
     planMerge: () => runOp(phasePlanMerge),
-    autoOrders: () => { prefs.orders = true; prefs.clear = false; savePrefs(); return autoAll(); },
-    autoClear: () => { prefs.orders = false; prefs.clear = true; savePrefs(); return autoAll(); },
+    autoOrders: () => { prefs.orders = true; savePrefs(); return autoAll(); },
     visit: () => runOp(collectVisits),
     removeHalfCrates: () => runOp(removeHalfCrates),
     autoAll,
@@ -1645,7 +1615,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     resetStats: statsReset,
     running: () => state.running,
     busy: () => state.busy || state.running,
-    version: window.__FMV_version || '1.7.3'
+    version: window.__FMV_version || '1.8.0'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

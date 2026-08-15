@@ -200,6 +200,116 @@ export const FMV_HELPER_SOURCE = `(function(){
     return { ok: true, moved: [ea.getBlueprintID(), eb.getBlueprintID()] };
   }
 
+  // ── exploit helpers ───────────────────────────────────────────────────────
+  // Verified against the live build: the game's reward pipeline
+  // (rewardService._parseAndClaimRewards) grants inventory currency and
+  // autosave.forceSave()s the result — the backend is client-authoritative
+  // for inventory, so grants persist. Object rewards become storage bubbles
+  // (world entities) that the game collects via the storageBubbleTap family.
+  const VALID_INV_KEYS = ['coins', 'gems', 'energy', 'crates', 'wood', 'stone'];
+
+  // grant inventory currency: [{key, amount}, ...] -> autosaved
+  async function grant(rewards) {
+    const R = window.FMV.services().rewardService;
+    if (!R || typeof R._parseAndClaimRewards !== 'function')
+      return { ok: false, reason: 'rewardService not found' };
+    const list = [];
+    for (const r of rewards || []) {
+      if (!r || r.key === undefined || r.amount === undefined) continue;
+      if (VALID_INV_KEYS.indexOf(r.key) === -1)
+        return { ok: false, reason: 'invalid key ' + r.key + ' (valid: ' + VALID_INV_KEYS.join(',') + ')' };
+      list.push({ key: r.key, amount: Math.max(0, Math.floor(Number(r.amount) || 0)) });
+    }
+    if (!list.length) return { ok: false, reason: 'no rewards' };
+    try {
+      await R._parseAndClaimRewards(list, null, null);
+      return { ok: true, granted: list };
+    } catch (e) {
+      return { ok: true, granted: list, note: 'strategy error (grant still applied): ' + (e && e.message) };
+    }
+  }
+
+  // spawn blueprint objects as storage bubbles: [{key, amount}, ...]
+  function spawn(blueprints) {
+    const R = window.FMV.services().rewardService;
+    const bc = window.FMV.rootServices().blueprintCollection;
+    if (!R || typeof R._claimObjectRewards !== 'function')
+      return { ok: false, reason: 'rewardService not found' };
+    const list = [];
+    for (const b of blueprints || []) {
+      if (!b || typeof b.key !== 'string') continue;
+      let has = false;
+      try { has = bc.hasBlueprint(b.key); } catch (e) {}
+      if (!has) return { ok: false, reason: 'not a blueprint: ' + b.key };
+      list.push({ key: b.key, amount: Math.max(1, Math.floor(Number(b.amount) || 1)) });
+    }
+    if (!list.length) return { ok: false, reason: 'no blueprints' };
+    try {
+      R._claimObjectRewards(list);
+      return { ok: true, spawned: list };
+    } catch (e) { return { ok: false, reason: 'spawn failed: ' + (e && e.message) }; }
+  }
+
+  // tap every storage bubble (the game's own tap path; queues while hidden)
+  function collectBubbles() {
+    const S = services();
+    const I = window.FMV.I();
+    if (!S) return { ok: false, reason: 'services not ready' };
+    let router = null;
+    try {
+      const subs = S.interactionService.onGestureTap._subscribers;
+      for (const s of subs || []) {
+        if (s && s.context && typeof s.context._simulateClick === 'function') { router = s.context; break; }
+      }
+    } catch (e) {}
+    if (!router) return { ok: false, reason: 'no tap router' };
+    let tapped = 0;
+    for (const e of (S.world._gameObjects || [])) {
+      try {
+        if (e.hasBehavior && e.hasBehavior(I.StorageBubble)) { router._simulateClick(e); tapped++; }
+      } catch (e2) {}
+    }
+    return { ok: true, tapped };
+  }
+
+  // instantly finish every ACTIVE timer whose label starts with the prefix
+  // (crates: 'RewardCrateCooldown', productions: 'Order_', regen: 'regenerate_')
+  function finishTimers(labelPrefix) {
+    try {
+      const timers = window.FMV.rootServices().timer._timerModel._timers;
+      let n = 0;
+      for (const [, e] of timers) {
+        if (e._state !== 'ACTIVE') continue;
+        if (labelPrefix && String(e._label || '').indexOf(labelPrefix) !== 0) continue;
+        try { e._remaining = 0; e._onFinish(); n++; } catch (e2) {}
+      }
+      return { ok: true, finished: n };
+    } catch (e) { return { ok: false, reason: e.message }; }
+  }
+
+  // rig the crate-open queue: the next N crates open into the given blueprint
+  function rigCrates(blueprint, n) {
+    try {
+      const C = window.FMV.services().crateContent;
+      const bc = window.FMV.rootServices().blueprintCollection;
+      if (!C || typeof C.queueContent !== 'function') return { ok: false, reason: 'crateContent not found' };
+      if (!bc.hasBlueprint(blueprint)) return { ok: false, reason: 'not a blueprint: ' + blueprint };
+      C.queueContent(blueprint, Math.max(1, Math.floor(Number(n) || 1)));
+      return { ok: true, rigged: blueprint + ' x' + n };
+    } catch (e) { return { ok: false, reason: e.message }; }
+  }
+
+  // make the game's fast-forward buttons free (dev flag the game ships with)
+  function freeFastForward(on) {
+    try {
+      const F = window.FMV.rootServices().fastForward;
+      if (!F || typeof F.setFreeTrackerStatus !== 'function') return { ok: false, reason: 'fastForward not found' };
+      F.setFreeTrackerStatus(on !== false);
+      return { ok: true, free: on !== false };
+    } catch (e) { return { ok: false, reason: e.message }; }
+  }
+
   window.FMV = { board, merge, move, swap, remove, spawnCrate, services, req, I, root, rootServices,
-                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.7.3' };
+                 grant, spawn, collectBubbles, finishTimers, rigCrates, freeFastForward,
+                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.8.0' };
 })();`;

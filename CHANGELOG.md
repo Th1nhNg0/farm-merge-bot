@@ -5,6 +5,35 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-08-15
+
+### Added
+
+- **Cheat tab + exploit helpers** (research-verified 2026-08-15: the backend
+  is client-authoritative — grants survive autosaves and full game restarts):
+  - `FMV.grant(rewards)` — print inventory currency via the game's own
+    `rewardService._parseAndClaimRewards` (validated keys: coins, gems,
+    energy, crates, wood, stone) + `autosave.forceSave()`.
+  - `FMV.spawn(blueprints)` / `FMV.collectBubbles()` — spawn any blueprint as
+    a storage bubble (saved to `StorageBubbleModel`, restored on reload;
+    collect via tap, works when the tab is visible).
+  - `FMV.rigCrates(blueprint, n)` — queue the next crate opens to yield a
+    chosen blueprint (`CrateContentModel._queue`, persisted).
+  - `FMV.finishTimers(labelPrefix)` — instantly finish production (`Order_*`),
+    regen (`regenerate_*`) and crate (`RewardCrateCooldown`) timers via the
+    game's own completion path.
+  - `FMV.freeFastForward(on)` — the game's dev flag
+    (`fastForward.setFreeTrackerStatus`) makes fast-forward buttons free.
+  - Menu Cheat tab: Coins/Gems/Energy/Crates grants, Gold crate spawn ×5,
+    Rig Gold ×3, Open Crates, Finish Prod, Finish Regen, FF Free.
+
+### Removed
+
+- **Auto Clear automation**: the Auto-tab checkbox + Tree/Rock/Toolbox
+  selectors and the `runClearLoop` loop are gone. The manual ⛏ Clear button
+  stays (one-shot, now scans all three source types per press — the per-type
+  checkboxes were the auto-loop's selector).
+
 ## [1.7.3] — 2026-08-15
 
 ### Fixed
