@@ -28,6 +28,14 @@ globalThis.FMVPlan = (function () {
     return counts;
   }
 
+  // Tiers are separated from the id by the LAST underscore. Several valid
+  // families (for example reward_crate_key) contain underscores themselves.
+  function splitItemKey(k) {
+    const s = String(k);
+    const i = s.lastIndexOf("_");
+    return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + 1)];
+  }
+
   // ── never-move rule (family-based) ─────────────────────────────────────────
   // Items are skipped by sort/plan+merge when they have no item id (buildings)
   // or their family has no mergeable level (tree/rock/area/premium land,
@@ -153,7 +161,7 @@ globalThis.FMVPlan = (function () {
     //    (16 -> 15+1, 12 -> 10+2) instead of being skipped entirely
     for (const k of Object.keys(counts)) {
       if (counts[k] < 5) continue;
-      const [id, tier] = k.split("_");
+      const [id, tier] = splitItemKey(k);
       for (const comp of connectedComponents(items, { id, tier })) {
         let restMap = new Map(comp.map((c) => [c.col + ":" + c.row, c]));
         while (restMap.size >= 5) {
@@ -187,12 +195,12 @@ globalThis.FMVPlan = (function () {
     const keys = Object.entries(counts)
       .filter(([, n]) => n >= 5)
       .map(([k, n]) => {
-        const [id, tier] = k.split("_");
+        const [id, tier] = splitItemKey(k);
         return [k, n, connectedComponents(items, { id, tier }).length];
       })
       .sort((a, b) => a[2] - b[2] || b[1] - a[1]);
     for (const [k] of keys) {
-      const [id, tier] = k.split("_");
+      const [id, tier] = splitItemKey(k);
       const avail = () => items.filter((c) => c.id === id && c.tier === tier &&
         !usedCells.has(c.col + ":" + c.row) && !usedItems.has(c.col + ":" + c.row));
       let n = avail().length;

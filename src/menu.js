@@ -76,6 +76,18 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   const SETTLE_MIN = 150;
   const SETTLE_MAX = 1500;
   const settleSleep = async () => sleep(await adaptSettle(SETTLE_MIN, SETTLE_MAX));
+  // Keep harvest work in short tasks so a large crop board cannot monopolize
+  // the game's main thread while direct behaviors/clicks are being queued.
+  const HARVEST_ACTION_BATCH = 8;
+  const createHarvestBreather = () => {
+    let actions = 0;
+    return async () => {
+      actions++;
+      if (actions < HARVEST_ACTION_BATCH) return;
+      actions = 0;
+      await sleep(0);
+    };
+  };
   const state = { busy: false, running: false, stop: false, rounds: 0, opStart: null, mode: null };
   const stats = { merged: 0, moved: 0, swapped: 0, crates: 0, harvested: 0,
     lootCollected: 0, groundCollected: 0, sourcesCleared: 0, energySpent: 0,
@@ -95,6 +107,11 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   const CLEAR_SOURCES = new Set(['tree', 'rock', 'toolbox']);
   // payments per clear turn — the user asked for a controlled pace
   const CLEAR_TAP_CAP = 10;
+  // A source can take a tick to become payable after release/collection. Keep
+  // Auto Clear alive through that short idle window, but stop eventually when
+  // the board genuinely has nothing left to clear.
+  const CLEAR_IDLE_RETRIES = 30;
+  const CLEAR_IDLE_WAIT_MS = 1000;
   // ── logging ──────────────────────────────────────────────────────────────
   function ts() {
     const d = new Date(), p = (n) => (n < 10 ? '0' : '') + n;
@@ -438,8 +455,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   //   COLLECT  — one tap on a lootable harvestable (via _simulateClick) spawns
   //              the loot objects and consumes the crop (lootingRemovesObject).
   // The game processes each action on its next loop tick (~1 fps in background
-  // tabs), so the collect phase iterates with settle delays until no lootables
-  // remain instead of a single sweep that can race the game.
+  // tabs), so harvest runs in small alternating batches: queue crops, settle,
+  // collect their loot/ground drops, then queue the next batch.
   // Readiness = no cooldown entry in the tile save model (the game writes it
   // on harvest) + hitpoints remaining.
   const getTapRouter = window.FMVUtil.getTapRouter;
@@ -484,13 +501,35 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     }
     const hasHarvestTrigger = findLootReceivedCtor();
     const tiles = FMVUtil.tileModel();
+    const breathe = createHarvestBreather();
+    const CYCLE_BATCH = HARVEST_ACTION_BATCH;
+    const MAX_CYCLES = 128;
+    const CYCLE_COLLECT_ROUNDS = 2;
+    const DRAIN_COLLECT_ROUNDS = 6;
 
-    // phase 1: harvest every READY harvestable — no tile-model cooldown
-    // (respects the game's wait between harvests), not lootable, hp remaining,
-    // and not already sent LootReceived within the pending-harvest lag window
-    // (the game writes the cooldown only after it processes the queued add).
     let harvested = 0, cooling = 0, depleted = 0;
-    if (hasHarvestTrigger) {
+    let collected = 0, ground = 0, failed = 0;
+    let settle = null;
+    const getSettle = async () => {
+      if (settle === null) settle = await adaptSettle(SETTLE_MIN, SETTLE_MAX);
+      return settle;
+    };
+    const prunePending = () => {
+      if (pendingHarvests.size <= 64) return;
+      const now = Date.now();
+      for (const [k, t] of pendingHarvests) {
+        if (now - t > LAG_WINDOW) pendingHarvests.delete(k);
+      }
+    };
+
+    // Find only a snapshot of ready crops. Harvesting is deliberately capped
+    // per cycle so drops are collected before another crop batch is queued.
+    const scanReady = () => {
+      const ready = [];
+      let coolingSeen = 0;
+      let depletedSeen = 0;
+      const now = Date.now();
+      if (!hasHarvestTrigger) return { ready, cooling: 0, depleted: 0 };
       for (const cell of S.mapGrid._cells.values()) {
         if (state.stop) break;
         if (!cell || !cell.content) continue;
@@ -498,72 +537,119 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         if (!e.hasBehavior || !e.hasBehavior(I.Harvestable)) continue;
         if (e.hasBehavior(I.Lootable)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
-        if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
+        if (hp && typeof hp.current === 'number' && hp.current <= 0) { depletedSeen++; continue; }
         const tile = FMVUtil.tileAt(tiles, cell.column, cell.row);
-        if (tile && tile.cooldown) { cooling++; continue; }
+        if (tile && tile.cooldown) { coolingSeen++; continue; }
         const pendingAt = pendingHarvests.get(e);
-        if (pendingAt && Date.now() - pendingAt < LAG_WINDOW) { cooling++; continue; }
-        if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
-        try { e.addBehavior(new lootReceivedCtor({})); pendingHarvests.set(e, Date.now()); harvested++; } catch (e2) {
+        if (pendingAt && now - pendingAt < LAG_WINDOW) { coolingSeen++; continue; }
+        ready.push({ cell: cell, entity: e });
+      }
+      return { ready, cooling: coolingSeen, depleted: depletedSeen };
+    };
+
+    const queueHarvestBatch = async (ready) => {
+      let added = 0;
+      for (const r of ready) {
+        if (state.stop || added >= CYCLE_BATCH) break;
+        const cell = r.cell;
+        const e = r.entity;
+        if (!cell || cell.content !== e) { await breathe(); continue; }
+        if (!e.hasBehavior(I.Harvestable) || e.hasBehavior(I.Lootable)) { await breathe(); continue; }
+        const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
+        if (hp && typeof hp.current === 'number' && hp.current <= 0) { await breathe(); continue; }
+        const tile = FMVUtil.tileAt(tiles, cell.column, cell.row);
+        if (tile && tile.cooldown) { await breathe(); continue; }
+        const pendingAt = pendingHarvests.get(e);
+        if (pendingAt && Date.now() - pendingAt < LAG_WINDOW) { await breathe(); continue; }
+        try {
+          e.addBehavior(new lootReceivedCtor({}));
+          pendingHarvests.set(e, Date.now());
+          harvested++;
+          added++;
+        } catch (e2) {
           log('harvest fail ' + cell.column + ':' + cell.row, 'warn');
         }
-        if (harvested % 20 === 0) await sleep(0);
+        await breathe();
       }
-      if (pendingHarvests.size > 64) {
-        const now = Date.now();
-        for (const [k, t] of pendingHarvests) {
-          if (now - t > LAG_WINDOW) pendingHarvests.delete(k);
-        }
-      }
-    }
+      prunePending();
+      return added;
+    };
 
-    // phase 2: collect — keep tapping lootable harvestables (the harvest
-    // results, plus leftovers) and GROUND COLLECTABLES (the produced items
-    // that land on empty cells as bubbles) until none remain; each round
-    // waits for the game to process the previous round's actions. The settle
-    // time adapts to the game's measured tick rate (~66ms when visible,
-    // ~1000ms when throttled in a background tab) so visible runs are fast.
-    let collected = 0;
-    let ground = 0;
-    let failed = 0;
-    const settle = await adaptSettle(SETTLE_MIN, SETTLE_MAX);
-    if (harvested > 0) await sleep(settle);
-    for (let round = 0; round < 6 && !state.stop; round++) {
+    const scanDrops = () => {
       const lootables = [];
       const collectables = [];
       for (const cell of S.mapGrid._cells.values()) {
         if (!cell || !cell.content) continue;
         const e = cell.content;
-        if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) {
-          if (!e.hasBehavior(I.Harvestable)) continue;
-          if (!e.hasBehavior(I.Lootable)) continue;
+        const lootable = e.hasBehavior && e.hasBehavior(I.Lootable);
+        if (lootable) {
+          if (e.hasBehavior(I.Collectable) || e.hasBehavior(I.Harvestable)) {
+            lootables.push({ e: e, cell: cell });
+          }
+          continue;
         }
-        const rec = { e: e, col: cell.column, row: cell.row };
-        if (e.hasBehavior(I.Lootable)) lootables.push(rec);
-        else if (FMVUtil.isProductCollectable(e, I)) collectables.push(rec);
+        if (!e.hasBehavior || !e.hasBehavior(I.Collectable)) continue;
+        if (FMVUtil.isProductCollectable(e, I)) collectables.push({ e: e, cell: cell });
       }
-      if (!lootables.length && !collectables.length) break;
-      // guard: the board shifts while we run — never tap a stale reference
-      // (the entity may have moved or been consumed; tapping it would hit
-      // whatever the game now resolves at that cell)
-      const atCell = (r) => {
-        const c = S.mapGrid.getCell(r.col, r.row);
-        return c && c.content === r.e;
-      };
-      for (const r of lootables) {
-        if (state.stop) break;
-        if (!atCell(r) || !r.e.hasBehavior(I.Lootable)) { failed++; continue; }
-        try { tapRouter._simulateClick(r.e); collected++; } catch (e2) { failed++; }
-        if (collected % 20 === 0) await sleep(0);
+      return { lootables, collectables };
+    };
+
+    const collectDrops = async (roundLimit) => {
+      let total = 0;
+      for (let round = 0; round < roundLimit && !state.stop; round++) {
+        const found = scanDrops();
+        if (!found.lootables.length && !found.collectables.length) break;
+        let actions = 0;
+        const atCell = (r) => r.cell && r.cell.content === r.e;
+        const collectList = async (records, kind) => {
+          let handled = 0;
+          for (const r of records) {
+            if (state.stop || handled >= CYCLE_BATCH) break;
+            if (!atCell(r) || !r.e.hasBehavior(kind === 'loot' ? I.Lootable : I.Collectable)) {
+              failed++;
+              await breathe();
+              continue;
+            }
+            try {
+              tapRouter._simulateClick(r.e);
+              if (kind === 'loot') collected++; else ground++;
+              handled++;
+              actions++;
+              total++;
+            } catch (e2) {
+              failed++;
+            }
+            await breathe();
+          }
+        };
+        // Pick up already-landed product bubbles first, then pop new harvest
+        // lootables. The next round catches items spawned by those pops.
+        await collectList(found.collectables, 'ground');
+        await collectList(found.lootables, 'loot');
+        if (!actions) break;
+        await sleep(await getSettle());
       }
-      for (const r of collectables) {
-        if (state.stop) break;
-        if (!atCell(r) || !r.e.hasBehavior(I.Collectable)) { failed++; continue; }
-        try { tapRouter._simulateClick(r.e); ground++; } catch (e2) { failed++; }
-        if (ground % 20 === 0) await sleep(0);
+      return total;
+    };
+
+    let cycles = 0;
+    while (!state.stop && cycles < MAX_CYCLES) {
+      cycles++;
+      const scan = scanReady();
+      if (!scan.ready.length) {
+        cooling += scan.cooling;
+        depleted += scan.depleted;
+        break;
       }
-      if (lootables.length + collectables.length > 0) await sleep(settle);
+      const added = await queueHarvestBatch(scan.ready);
+      if (!added) break;
+      await sleep(await getSettle());
+      await collectDrops(CYCLE_COLLECT_ROUNDS);
     }
+    if (!state.stop && cycles >= MAX_CYCLES) log('harvest cycle cap', 'warn');
+    if (!state.stop && harvested > 0) await sleep(await getSettle());
+    if (!state.stop) await collectDrops(DRAIN_COLLECT_ROUNDS);
+
     log('harvest: ' + harvested + ' harvest · ' + collected + ' loot · ' + ground + ' ground' +
       ' · ' + cooling + ' cd' +
       (depleted ? ' · ' + depleted + ' dep' : '') +
@@ -666,23 +752,32 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   }
 
   // ── Auto Clear (toggle): clear sources as FAST as possible until a
-  //    terminal reason — energy out, board full, nothing ready, collected
-  //    only. Cooldowns are skipped inside clearOnce (the game's own timer
-  //    finish path), so nothing is waited out. Transient blockers (tap
-  //    services rebuilding, workers held) retry with short pauses; energy
-  //    regen is NOT waited for — the loop stops and the user re-triggers.
+  //    terminal reason — energy out or board full. Cooldowns are skipped
+  //    inside clearOnce; transient 'nothing ready'/'collected only' gaps
+  //    retry automatically because source release/collection can take a game tick.
   async function autoClearFast() {
     let cycle = 0;
+    let idleRetries = 0;
     while (state.running && !state.stop) {
       cycle++;
       log('clear cyc ' + cycle, 'ok');
       const reason = await clearOnce();
+      if (reason === 'nothing ready' || reason === 'collected only') {
+        idleRetries++;
+        if (idleRetries >= CLEAR_IDLE_RETRIES) {
+          log('auto clear stop: nothing ready after ' + idleRetries + ' retries', 'warn');
+          break;
+        }
+        await sleep(CLEAR_IDLE_WAIT_MS);
+        continue;
+      }
       if (reason === 'not focused' || reason === 'no tap services' || reason === 'no router' ||
           reason === 'no free workers') {
         await sleep(1000); // transient — retry shortly
         continue;
       }
       if (reason) { log('auto clear stop: ' + reason, 'warn'); break; }
+      idleRetries = 0;
       await sleep(250); // as fast as the game's tick allows
     }
   }
@@ -726,6 +821,23 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   // behavior-family registries on onBehaviorAdded; calling them directly IS
   // the game's own tap action (no popouts, no click simulation).
   let paySvc = null, lootSvc = null, paySvcFor = null;
+  function cachedTapServicesValid(S) {
+    if (!paySvc || !lootSvc || paySvcFor !== S) return false;
+    let payFound = false;
+    let lootFound = false;
+    FMVUtil.forEachCell(S, (cell) => {
+      if (!cell.content) return;
+      let ev = null;
+      try { ev = cell.content.onBehaviorAdded; } catch (e) { return; }
+      FMVUtil.walkBehaviorRegistries(ev, (reg, types, sub) => {
+        if (sub === paySvc) payFound = true;
+        if (sub === lootSvc) lootFound = true;
+        if (payFound && lootFound) return false;
+      });
+      if (payFound && lootFound) return false;
+    });
+    return payFound && lootFound;
+  }
   // ResourceGate ctor (module 10295 'sh' in this build, discovered
   // structurally): the payment consumes the gate (removeBehavior) and the
   // game's re-arm path never fires in this build, so we re-add it ourselves
@@ -758,7 +870,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     // registries are rebuilt as subsystems spawn/die / the farm changes —
     // the cached contexts are only valid while the services object is the
     // same one they were discovered on (never trust a cross-farm cache)
-    if (paySvc && lootSvc && paySvcFor === S) return true;
+    if (cachedTapServicesValid(S)) return true;
     let pay = null, loot = null;
     FMVUtil.forEachCell(S, (cell) => {
       if (!cell.content) return;
@@ -839,7 +951,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
           lootables.push({ entity: e, col: cell.column, row: cell.row });
           continue;
         }
-        const rg = e.hasBehavior(I.ResourceGate) ? e.getBehavior(I.ResourceGate) : null;
+        let rg = e.hasBehavior(I.ResourceGate) ? e.getBehavior(I.ResourceGate) : null;
         // previously-paid sources lost their ResourceGate (the payment consumes
         // it and the game's re-arm never fires in this build) — re-add it from
         // the mapSource steps config so the source is payable again
@@ -884,7 +996,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     let energy = readEnergy();
     const energyBefore = energy;
     if (energy < cands[0].cost) {
-      return (collected ? 'collected only' : 'energy out');
+      return 'energy out';
     }
     let tapped = 0;
     let noWorkers = 0;
@@ -1394,7 +1506,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       + '</div>'
       + '<div class="lbl">Speed</div>'
       + '<div class="btns">'
-      + '<button id="fmv-cheat-ff" title="make fast-forward buttons free (session flag)">⚡ FF Free</button>'
       + '<button id="fmv-cheat-regen" title="instantly finish energy/gems/crates regen timers">⏩ Finish Regen</button>'
       + '</div>'
       + '</div>'
@@ -1537,7 +1648,11 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     dot = el.querySelector('.dot');
     dot.title = 'stop current op';
     dot.style.cursor = 'pointer';
-    dot.addEventListener('click', () => { if (window.FMV && window.FMV.menu) window.FMV.menu.stop(); });
+    dot.addEventListener('pointerdown', (e) => e.stopPropagation());
+    dot.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.FMV && window.FMV.menu) window.FMV.menu.stop();
+    });
     autoOrdersBtn = el.querySelector('#fmv-auto-orders');
     autoClearBtn = el.querySelector('#fmv-auto-clear');
     sortBtn = el.querySelector('#fmv-sort');
@@ -1553,7 +1668,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     const cheatGems = el.querySelector('#fmv-cheat-gems');
     const cheatEnergy = el.querySelector('#fmv-cheat-energy');
     const cheatCrates = el.querySelector('#fmv-cheat-crates');
-    const cheatFF = el.querySelector('#fmv-cheat-ff');
     const cheatRegen = el.querySelector('#fmv-cheat-regen');
     logEl.current = el.querySelector('.log');
     const body = el.querySelector('.body');
@@ -1601,10 +1715,6 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     cheatGems.addEventListener('click', cheatGrant('gems', 1000));
     cheatEnergy.addEventListener('click', cheatGrant('energy', 200));
     cheatCrates.addEventListener('click', cheatGrant('crates', 20));
-    cheatFF.addEventListener('click', () => runOp(() => {
-      const r = window.FMV.freeFastForward(true);
-      log('FF: ' + (r.ok ? 'fast-forward now free (session)' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');
-    }));
     cheatRegen.addEventListener('click', () => runOp(() => {
       const r = window.FMV.finishTimers('regenerate_');
       log('regen: ' + (r.ok ? 'finished ' + r.finished + ' regen-timers' : 'FAIL ' + r.reason), r.ok ? 'ok' : 'warn');

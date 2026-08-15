@@ -5,6 +5,32 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] — 2026-08-15
+
+### Changed
+
+- **Lower-lag harvest cycles**: harvest now queues small crop batches,
+  settles, collects loot and ground drops, then continues with the next batch
+  instead of filling the board with pending harvest drops first.
+
+### Fixed
+
+- **Key/chest merges**: planner item IDs containing underscores (such as
+  `reward_crate_key`) are now parsed using the final underscore as the tier
+  separator, so key and chest families can merge.
+- **Auto Clear retries**: temporary `nothing ready` / `collected only` gaps now
+  retry with a bounded delay instead of stopping immediately; ResourceGate
+  re-arming and tap-service cache validation are fixed.
+- **State safety**: failed merges, moves, swaps, crate placement, and bubble
+  salvage now restore or retain their content instead of leaving partial or
+  lost game objects.
+- **Runtime discovery and UI**: webpack runtimes are deduplicated by identity,
+  and the stop control no longer collapses the menu.
+
+### Removed
+
+- **FF Free**: removed the Cheat-tab control and `FMV.freeFastForward()` API.
+
 ## [1.9.0] — 2026-08-15
 
 ### Added

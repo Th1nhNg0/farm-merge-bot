@@ -27,9 +27,8 @@ export const HUNTER_SOURCE = `(async function(){
   const cands = [];
   for (const r of rt) {
     try {
-      const key = String(r).slice(0, 120);
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (seen.has(r)) continue;
+      seen.add(r);
       let n = -1;
       try { n = Object.keys(r.m || {}).length; } catch (e) {}
       cands.push({ r, n });

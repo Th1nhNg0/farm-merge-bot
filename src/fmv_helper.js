@@ -105,9 +105,25 @@ export const FMV_HELPER_SOURCE = `(function(){
       const total = chain.length + 1;
       if (total % 5 !== 0)
         return { ok: false, reason: 'merge size ' + total + ' not 5/10/15 — board changed, retry', chainLen: chain.length };
-      S.world.removeGameObject(from.content);
-      to.content.addBehavior(new (MergeTriggerCtor())({ cell: to.position, chain }));
-      return { ok: true, chainLen: chain.length, total };
+      const Trigger = MergeTriggerCtor();
+      if (typeof Trigger !== 'function') return { ok: false, reason: 'merge trigger ctor not found' };
+      let trigger;
+      try { trigger = new Trigger({ cell: to.position, chain }); }
+      catch (e) { return { ok: false, reason: 'merge trigger failed: ' + e.message }; }
+      const source = from.content;
+      let removed = false;
+      try {
+        S.world.removeGameObject(source);
+        removed = true;
+        to.content.addBehavior(trigger);
+        return { ok: true, chainLen: chain.length, total };
+      } catch (e) {
+        if (removed) {
+          try { S.world.addGameObject(source); } catch (e2) {}
+          try { S.mapGrid.setContent(fromCol, fromRow, source); } catch (e2) {}
+        }
+        return { ok: false, reason: 'merge call failed: ' + e.message };
+      }
     } catch (e) { return { ok: false, reason: 'merge call failed: ' + e.message }; }
   }
 
@@ -155,6 +171,13 @@ export const FMV_HELPER_SOURCE = `(function(){
     const entity = from.content;
     const gp = entity.getBehavior(I().GridPosition);
     if (!gp) return { ok: false, reason: 'source has no GridPosition' };
+    if (!entity.position || typeof entity.position.copyFrom !== 'function')
+      return { ok: false, reason: 'source has no position' };
+    const oldGp = {
+      column: gp.column, row: gp.row,
+      data: gp._data ? { column: gp._data.column, row: gp._data.row } : null
+    };
+    const oldPos = { x: entity.position.x, y: entity.position.y, z: entity.position.z };
     // compute everything fallible BEFORE mutating the grid — a failure here
     // must not leave the board half-changed (desync + false ok:false)
     let worldPos;
@@ -162,11 +185,27 @@ export const FMV_HELPER_SOURCE = `(function(){
     catch (e) { return { ok: false, reason: 'position calc failed: ' + e.message }; }
     try {
       S.mapGrid.setContent(fromCol, fromRow, null);
+      S.mapGrid.setContent(toCol, toRow, entity);
       gp.column = toCol; gp.row = toRow;
       if (gp._data) { gp._data.column = toCol; gp._data.row = toRow; }
-      S.mapGrid.setContent(toCol, toRow, entity);
       entity.position.copyFrom(worldPos);
-    } catch (e) { return { ok: false, reason: 'move failed: ' + e.message }; }
+    } catch (e) {
+      try { S.mapGrid.setContent(toCol, toRow, null); } catch (e2) {}
+      try { S.mapGrid.setContent(fromCol, fromRow, entity); } catch (e2) {}
+      try {
+        gp.column = oldGp.column; gp.row = oldGp.row;
+        if (oldGp.data && gp._data) {
+          gp._data.column = oldGp.data.column; gp._data.row = oldGp.data.row;
+        }
+      } catch (e2) {}
+      try { entity.position.copyFrom(oldPos); }
+      catch (e2) {
+        try {
+          entity.position.x = oldPos.x; entity.position.y = oldPos.y; entity.position.z = oldPos.z;
+        } catch (e3) {}
+      }
+      return { ok: false, reason: 'move failed: ' + e.message };
+    }
     return { ok: true, moved: entity.getBlueprintID() };
   }
 
@@ -182,6 +221,19 @@ export const FMV_HELPER_SOURCE = `(function(){
     const gpa = ea.getBehavior(I().GridPosition);
     const gpb = eb.getBehavior(I().GridPosition);
     if (!gpa || !gpb) return { ok: false, reason: 'missing GridPosition' };
+    if (!ea.position || typeof ea.position.copyFrom !== 'function' ||
+        !eb.position || typeof eb.position.copyFrom !== 'function')
+      return { ok: false, reason: 'object position unavailable' };
+    const oldA = {
+      column: gpa.column, row: gpa.row,
+      data: gpa._data ? { column: gpa._data.column, row: gpa._data.row } : null,
+      pos: { x: ea.position.x, y: ea.position.y, z: ea.position.z }
+    };
+    const oldB = {
+      column: gpb.column, row: gpb.row,
+      data: gpb._data ? { column: gpb._data.column, row: gpb._data.row } : null,
+      pos: { x: eb.position.x, y: eb.position.y, z: eb.position.z }
+    };
     let wa, wb;
     try {
       wa = S.axonometricProjection.getWorldPosition(bCol, bRow);
@@ -196,7 +248,25 @@ export const FMV_HELPER_SOURCE = `(function(){
       if (gpb._data) { gpb._data.column = aCol; gpb._data.row = aRow; }
       ea.position.copyFrom(wa);
       eb.position.copyFrom(wb);
-    } catch (e) { return { ok: false, reason: 'swap failed: ' + e.message }; }
+    } catch (e) {
+      try { S.mapGrid.setContent(aCol, aRow, ea); } catch (e2) {}
+      try { S.mapGrid.setContent(bCol, bRow, eb); } catch (e2) {}
+      try {
+        gpa.column = oldA.column; gpa.row = oldA.row;
+        if (oldA.data && gpa._data) {
+          gpa._data.column = oldA.data.column; gpa._data.row = oldA.data.row;
+        }
+        gpb.column = oldB.column; gpb.row = oldB.row;
+        if (oldB.data && gpb._data) {
+          gpb._data.column = oldB.data.column; gpb._data.row = oldB.data.row;
+        }
+      } catch (e2) {}
+      try { ea.position.copyFrom(oldA.pos); }
+      catch (e2) { try { ea.position.x = oldA.pos.x; ea.position.y = oldA.pos.y; ea.position.z = oldA.pos.z; } catch (e3) {} }
+      try { eb.position.copyFrom(oldB.pos); }
+      catch (e2) { try { eb.position.x = oldB.pos.x; eb.position.y = oldB.pos.y; eb.position.z = oldB.pos.z; } catch (e3) {} }
+      return { ok: false, reason: 'swap failed: ' + e.message };
+    }
     return { ok: true, moved: [ea.getBlueprintID(), eb.getBlueprintID()] };
   }
 
@@ -227,25 +297,39 @@ export const FMV_HELPER_SOURCE = `(function(){
     let obj = null;
     try { obj = G.createFromSerializedData({ data: {}, blueprint: blueprint }); } catch (e) {}
     if (!obj) return { err: 'create failed for ' + blueprint };
+    let worldAdded = false;
+    let gridTouched = false;
+    let gp = null;
     try {
-      if (!gridPosCtor) {
+      gp = obj.getBehavior && obj.getBehavior(I.GridPosition);
+      if (!gp && !gridPosCtor) {
         for (const c of S.mapGrid._cells.values()) {
           if (!c || !c.content) continue;
-          const gp = c.content.getBehavior && c.content.getBehavior(I.GridPosition);
-          if (gp && gp.constructor) { gridPosCtor = gp.constructor; break; }
+          const existing = c.content.getBehavior && c.content.getBehavior(I.GridPosition);
+          if (existing && existing.constructor) { gridPosCtor = existing.constructor; break; }
         }
       }
-      if (gridPosCtor) obj.addBehavior(new gridPosCtor({ column: col, row: row }));
-      S.world.addGameObject(obj);
-      S.mapGrid.setContent(col, row, obj);
-      const gp = obj.getBehavior && obj.getBehavior(I.GridPosition);
-      if (gp) {
-        if (!gp._data) gp._data = {};
-        gp._data.column = col; gp._data.row = row;
+      if (!gp && typeof gridPosCtor === 'function') {
+        obj.addBehavior(new gridPosCtor({ column: col, row: row }));
+        gp = obj.getBehavior && obj.getBehavior(I.GridPosition);
       }
+      if (!gp) return { err: 'GridPosition ctor not found' };
+      if (!obj.position || typeof obj.position.copyFrom !== 'function')
+        return { err: 'object position unavailable' };
+      S.world.addGameObject(obj);
+      worldAdded = true;
+      gridTouched = true;
+      S.mapGrid.setContent(col, row, obj);
+      if (!gp._data) gp._data = {};
+      gp.column = col; gp.row = row;
+      gp._data.column = col; gp._data.row = row;
       obj.position.copyFrom(S.axonometricProjection.getWorldPosition(col, row));
       return { ok: true };
-    } catch (e) { return { err: 'place failed: ' + (e && e.message) }; }
+    } catch (e) {
+      if (gridTouched) { try { S.mapGrid.setContent(col, row, null); } catch (e2) {} }
+      if (worldAdded) { try { S.world.removeGameObject(obj); } catch (e2) {} }
+      return { err: 'place failed: ' + (e && e.message) };
+    }
   }
   const isCrateBp = (bp) => typeof bp === 'string' && bp.indexOf('reward_crate') === 0;
 
@@ -383,24 +467,38 @@ export const FMV_HELPER_SOURCE = `(function(){
     // round 0: salvage crate bubbles (direct placement — no tap, no pop)
     for (const b of scan()) {
       const sb = b.getBehavior(I.StorageBubble);
-      const crates = (sb.content || []).filter((c) => c && isCrateBp(c.blueprint));
-      if (!crates.length) continue;
+      const content = Array.isArray(sb.content) ? sb.content.slice() : [];
+      if (!content.some((c) => c && isCrateBp(c.blueprint))) continue;
+      const remaining = [];
       let n = 0;
-      for (const cell of S.mapGrid._cells.values()) {
-        if (n >= crates.length) break;
-        if (!cell || cell.content) continue;
-        const r = placeCrate(crates[n].blueprint, cell.column, cell.row);
-        if (r.ok) n++;
+      for (const item of content) {
+        if (!item || !isCrateBp(item.blueprint)) {
+          remaining.push(item);
+          continue;
+        }
+        let placed = false;
+        for (const cell of S.mapGrid._cells.values()) {
+          if (!cell || cell.content) continue;
+          const r = placeCrate(item.blueprint, cell.column, cell.row);
+          if (r.ok) { placed = true; break; }
+        }
+        if (placed) n++; else remaining.push(item);
       }
-      sb.content = []; // drained — leave the husk, the game cleans it up
-      salvaged++;
-      salvagedN += n;
+      if (n > 0) {
+        sb.content = remaining;
+        salvaged++;
+        salvagedN += n;
+      }
     }
     // rounds: tap non-crate bubbles via the game's own handler
     if (hasTap) {
       for (let round = 0; round < 8; round++) {
         let done = true;
         for (const b of scan()) {
+          const bubbleContent = b.getBehavior(I.StorageBubble).content || [];
+          // Never send a bubble containing an unplaced crate through the tap
+          // path; crate moveContentToCell hangs and can freeze the game loop.
+          if (bubbleContent.some((c) => c && isCrateBp(c.blueprint))) continue;
           const last = tappedBubbles.get(b);
           if (last && Date.now() - last < TAP_LAG_MS) continue; // already tapped, spawn in progress
           done = false;
@@ -437,17 +535,7 @@ export const FMV_HELPER_SOURCE = `(function(){
     } catch (e) { return { ok: false, reason: e.message }; }
   }
 
-  // instant-finish timers + free fast-forward flag (the game ships a dev flag)
-  function freeFastForward(on) {
-    try {
-      const F = window.FMV.rootServices().fastForward;
-      if (!F || typeof F.setFreeTrackerStatus !== 'function') return { ok: false, reason: 'fastForward not found' };
-      F.setFreeTrackerStatus(on !== false);
-      return { ok: true, free: on !== false };
-    } catch (e) { return { ok: false, reason: e.message }; }
-  }
-
   window.FMV = { board, merge, move, swap, remove, spawnCrate, services, req, I, root, rootServices,
-                 grant, spawn, collectBubbles, finishTimers, freeFastForward,
+                 grant, spawn, collectBubbles, finishTimers,
                  mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.9.0' };
 })();`;
