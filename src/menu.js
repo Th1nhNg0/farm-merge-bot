@@ -29,7 +29,13 @@ const stripCommentLines = (s) =>
 export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", import.meta.url), "utf8"))
   + "\n" + stripCommentLines(readFileSync(new URL("./util.js", import.meta.url), "utf8"))
   + "\n" + stripCommentLines(`(function(){
-  if (window.FMV && window.FMV.menu && window.FMV.menu.running && window.FMV.menu.running()) {
+  // The injected payload must never be re-evaluated while an operation is
+  // in flight: a rebuild would swap window.FMV.menu to a fresh closure and
+  // the running op would become unstoppable. Guard on BOTH states (auto
+  // loops and one-shot ops).
+  if (window.FMV && window.FMV.menu &&
+      ((window.FMV.menu.running && window.FMV.menu.running()) ||
+       (window.FMV.menu.busy && window.FMV.menu.busy()))) {
     return { ok: false, reason: 'menu running' };
   }
 
@@ -44,7 +50,9 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   let settleCacheMs = null, settleCacheAt = 0;
   function invalidateSettle() { settleCacheMs = null; settleCacheAt = 0; }
   try {
-    document.addEventListener('visibilitychange', invalidateSettle);
+    // NOTE: pause_protect (installed first) swallows document-level
+    // 'visibilitychange' registrations, so that event can never invalidate
+    // the cache here — the 30s expiry + focus/blur do the job instead.
     document.addEventListener('focus', invalidateSettle);
     document.addEventListener('blur', invalidateSettle);
   } catch (e) {}
@@ -142,8 +150,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         swaps.push([[s.col, s.row], [t.col, t.row]]);
       }
     }
-    for (const nat of naturals) merges.push({ key: nat.key, from: nat.cells[0], to: nat.cells[1] });
-    for (const g of groups) merges.push({ key: g.key, from: g.group[0], to: g.group[1] });
+    for (const nat of naturals) merges.push({ key: nat.key, from: nat.cells[0], to: nat.cells[1], size: nat.cells.length });
+    for (const g of groups) merges.push({ key: g.key, from: g.group[0], to: g.group[1], size: g.group.length });
 
     const out = { moves: [], swaps: [], merges: [] };
     const FMV = window.FMV;
@@ -171,7 +179,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
             }
           }
         } catch (e3) {}
-        const r = FMV.merge(m.from.col, m.from.row, m.to.col, m.to.row);
+        const r = FMV.merge(m.from.col, m.from.row, m.to.col, m.to.row, m.size);
         out.merges.push(r);
         if (r && r.ok) {
           const prev = stats.mergedBy[m.key];
@@ -204,8 +212,20 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       let spawned = 0;
       for (const e of board.empties) {
         if (state.stop) break;
+        // re-check every 20 spawns: the event fires even with 0 crates left
+        // (and reports ok), so stop early instead of firing into the void
+        if (spawned > 0 && spawned % 20 === 0 && cratesLeft() <= 0) {
+          log('no crates — fill stop', 'warn');
+          break;
+        }
         const r = window.FMV.spawnCrate(e.col, e.row);
-        if (r && r.ok) spawned++;
+        if (r && r.ok) {
+          spawned++;
+          if (r.cratesLeft !== undefined && Number(r.cratesLeft) <= 0) {
+            log('no crates — fill stop', 'warn');
+            break;
+          }
+        }
         if (spawned % 50 === 0) await sleep(0);
       }
       spawnedTotal += spawned;
@@ -478,7 +498,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         if (e.hasBehavior(I.Lootable)) continue;
         const hp = e.hasBehavior(I.Hitpoints) ? e.getBehavior(I.Hitpoints) : null;
         if (hp && typeof hp.current === 'number' && hp.current <= 0) { depleted++; continue; }
-        if (FMVUtil.tileAt(tiles, cell.column, cell.row) && FMVUtil.tileAt(tiles, cell.column, cell.row).cooldown) { cooling++; continue; }
+        const tile = FMVUtil.tileAt(tiles, cell.column, cell.row);
+        if (tile && tile.cooldown) { cooling++; continue; }
         const pendingAt = pendingHarvests.get(e);
         if (pendingAt && Date.now() - pendingAt < LAG_WINDOW) { cooling++; continue; }
         if (S.mapGrid.getCell(cell.column, cell.row).content !== e) continue;
@@ -669,16 +690,36 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   async function runClearLoop() {
     let cycle = 0;
     let waiting = false;
+    let idleWaits = 0;
+    let svcRetries = 0;
     while (state.running && !state.stop) {
       cycle++;
       log('clear cyc ' + cycle, 'ok');
       const reason = await clearOnce();
-      if (reason === 'not focused' || reason === 'no tap services') {
-        // game paused (background tab) or tap services mid-rebuild — wait and retry
+      if (reason === 'not focused' || reason === 'no tap services' || reason === 'no router') {
+        // game paused (background tab) or tap services mid-rebuild — wait and
+        // retry. Service absence gets a cap: if the game updated and the tap
+        // services never come back, auto-off instead of retrying forever
+        // ('not focused' never caps — under pause_protect it is unreachable).
+        waiting = false;
+        if (reason !== 'not focused' && ++svcRetries >= 60) {
+          log('clear stop: tap services unavailable for a while', 'warn');
+          break;
+        }
         await sleep(1000);
         continue;
       }
-      if (reason === 'energy out' || reason === 'collected only' || reason === 'no free workers') {
+      svcRetries = 0;
+      if (reason === 'energy out' || reason === 'collected only' || reason === 'no free workers' ||
+          reason === 'nothing ready') {
+        // transient blockers recover over time: energy regenerates, workers free
+        // up, sources regrow. 'nothing ready' gets a stall cap so a map without
+        // any selected source type eventually auto-offs instead of waiting forever.
+        if (reason === 'nothing ready' && ++idleWaits >= 8) {
+          log('clear stop: nothing ready for a while', 'warn');
+          break;
+        }
+        if (reason !== 'nothing ready') idleWaits = 0;
         if (!waiting) log('clear: ' + reason + ' — waiting', 'warn');
         waiting = true;
         const deadline = Date.now() + CLEAR_WAIT_MS * 3;
@@ -686,6 +727,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         continue;
       }
       waiting = false;
+      idleWaits = 0;
       if (reason) {
         log('clear stop: ' + reason, 'warn');
         break;
@@ -743,11 +785,14 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   // objects and damages hp). Both are reachable through the entity
   // behavior-family registries on onBehaviorAdded; calling them directly IS
   // the game's own tap action (no popouts, no click simulation).
-  let paySvc = null, lootSvc = null;
+  let paySvc = null, lootSvc = null, paySvcFor = null;
   function findTapServices() {
-    if (paySvc && lootSvc) return true;
-    let pay = null, loot = null;
     const S = window.FMV.services();
+    // registries are rebuilt as subsystems spawn/die / the farm changes —
+    // the cached contexts are only valid while the services object is the
+    // same one they were discovered on (never trust a cross-farm cache)
+    if (paySvc && lootSvc && paySvcFor === S) return true;
+    let pay = null, loot = null;
     FMVUtil.forEachCell(S, (cell) => {
       if (!cell.content) return;
       let ev = null;
@@ -762,6 +807,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     });
     paySvc = pay;
     lootSvc = loot;
+    paySvcFor = S;
     return !!(pay && loot);
   }
 
@@ -806,7 +852,7 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
           // the game's own finish path (releases the worker, marks the
           // source lootable) instead of waiting it out
           try {
-            const timers = window.FMV.root()._nonCriticalServices.timer._timerModel._timers;
+            const timers = window.FMV.rootServices().timer._timerModel._timers;
             const entry = timers.get(Number(tile.cooldown.timerId));
             if (entry && entry._state !== 'FINISHED') {
               entry._remaining = 0;
@@ -869,6 +915,11 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       if (!free) { noWorkers++; continue; }
       try {
         await paySvc._attemptPayment(c.entity, 'fmv-' + c.col + ':' + c.row, c.entity.getBehavior(I.ResourceGate));
+        // Payment marks the source lootable synchronously; the collector IS the
+        // game's tap on a lootable (spawns loot, hp -1). The game never
+        // auto-fires on the lootable flag, so there is no double-process risk;
+        // if the source is not yet lootable (async window), the collect no-ops
+        // and the next cycle's step-1 scan picks it up.
         try { lootSvc._onInteractionAdded(c.entity); } catch (e3) {}
         tapped++;
       } catch (e2) {
@@ -970,7 +1021,20 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   function findVisitServices() {
     const S = window.FMV.services();
     if (!S) return false;
-    const ctx = { visitorProc: null, visitorSim: null, ownerProc: null, ownerSim: null };
+    const ctx = { visitorProc: null, visitorSim: null, ownerProc: null, ownerSim: null, visitorFarm: false };
+    // Farm-level classification: every entity's onBehaviorAdded is the SAME
+    // shared event, so whether this farm routes taps through the visitorAction
+    // family (a friend's farm) or the friendReward family (your farm) can be
+    // decided once per call from a single entity's registry list.
+    FMVUtil.forEachCell(S, (cell) => {
+      if (!cell.content) return;
+      try {
+        FMVUtil.walkBehaviorRegistries(cell.content.onBehaviorAdded, (reg, types) => {
+          if (types.indexOf('visitorAction') !== -1) { ctx.visitorFarm = true; return false; }
+        });
+      } catch (e) {}
+      return false; // shared event — one entity is enough
+    });
     FMVUtil.forEachCell(S, (cell) => {
       if (!cell.content) return;
       let ev = null;
@@ -1016,25 +1080,16 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     return !!(ctx.visitorProc || ctx.visitorSim || ctx.ownerProc || ctx.ownerSim);
   }
 
-  // which tap path applies to an entity = which family registry is attached to
-  // its onBehaviorAdded event (the game routes taps the same way)
-  function isVisitorEntity(e) {
-    try {
-      let found = false;
-      FMVUtil.walkBehaviorRegistries(e.onBehaviorAdded, (reg, types) => {
-        if (types.indexOf('visitorAction') !== -1) { found = true; return false; }
-      });
-      return found;
-    } catch (e2) {}
-    return false;
-  }
-
+  // which tap path applies to an entity = which behavior family is attached
+  // to the (shared) onBehaviorAdded event — decided once per call in
+  // findVisitServices (ctx.visitorFarm), then per entity by its live behavior.
   async function collectVisits() {
     assertFMV();
     if (!findVisitServices()) throw new Error('friend reward services not found — game version changed?');
     const S = window.FMV.services();
     const I = window.FMV.I();
     const C = window.__FMV_visitCtx;
+    const isVisitFarm = !!C.visitorFarm;
     let processed = 0, visitorTaps = 0, ownerTaps = 0, failed = 0;
     for (let round = 0; round < 6 && !state.stop; round++) {
       const cands = [];
@@ -1047,8 +1102,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         if (!va && !fr) continue;
         // visitor path (a friend's farm): live = the action behavior is present
         // (the tap consumes VisitorAction; a lingering FriendReward is spent)
-        if (isVisitorEntity(e) && !va) continue;
-        cands.push({ e: e, col: cell.column, row: cell.row, visitor: va || isVisitorEntity(e) });
+        if (isVisitFarm && !va) continue;
+        cands.push({ e: e, col: cell.column, row: cell.row, visitor: va || isVisitFarm });
       }
       if (!cands.length) break;
       for (const c of cands) {
@@ -1171,6 +1226,12 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     if (oldMenu) oldMenu.remove();
     const oldStyle = document.getElementById('fmv-menu-style');
     if (oldStyle) oldStyle.remove();
+    // a previous install may have left its status interval running against
+    // the (now dead) old closure — drop it so only this build updates the UI
+    if (window.__FMV_statusTimer) {
+      clearInterval(window.__FMV_statusTimer);
+      window.__FMV_statusTimer = null;
+    }
     const style = document.createElement('style');
     style.id = 'fmv-menu-style';
     style.textContent = '#fmv-menu{position:fixed;top:12px;right:12px;z-index:2147483647;width:244px;'
@@ -1583,7 +1644,8 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     },
     resetStats: statsReset,
     running: () => state.running,
-    version: window.__FMV_version || '1.6.0'
+    busy: () => state.busy || state.running,
+    version: window.__FMV_version || '1.7.3'
   };
   setUI();
   log('menu v' + window.FMV.version + ' installed', 'ok');

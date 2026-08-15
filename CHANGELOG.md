@@ -5,6 +5,50 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] — 2026-08-15
+
+### Fixed
+
+- **Merge can no longer destroy items**: `FMV.merge` now verifies the source
+  object is part of the live flood-fill chain AND that the chain is a legal
+  merge size (5/10/15 — the game never fires off-multiple merges) BEFORE
+  removing the object from the world; off-size chains are skipped and
+  re-planned next round instead of losing the item. The planned chunk size is
+  passed as the flood-fill cap, so a natural chunk can no longer swallow a
+  neighbouring group's same-key items.
+- **move/swap can no longer leave the board half-changed**: world positions
+  are computed (and `gp._data` guarded) before the grid is mutated, so a
+  failed position lookup can't return `ok:false` after the board already
+  moved.
+- **Hunter resolves the root container by full export key path** instead of
+  only the first key (1.7.2 regression risk when the services collection sits
+  deeper than depth 1) and clears a stale legacy `__FMV_rootKey` on install.
+- **Auto Clear uses the discovered services key** (`FMV.rootServices()`) for
+  the cooldown-timer skip instead of a hardcoded `_nonCriticalServices`.
+- **Tap-service cache is keyed on the services object identity**: behavior-
+  family registries are rebuilt as subsystems spawn/die or the farm changes,
+  so a cross-rebuild cache no longer goes stale.
+- **Auto Clear retries transient blockers**: `'no router'` (subscriber list
+  mid-rebuild) is retried instead of stopping the loop, `'nothing ready'`
+  waits for sources to regrow (with a stall cap so empty maps still auto-off),
+  and tap-services absence auto-offs after 60 retries.
+- **CDP client fails fast instead of hanging**: a dropped websocket rejects
+  all pending requests, `send()` rejects on not-open/throwing sockets, and
+  late closes from failed connect candidates can't reject live requests.
+- **Fill stops when crates run out mid-pass** instead of firing
+  `spawnCrate` events into the void (and over-counting stats).
+- **Menu reinstall is blocked during one-shot ops** too (new `busy()` API),
+  so an in-flight op can't lose its STOP control to a rebuild.
+
+### Changed
+
+- **Visit classification is farm-level**: every entity's `onBehaviorAdded` is
+  one shared event, so visitor-vs-owner farm routing is decided with a single
+  registry walk per call instead of ~177 registry visits per entity per round.
+- **Removed dead settle-cache invalidation**: pause_protect swallows
+  `visibilitychange` registrations by design, so the menu no longer tries to
+  register one (30s expiry + focus/blur still invalidate).
+
 ## [1.7.2] — 2026-08-14
 
 ### Changed

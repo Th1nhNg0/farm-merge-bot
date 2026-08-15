@@ -76,19 +76,20 @@ export const HUNTER_SOURCE = `(async function(){
     for (const id of Object.keys(orig)) req.m[id] = orig[id];
 
     // ---- root container: walk executed exports ----
-    let root = null, rootId = null, rootKey = null, servicesKey = null;
+    let root = null, rootId = null, rootPath = null, servicesKey = null;
     let farm = null, mapId = null, mapKey = null, hc = null, hcId = null, hcKey = null;
     let boardSize = -1;
 
     const visited = new Set();
-    // topKey = first key taken from the top-level export (the walk only needs
-    // pathKeys[0] for rootKey — carry that one string instead of the array)
-    const walk = (obj, topKey, depth, srcId) => {
+    // path = key path from the module export to the container object. The
+    // full path (not just the first key) is kept so root() resolves correctly
+    // even when the services collection sits deeper than depth 1.
+    const walk = (obj, path, depth, srcId) => {
       if (depth > 3 || !obj || typeof obj !== 'object' || visited.size > 8000) return;
       if (visited.has(obj)) return;
       visited.add(obj);
       if (Array.isArray(obj)) {
-        for (const e of obj) walk(e, topKey, depth + 1, srcId);
+        for (const e of obj) walk(e, path, depth + 1, srcId);
         return;
       }
       if (!root) {
@@ -96,7 +97,7 @@ export const HUNTER_SOURCE = `(async function(){
           const c = obj[sk];
           if (c && typeof c === 'object' && isSvcColl(c)) {
             root = obj; rootId = srcId; servicesKey = sk;
-            rootKey = topKey;
+            rootPath = path.length ? path : null;
             return;
           }
         }
@@ -104,7 +105,7 @@ export const HUNTER_SOURCE = `(async function(){
       const keys = Object.keys(obj).slice(0, 40);
       for (const k of keys) {
         const v = obj[k];
-        if (v && typeof v === 'object') walk(v, topKey === null ? k : topKey, depth + 1, srcId);
+        if (v && typeof v === 'object') walk(v, path.concat(k), depth + 1, srcId);
       }
     };
 
@@ -114,7 +115,7 @@ export const HUNTER_SOURCE = `(async function(){
         try {
           const ex = req(executed[j]);
           if (!ex || typeof ex !== 'object') continue;
-          walk(ex, null, 0, executed[j]);
+          walk(ex, [], 0, executed[j]);
           if (root) break;
         } catch (e) {}
       }
@@ -165,18 +166,18 @@ export const HUNTER_SOURCE = `(async function(){
                   (hc ? 100 : 0) + (mapId !== null ? 10 : 0);
     attempts.push({
       name: (() => { const m = String(req).match(/function\\s*([_\\w$]+)/); return m ? m[1] : '?'; })(),
-      executed: executed.length, score, rootId, rootKey, mapId, hcId, boardSize
+      executed: executed.length, score, rootId, rootPath, mapId, hcId, boardSize
     });
     if (score > bestScore) {
       bestScore = score;
-      best = { req, root, rootId, rootKey, servicesKey, farm, mapId, mapKey, hc, hcId, hcKey, boardSize };
+      best = { req, root, rootId, rootPath, servicesKey, farm, mapId, mapKey, hc, hcId, hcKey, boardSize };
     }
     if (score > 1000) break; // live farm found — enough
   }
 
   if (!best) return Object.assign(out, { reason: 'no discoveries' });
   out.reqName = (() => { const m = String(best.req).match(/function\\s*([_\\w$]+)/); return m ? m[1] : null; })();
-  out.rootId = best.rootId; out.rootKey = best.rootKey; out.servicesKey = best.servicesKey;
+  out.rootId = best.rootId; out.rootPath = best.rootPath; out.servicesKey = best.servicesKey;
   out.mapId = best.mapId; out.mapKey = best.mapKey;
   out.hcId = best.hcId; out.hcKey = best.hcKey;
   out.boardSize = best.boardSize;
@@ -192,7 +193,10 @@ export const HUNTER_SOURCE = `(async function(){
   if (out.ok) {
     window.__FMV_req = best.req;
     window.__FMV_rootId = best.rootId;
-    window.__FMV_rootKey = best.rootKey;
+    window.__FMV_rootPath = best.rootPath;
+    // clear the legacy single-key form: fmv_helper's fallback must never
+    // resolve against a stale key left by a previous-session install
+    try { delete window.__FMV_rootKey; } catch (e) {}
     window.__FMV_servicesKey = best.servicesKey;
     window.__FMV_mapId = best.mapId;
     window.__FMV_mapKey = best.mapKey;

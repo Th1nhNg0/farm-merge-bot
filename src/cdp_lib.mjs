@@ -99,7 +99,8 @@ export class CDP {
         reject(new Error("ws connect error: " + url));
       };
       ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
         if (msg.id && this.pending.has(msg.id)) {
           const { resolve, reject } = this.pending.get(msg.id);
           this.pending.delete(msg.id);
@@ -107,20 +108,35 @@ export class CDP {
           else resolve(msg.result);
         }
       };
+      // Chrome died / ws dropped mid-operation: fail every pending request
+      // instead of leaving install.mjs (or any caller) hanging forever.
+      // Only the CURRENT socket may touch pending — a late close from a
+      // failed candidate attempt must not reject live requests.
+      ws.onclose = () => {
+        if (this.ws !== ws) return;
+        const err = new Error('CDP websocket closed');
+        for (const [, p] of this.pending) p.reject(err);
+        this.pending.clear();
+      };
       this.ws = ws;
     });
   }
   send(method, params = {}, sessionId = null) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error('CDP websocket not open'));
+        return;
+      }
       this.pending.set(id, { resolve, reject });
       const msg = { id, method, params };
       if (sessionId) msg.sessionId = sessionId;
-      this.ws.send(JSON.stringify(msg));
+      try { this.ws.send(JSON.stringify(msg)); }
+      catch (e) { this.pending.delete(id); reject(e); }
     });
   }
   close() {
-    this.ws.close();
+    try { if (this.ws) this.ws.close(); } catch (e) {}
   }
 }
 

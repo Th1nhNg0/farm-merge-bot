@@ -9,9 +9,20 @@
 
 export const FMV_HELPER_SOURCE = `(function(){
   const req = window.__FMV_req;
-  const rootKey = window.__FMV_rootKey;
+  const rootPath = window.__FMV_rootPath;
   const servicesKey = window.__FMV_servicesKey;
-  const root = () => rootKey ? req(window.__FMV_rootId)[rootKey] : req(window.__FMV_rootId);
+  // resolve the container by its full export key path (hunter v1.7.3+);
+  // fall back to the legacy single-key form for older hunter payloads
+  const root = () => {
+    const base = req(window.__FMV_rootId);
+    if (rootPath && rootPath.length) {
+      let o = base;
+      for (const k of rootPath) o = o[k];
+      return o;
+    }
+    const k = window.__FMV_rootKey;
+    return k ? base[k] : base;
+  };
   const rootServices = () => root()[servicesKey];
   const I = () => window.__FMV_mapKey === 'I' ? req(window.__FMV_mapId).I : req(window.__FMV_mapId);
   const MergeTriggerCtor = () => req(window.__FMV_hcId)[window.__FMV_hcKey];
@@ -62,7 +73,9 @@ export const FMV_HELPER_SOURCE = `(function(){
     return out;
   }
 
-  function merge(fromCol, fromRow, toCol, toRow) {
+  // size = planned chain size (5/10/15) from the planner; caps the live flood
+  // fill so a natural chunk cannot swallow a neighbour group's items.
+  function merge(fromCol, fromRow, toCol, toRow, size) {
     const S = services();
     if (!S) return { ok: false, reason: 'services not ready' };
     const from = S.mapGrid.getCell(fromCol, fromRow);
@@ -73,20 +86,29 @@ export const FMV_HELPER_SOURCE = `(function(){
     const mergeable = to.content.getBehavior(I().Mergeable);
     if (!mergeable) return { ok: false, reason: 'target not mergeable' };
     const spec = mergeable.targetSpecification;
+    const cap = Number.isFinite(size) && size > 0 ? size : undefined;
     let chain;
     try {
       // flood fill INCLUDES the start cell; the game's own call passes undefined
       // as 3rd arg (it is a max-length cap, not an exclusion list). The source
       // cell must be filtered out because the game would have it empty mid-drag.
-      chain = S.gridFilter.getAdjacentObjectsWithSameID(to, spec, undefined, [I().Mergeable]);
+      chain = S.gridFilter.getAdjacentObjectsWithSameID(to, spec, cap, [I().Mergeable]);
+      // Item-loss guards: the trigger merges chain + the removed source, so the
+      // source MUST be part of the flood fill (same id, adjacent-connected to
+      // the target) AND the total must be a legal merge size — the game only
+      // fires 5/10/15 merges, so an off-multiple live chain (6/7/11/16…, e.g.
+      // after a failed move/swap in the batch) would destroy the source for
+      // nothing. Skip instead: the next round re-plans.
+      if (chain.indexOf(from) === -1)
+        return { ok: false, reason: 'source not adjacent to target — board changed, retry', chainLen: chain.length };
       chain = chain.filter(c => c !== from);
-    } catch (e) { return { ok: false, reason: 'chain calc failed: ' + e.message }; }
-    if (chain.length < 2) return { ok: false, reason: 'chain too short', chainLen: chain.length };
-    try {
+      const total = chain.length + 1;
+      if (total % 5 !== 0)
+        return { ok: false, reason: 'merge size ' + total + ' not 5/10/15 — board changed, retry', chainLen: chain.length };
       S.world.removeGameObject(from.content);
       to.content.addBehavior(new (MergeTriggerCtor())({ cell: to.position, chain }));
+      return { ok: true, chainLen: chain.length, total };
     } catch (e) { return { ok: false, reason: 'merge call failed: ' + e.message }; }
-    return { ok: true, chainLen: chain.length, total: chain.length + 1 };
   }
 
   function spawnCrate(col, row) {
@@ -133,12 +155,16 @@ export const FMV_HELPER_SOURCE = `(function(){
     const entity = from.content;
     const gp = entity.getBehavior(I().GridPosition);
     if (!gp) return { ok: false, reason: 'source has no GridPosition' };
+    // compute everything fallible BEFORE mutating the grid — a failure here
+    // must not leave the board half-changed (desync + false ok:false)
+    let worldPos;
+    try { worldPos = S.axonometricProjection.getWorldPosition(toCol, toRow); }
+    catch (e) { return { ok: false, reason: 'position calc failed: ' + e.message }; }
     try {
       S.mapGrid.setContent(fromCol, fromRow, null);
       gp.column = toCol; gp.row = toRow;
-      gp._data.column = toCol; gp._data.row = toRow;
+      if (gp._data) { gp._data.column = toCol; gp._data.row = toRow; }
       S.mapGrid.setContent(toCol, toRow, entity);
-      const worldPos = S.axonometricProjection.getWorldPosition(toCol, toRow);
       entity.position.copyFrom(worldPos);
     } catch (e) { return { ok: false, reason: 'move failed: ' + e.message }; }
     return { ok: true, moved: entity.getBlueprintID() };
@@ -156,19 +182,24 @@ export const FMV_HELPER_SOURCE = `(function(){
     const gpa = ea.getBehavior(I().GridPosition);
     const gpb = eb.getBehavior(I().GridPosition);
     if (!gpa || !gpb) return { ok: false, reason: 'missing GridPosition' };
+    let wa, wb;
+    try {
+      wa = S.axonometricProjection.getWorldPosition(bCol, bRow);
+      wb = S.axonometricProjection.getWorldPosition(aCol, aRow);
+    } catch (e) { return { ok: false, reason: 'position calc failed: ' + e.message }; }
     try {
       S.mapGrid.setContent(aCol, aRow, eb);
       S.mapGrid.setContent(bCol, bRow, ea);
       gpa.column = bCol; gpa.row = bRow;
-      gpa._data.column = bCol; gpa._data.row = bRow;
+      if (gpa._data) { gpa._data.column = bCol; gpa._data.row = bRow; }
       gpb.column = aCol; gpb.row = aRow;
-      gpb._data.column = aCol; gpb._data.row = aRow;
-      ea.position.copyFrom(S.axonometricProjection.getWorldPosition(bCol, bRow));
-      eb.position.copyFrom(S.axonometricProjection.getWorldPosition(aCol, aRow));
+      if (gpb._data) { gpb._data.column = aCol; gpb._data.row = aRow; }
+      ea.position.copyFrom(wa);
+      eb.position.copyFrom(wb);
     } catch (e) { return { ok: false, reason: 'swap failed: ' + e.message }; }
     return { ok: true, moved: [ea.getBlueprintID(), eb.getBlueprintID()] };
   }
 
   window.FMV = { board, merge, move, swap, remove, spawnCrate, services, req, I, root, rootServices,
-                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.6.0' };
+                 mergeCtor: MergeTriggerCtor, version: window.__FMV_version || '1.7.3' };
 })();`;
