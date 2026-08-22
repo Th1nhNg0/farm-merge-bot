@@ -6,7 +6,7 @@
 // Chrome restart / Discord activity restart / game reload (the activity
 // restarts on frame reload, which wipes the injection).
 
-export const VERSION = "1.14.0";
+export const VERSION = "1.14.1";
 
 import { CDP, attach, evalIn, findGameTarget, WS_URL } from "./cdp_lib.mjs";
 import { POLLER_SOURCE } from "./poller.js";

@@ -5,6 +5,18 @@ All notable changes to the FMV auto-farm injection project are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1] — 2026-08-22
+
+### Fixed
+
+- **Auto Flash Deals safety**: failed deliveries no longer silently count as
+  purchases, failed refreshes abort before buying, stop requests are honored
+  around async grants, missing marketplace services stop the loop, and clearing
+  all deal selections stops the loop. Ingredient purchases are now enabled
+  when the Ingred checkbox is explicitly selected.
+- **Marketplace documentation**: corrected crate/key placement behavior and
+  documented the Auto Flash Deals controls.
+
 ## [1.14.0] — 2026-08-15
 
 ### Added

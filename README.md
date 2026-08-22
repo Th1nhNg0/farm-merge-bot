@@ -5,7 +5,7 @@ harvests, sorts, fills, handles orders and clears sources by calling the game's 
 webpack modules directly over the Chrome DevTools Protocol — **no pixel automation, no
 mouse/keyboard simulation**.
 
-Version: 1.14.0 · Discord Activity build (served from `<app-id>.discordsays.com`)
+Version: 1.14.1 · Discord Activity build (served from `<app-id>.discordsays.com`)
 
 > **Disclaimer**: unofficial fan project. Not affiliated with or endorsed by the
 > game's developers or Discord. Automation may violate the game's terms of
@@ -27,7 +27,8 @@ Version: 1.14.0 · Discord Activity build (served from `<app-id>.discordsays.com
 | **Auto Orders** | Loop toggle: claims completed orders, starts affordable ones and finishes their production timers instantly (never self-stops) |
 | **Auto Clear** | Loop toggle: clears tree/rock/toolbox sources fast (cooldowns skipped, workers force-released), with a per-cycle merge pass |
 | **Visit** | Auto-collects friend-reward bubbles on your farm or a friend's (visitor/owner tap paths) |
-| **Flash Deals** | Cheat tab: refreshes + buys all non-harvest flash-deal stock (deficits auto-granted) |
+| **Flash Deals** | Cheat tab: refreshes + buys all non-harvest flash-deal stock (crate/key rewards are placed directly; other goods land in storage bubbles) |
+| **Auto Flash Deals** | Loop toggle: refreshes deals and buys the selected deal types (Ingred / Gen / Mat / Chest / Key / Greenhouse) until stopped; ingredient purchases are opt-in |
 | **Cheat tab** | Currency grants (coins/gems/energy/crates — client-authoritative backend, persist), gold crate spawn ×5, rigged opens, instant production/regen/crate-timer finish |
 | **Background-tab protection** | The game keeps ticking while the tab is hidden (visibility fake + rAF bridge + Chrome background flags) |
 
@@ -129,7 +130,8 @@ of the game window** — no node scripts needed for day-to-day use:
 | Button | What it does |
 |---|---|
 | `💰 Coins +100k` `💎 Gems +1k` `⚡ Energy +1000` `📦 Crates +1000` | Grant inventory currency through the game's own reward pipeline (client-authoritative backend — grants persist through autosaves and restarts) |
-| `🛒 Flash Deals` | Refreshes the marketplace flash deals (re-roll, re-arm the 4h timer, refill stock), then buys every remaining unit of stock. Harvest-product and crate deals are skipped (crates must never ride the storage-bubble path); gem/coin deficits are auto-granted; goods land in storage bubbles |
+| `🛒 Flash Deals` | Refreshes the marketplace flash deals (re-roll, re-arm the 4h timer, refill stock), then buys every remaining non-harvest unit. Crate/key rewards are placed directly on the board; other goods land in storage bubbles; gem/coin deficits are auto-granted |
+| `▶ Auto Flash Deals` | Repeats the refresh + purchase cycle until stopped. The six checkboxes select deal types; ingredient purchases are opt-in and the selection persists across reinstalls |
 | `📦 Tap Bubbles` | Collects storage bubbles at a slow, safe pace (one tap per 1.5s — fast bubble-tapping froze the game once); crate bubbles are salvaged by direct placement |
 | `⏩ Finish Regen` | Instantly finishes energy/gems/crates regeneration timers |
 

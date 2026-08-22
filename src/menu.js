@@ -909,11 +909,35 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
   //    chests/crates) are bought and placed DIRECTLY into empty cells — they
   //    must never ride the storage-bubble path (moveContentToCell never
   //    completes for them; 40+ crates froze the game loop once). Everything
-  //    else lands in storage bubbles via the game's own delivery; after
-  //    buying, all bubbles are collected so the goods land on the grid. If
-  //    gems/coins run short, the deficit is granted. filterIds (Set of
+  //    else lands in storage bubbles via the game's own delivery; use the
+  //    separate Tap Bubbles action to collect them safely. If gems/coins run
+  //    short, the deficit is granted. filterIds (Set of
   //    flash-deal ids) restricts the purchase to selected deal types — the
   //    auto toggle passes the menu's checkbox selection; omitted = buy all.
+  function marketplaceServicesReady() {
+    try {
+      const S = window.FMV.services();
+      const R = window.FMV.rootServices();
+      const m = S && S.marketplaceService;
+      const fds = m && m.flashDealsService;
+      return !!(S && S.mapGrid && S.storageBubble && R && R.inventory &&
+        R.blueprintCollection && m && typeof m._resetFlashDealStock === 'function' &&
+        typeof m.getStockItem === 'function' && fds &&
+        typeof fds.getFlashDealItem === 'function' &&
+        typeof fds._onFlashDealTimerFinished === 'function' && fds._model &&
+        typeof fds._model.getStock === 'function' &&
+        typeof fds._model.setStock === 'function');
+    } catch (e) { return false; }
+  }
+  async function refundMarketPayment(key, amount) {
+    if (!key || !amount) return false;
+    try {
+      const r = await window.FMV.grant([{ key: key, amount: amount }]);
+      if (r && r.ok) return true;
+      log('market refund failed for ' + amount + ' ' + key, 'err');
+    } catch (e) { log('market refund failed: ' + (e && e.message), 'err'); }
+    return false;
+  }
   async function buyAllMarketplace(filterIds) {
     assertFMV();
     const S = window.FMV.services();
@@ -925,10 +949,12 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     // board items that must be placed DIRECTLY (never the bubble tap path)
     const CRATE_FAMILY_RE = /^reward_crate_/;
     // harvest/farm products (the 'ingredient' deal pool — crops + animal
-    // produce): never buy these, the farm produces them for free
+    // produce): the one-shot skips these, while the auto toggle buys them
+    // only when the ingredient checkbox is explicitly selected
     const HARVEST_PRODUCTS = new Set(['sugarcane', 'tomato', 'sunflower', 'corn', 'soybeans',
       'carrot', 'wheat', 'coffeebeans', 'goatmilk', 'milk', 'egg', 'fur', 'wool', 'bacon',
       'pumpkin', 'potato', 'strawberry', 'blueberry', 'grape', 'melon', 'rice']);
+    const buyHarvestProducts = !!(filterIds && filterIds.has('flash_deal_ingredient'));
     const refillModelStock = (id) => {
       try {
         const e = fds.getFlashDealItem(id);
@@ -948,19 +974,29 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
       m._resetFlashDealStock();
       for (const id of FLASH_DEAL_IDS) refillModelStock(id);
       await settleSleep(); // let the game process the re-roll before buying
-    } catch (e) { log('market refresh fail: ' + (e && e.message), 'warn'); }
+    } catch (e) {
+      const msg = e && e.message ? e.message : e;
+      log('market refresh fail: ' + msg, 'warn');
+      const refreshError = new Error('market refresh failed: ' + msg);
+      refreshError.code = 'FMV_MARKET_REFRESH';
+      throw refreshError;
+    }
 
     let bought = 0, failed = 0, granted = 0, skipped = 0, placed = 0;
     for (const id of FLASH_DEAL_IDS) {
       if (state.stop) break;
       if (filterIds && !filterIds.has(id)) continue; // deselected deal type
+      let paymentDeducted = false;
+      let delivered = 0;
+      let payKey = null;
+      let need = 0;
       try {
         const entry = fds.getFlashDealItem(id); // real payment/reward for the fresh pick
         if (!entry) { skipped++; continue; }
         const reward = entry.reward || {};
         if (reward.type !== 'object' && reward.type !== 'inventory') { skipped++; continue; }
         const rewardBps = Array.isArray(reward.data) ? reward.data : [reward.data];
-        if (rewardBps.some((bp) => HARVEST_PRODUCTS.has(String(bp)))) {
+        if (!buyHarvestProducts && rewardBps.some((bp) => HARVEST_PRODUCTS.has(String(bp)))) {
           log('market skip ' + id + ': harvest product (' + rewardBps.join(',') + ') — farm makes it for free', 'warn');
           skipped++;
           continue;
@@ -969,6 +1005,25 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         // placement, everything else rides the storage-bubble path
         const crateBps = rewardBps.filter((bp) => CRATE_FAMILY_RE.test(String(bp)));
         const normalBps = rewardBps.filter((bp) => !CRATE_FAMILY_RE.test(String(bp)));
+        if (reward.type === 'object' && !crateBps.length && !normalBps.length) {
+          skipped++;
+          continue;
+        }
+        // Resolve every ordinary blueprint before payment so malformed deal
+        // data cannot consume currency before delivery is attempted.
+        let normalBubbleDefs = [];
+        if (reward.type === 'object') {
+          try {
+            normalBubbleDefs = normalBps.map((bp) => ({
+              blueprint: bp,
+              data: R.blueprintCollection.getBlueprint(bp).components
+            }));
+          } catch (e3) {
+            skipped++;
+            log('market skip ' + id + ': invalid reward blueprint', 'warn');
+            continue;
+          }
+        }
         let stock = fds._model.getStock(id);
         if (!Number.isFinite(stock) || stock < 0) stock = 1; // unset = single purchase
         if (stock === 0) { skipped++; continue; }
@@ -986,36 +1041,41 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
             continue;
           }
         }
-        const need = Number(entry.payment.amount) || 0;
-        const payKey = entry.payment.key || 'gems';
+        need = Number(entry.payment.amount) || 0;
+        payKey = entry.payment.key || 'gems';
         for (let n = 0; n < stock && !state.stop; n++) {
+          paymentDeducted = false;
+          delivered = 0;
           const have = R.inventory.getAmount(payKey);
           if (have < need) {
-            const g = await window.FMV.grant([{ key: payKey, amount: need - have }]);
+            const deficit = need - have;
+            const g = await window.FMV.grant([{ key: payKey, amount: deficit }]);
             if (!g || !g.ok) { failed++; break; }
-            granted += need - have;
+            granted += deficit;
+            if (state.stop) break;
           }
+          if (state.stop) break;
           R.inventory.deductItems([{ key: payKey, amount: need }]);
+          paymentDeducted = true;
           if (reward.type === 'inventory') {
-            await window.FMV.grant(rewardBps.map((r) => (typeof r === 'object' && r.key ? r : { key: String(r), amount: 1 })));
+            const rewardResult = await window.FMV.grant(rewardBps.map((r) => (typeof r === 'object' && r.key ? r : { key: String(r), amount: 1 })));
+            if (!rewardResult || !rewardResult.ok) throw new Error('inventory reward delivery failed');
+            delivered = rewardBps.length;
           } else {
-            const bubbles = [];
-            for (const bp of normalBps) {
-              const comps = R.blueprintCollection.getBlueprint(bp).components;
-              bubbles.push({ blueprint: bp, data: comps });
+            if (normalBubbleDefs.length) {
+              S.storageBubble.createBubbleAndShowContent(normalBubbleDefs);
+              delivered += normalBubbleDefs.length;
             }
-            if (bubbles.length) S.storageBubble.createBubbleAndShowContent(bubbles);
             // keys/chests: direct placement — the same machinery FMV.spawn
             // uses for crates (factory + GridPosition + setContent); never
             // the bubble tap path (verified: moveContentToCell hangs for
             // this family and 40+ unplaced crates froze the game loop)
             for (const bp of crateBps) {
               const sp = window.FMV.spawn([{ key: String(bp), amount: 1 }]);
-              if (sp && sp.ok && sp.placed && sp.placed[0] && sp.placed[0].amount > 0) placed++;
-              else {
-                failed++;
-                log('market: no free cell for ' + bp, 'warn');
-              }
+              if (!(sp && sp.ok && sp.placed && sp.placed[0] && sp.placed[0].amount > 0))
+                throw new Error('no free cell for ' + bp);
+              placed++;
+              delivered++;
             }
           }
           // keep BOTH stock stores consistent (the popup reads the stock
@@ -1031,6 +1091,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
         log('market: ' + id + ' x' + (stock - Math.max(0, fds._model.getStock(id))) + ' (' + need + ' ' + payKey + ' each)', 'ok');
       } catch (e2) {
         failed++;
+        if (paymentDeducted && delivered === 0 && await refundMarketPayment(payKey, need))
+          log('market: refunded failed ' + need + ' ' + payKey, 'warn');
+        else if (paymentDeducted && delivered > 0)
+          log('market: partial reward delivery; payment kept', 'warn');
         log('market fail ' + id + ': ' + (e2 && e2.message), 'warn');
       }
     }
@@ -1077,18 +1141,24 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     return ids;
   }
   async function runAutoMarketplaceLoop() {
-    if (!selectedMarketDealIds().size) {
-      log('auto market stop: no deal types selected — tick a checkbox first', 'warn');
-      return;
-    }
     let cycle = 0;
     while (state.running && !state.stop) {
+      const selected = selectedMarketDealIds();
+      if (!selected.size) {
+        log('auto market stop: no deal types selected — tick a checkbox first', 'warn');
+        break;
+      }
+      if (!marketplaceServicesReady()) {
+        log('auto market stop: marketplace services unavailable', 'warn');
+        break;
+      }
       cycle++;
       state.rounds = cycle;
       try {
-        await buyAllMarketplace(selectedMarketDealIds());
+        await buyAllMarketplace(selected);
       } catch (e) {
         log('auto market fail: ' + (e && e.message), 'warn');
+        if (e && (e.code === 'FMV_MARKET_REFRESH' || !marketplaceServicesReady())) break;
       }
       // breathe between cycles: let the game settle so the delivered goods
       // (bubbles + board placements) land before the next refresh
@@ -2096,10 +2166,10 @@ export const MENU_SOURCE = stripCommentLines(readFileSync(new URL("./plan.js", i
     resetStats: statsReset,
     running: () => state.running,
     busy: () => state.busy || state.running,
-    version: window.__FMV_version || '1.14.0'
+    version: window.__FMV_version || '1.14.1'
   };
   setUI();
-  log('menu v' + (window.__FMV_version || '1.14.0') + ' installed', 'ok');
+  log('menu v' + (window.__FMV_version || '1.14.1') + ' installed', 'ok');
   refreshStatus();
   if (!window.__FMV_statusTimer) window.__FMV_statusTimer = setInterval(refreshStatus, 2500);
   return { ok: true };
